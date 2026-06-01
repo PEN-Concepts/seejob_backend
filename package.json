@@ -1,0 +1,40 @@
+{
+  "name": "seejobrun",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "authorizenet": "^1.0.10",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "firebase-admin": "^13.5.0",
+    "googleapis": "^171.4.0",
+    "html-pdf": "^3.0.1",
+    "joi": "^17.13.3",
+    "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.11.0",
+    "mime": "^4.0.7",
+    "mime-types": "^3.0.1",
+    "moment-timezone": "^0.5.45",
+    "multer": "^1.4.5-lts.1",
+    "mysql2": "^3.10.1",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^6.10.1",
+    "path": "^0.12.7",
+    "pdfkit": "^0.17.2",
+    "uuid": "^14.0.0",
+    "winston": "^3.13.0",
+    "winston-daily-rotate-file": "^5.0.0"
+  }
+}

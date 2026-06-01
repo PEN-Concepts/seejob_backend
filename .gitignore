@@ -1,0 +1,9 @@
+/node_modules
+/logs
+
+.env
+
+.qodo
+
+config/serviceAccountKey.json
+config/serviceAccountKey.json 
