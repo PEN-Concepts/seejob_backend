@@ -1,9 +1,9 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
 const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { upload } = require("../services/fileUpload");
 const path = require("path");
@@ -36,71 +36,8 @@ client_email: Joi.string().allow('', null).optional(),
 client_phone: Joi.string().allow('', null).optional(),
 });
 
-// CREATE lead
-// router.post("/leads/create",auth.authenticateToken, async (req, res) => {
-//   try {
-//     const { error } = leadsSchema.validate(req.body);
-//     if (error) return res.status(400).json({ message: error.details[0].message });
-
-//     const {
-//       user_id , 
-//       lead_name,
-//       lead_type,
-//       lead_category,
-//       budget,
-//       bid_status,
-//       client_id,
-//       client_name,
-//       client_email,
-//       client_phone,
-//       project_street_address,
-//       project_town,
-//       project_state,
-//       project_description,
-//       project_start_date,
-//       leads_street_address,
-//       leads_town_city,
-//       leads_state,
-//       leads_zipcode,
-//       next_phase,
-//       finance_method 
-//     } = req.body;
-
-//     const created_at = getCurrentDateTime();
-
-//   const sql = `
-//     INSERT INTO leads (
-//       lead_name, lead_type, lead_category, budget, bid_status,
-//       client_id, project_street_address, project_town, project_state,
-//       project_description, project_start_date, leads_street_address,
-//       leads_town_city, leads_state, leads_zipcode, next_phase,
-//       finance_method, created_at, user_id
-//     )
-//     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-//   `;
-
-//   const values = [
-//     lead_name, lead_type, lead_category, budget, bid_status,
-//     client_id, project_street_address, project_town, project_state,
-//     project_description, project_start_date, leads_street_address,
-//     leads_town_city, leads_state, leads_zipcode, next_phase,
-//     finance_method, created_at, user_id
-//   ];
-
-
-//     await pool.query(sql, values);
-//     res.status(201).json({ message: "Lead created successfully!" });
-//     console.log('leads added',values)
-//   } catch (err) {
-//     console.error("❌ Error creating lead:", err);
-//     logger.error("Error creating lead", err);
-//     res.status(500).json({ message: "Server error", error: err.message });
-//   }
-// });
-
 router.post("/leads/create", auth.authenticateToken, async (req, res) => {
   try {
-    console.log(req.body.client_id," name", req.body.client_name);
     const { error } = leadsSchema.validate(req.body);
     if (error) return res.status(400).json({ message: error.details[0].message });
 
@@ -130,7 +67,7 @@ router.post("/leads/create", auth.authenticateToken, async (req, res) => {
 
     const created_at = getCurrentDateTime();
 
-    // ✅ CONDITION LOGIC
+    // âœ… CONDITION LOGIC
     const isManualClient = !client_id; // null or undefined
 
     const finalClientId = isManualClient ? null : client_id;
@@ -183,31 +120,10 @@ router.post("/leads/create", auth.authenticateToken, async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ Error creating lead:", err);
+    logger.error("Error creating lead:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 });
-
-// READ all leads
-// router.get("/leads/all",auth.authenticateToken,  async (req, res) => {
-//   try {
-//     const sql = `
-//       SELECT 
-//         l.*,
-//         u.name AS client_name,
-//         u.email AS client_email,
-//         u.mobile AS client_phone
-//       FROM leads l
-//       LEFT JOIN user u ON l.client_id = u.id
-//       ORDER BY l.created_at DESC
-//     `;
-//     const [rows] = await pool.query(sql);
-//     res.status(200).json(rows);
-//   } catch (err) {
-//     logger.error("Error fetching leads", err);
-//     res.status(500).json({ message: "Server error" });
-//   }
-// });
 
 // GET all leads with  user_id filter
 router.get("/leads/all/:id", auth.authenticateToken, async (req, res) => {
@@ -266,66 +182,11 @@ router.get("/leads/:id",auth.authenticateToken, async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ message: "Lead not found" });
     res.status(200).json(rows[0]);
   } catch (err) {
-    console.error("❌ ERROR in /leads/:id:", err);
+    logger.error("Error fetching lead by id:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
 
-// UPDATE full lead
-// router.put("/leads/update/:id",auth.authenticateToken, async (req, res) => {
-//   try {
-//     const { error } = leadsSchema.validate(req.body);
-//     if (error) return res.status(400).json({ message: error.details[0].message });
-
-//     const {
-//       user_id,
-//       lead_name,
-//       lead_type,
-//       lead_category,
-//       budget,
-//       bid_status,
-//       client_id,
-//       project_street_address,
-//       project_town,
-//       project_state,
-//       project_description,
-//       project_start_date,
-//       leads_street_address,
-//       leads_town_city,
-//       leads_state,
-//       leads_zipcode,
-//       next_phase,
-//       finance_method  
-//     } = req.body;
-
-//    const sql = `
-//       UPDATE leads SET 
-//         lead_name = ?, lead_type = ?, lead_category = ?, budget = ?, bid_status = ?,
-//         client_id = ?, project_street_address = ?, project_town = ?, project_state = ?,
-//         project_description = ?, project_start_date = ?, leads_street_address = ?,
-//         leads_town_city = ?, leads_state = ?, leads_zipcode = ?, next_phase = ?,
-//         user_id = ?
-//       WHERE id = ?
-//     `;
-
-//    const values = [
-//       lead_name, lead_type, lead_category, budget, bid_status,
-//       client_id,
-//       project_street_address, project_town, project_state, project_description, project_start_date,
-//       leads_street_address, leads_town_city, leads_state, leads_zipcode, next_phase,
-//       finance_method, user_id, // ✅ added
-//       req.params.id
-//     ];
-
-//     const [result] = await pool.query(sql, values);
-//     if (result.affectedRows === 0) return res.status(404).json({ message: "Lead not found" });
-
-//     res.status(200).json({ message: "Lead updated successfully!" });
-//   } catch (err) {
-//     logger.error("Error updating lead", err);
-//     res.status(500).json({ message: "Server error" });
-//   }
-// });
 router.put("/leads/update/:id", auth.authenticateToken, async (req, res) => {
   const leadId = req.params.id;
   const updates = req.body;
@@ -378,7 +239,7 @@ router.patch("/leads/update-status/:id", auth.authenticateToken, async (req, res
 
     res.status(200).json({ message: "Bid status updated successfully" });
   } catch (err) {
-    console.error("Error updating bid status", err);
+    logger.error("Error updating bid status", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -398,7 +259,7 @@ router.patch("/leads/update-phase/:id", auth.authenticateToken, async (req, res)
 
     res.status(200).json({ message: "Next phase updated successfully" });
   } catch (err) {
-    console.error("Error updating next phase", err);
+    logger.error("Error updating next phase", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -427,7 +288,7 @@ router.get('/leads/:id/comments', auth.authenticateToken, async (req, res) => {
     const [rows] = await pool.query(sql, [req.params.id]);
     res.status(200).json(rows);
   } catch (err) {
-    console.error('Error fetching comments:', err);
+    logger.error('Error fetching comments:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -449,7 +310,7 @@ router.post('/leads/:id/comments', auth.authenticateToken, async (req, res) => {
     await pool.query(sql, [lead_id, comment]);
     res.status(201).json({ message: 'Comment added successfully' });
   } catch (err) {
-    console.error('Error adding comment:', err);
+    logger.error('Error adding comment:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -471,7 +332,7 @@ router.post('/leads/:id/notes/create', async (req, res) => {
     await pool.query(sql, [lead_id, title, description]);
     res.status(201).json({ message: 'Note added successfully' });
   } catch (err) {
-    console.error('Error adding note:', err);
+    logger.error('Error adding note:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -490,7 +351,7 @@ router.get('/leads/:id/notes',  async (req, res) => {
     const [rows] = await pool.query(sql, [lead_id]);
     res.status(200).json(rows);
   } catch (err) {
-    console.error('Error fetching notes:', err);
+    logger.error('Error fetching notes:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -509,7 +370,7 @@ router.put('/leads/notes/update/:noteId', auth.authenticateToken, async (req, re
     await pool.query(sql, [title, description, noteId]);
     res.status(200).json({ message: 'Note updated successfully' });
   } catch (err) {
-    console.error('Error updating note:', err);
+    logger.error('Error updating note:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -527,7 +388,7 @@ router.delete('/leads/notes/delete/:noteId', auth.authenticateToken, async (req,
     await pool.query(sql, [noteId]);
     res.status(200).json({ message: 'Note deleted successfully' });
   } catch (err) {
-    console.error('Error deleting note:', err);
+    logger.error('Error deleting note:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -671,7 +532,7 @@ router.put('/update-budget', auth.authenticateToken, async (req, res) => {
 
     res.json({ code: '200', message: 'Budgets updated successfully' });
   } catch (error) {
-    console.error('Error updating budget:', error);
+    logger.error('Error updating budget:', error);
     res.status(500).json({ code: '500', message: 'Internal Server Error' });
   }
 });
@@ -713,7 +574,7 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) 
         lead.leads_town_city || "",
         lead.leads_state || "",
         lead.leads_zipcode || "",
-        1,  // ✅ Mark as coming from leads
+        1,  // âœ… Mark as coming from leads
         leadId
       ]
     );
@@ -728,7 +589,7 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) 
 
     res.json({ message: "Lead converted to Job successfully", jobId: newJobId });
   } catch (error) {
-    console.error(error);
+    logger.error("Error converting lead to job:", error);
     res.status(500).json({ message: "Error converting lead to job", error });
   } finally {
     if (connection) connection.release();
@@ -778,7 +639,7 @@ router.put("/leads/:id", auth.authenticateToken, async (req, res) => {
 
     res.json({ message: "Lead updated successfully" });
   } catch (err) {
-    console.error(err);
+    logger.error("Failed to update lead:", err);
     res.status(500).json({ error: "Failed to update lead" });
   }
 });
@@ -812,7 +673,7 @@ router.delete("/Delete/:id", auth.authenticateToken, async (req, res) => {
     
     res.json({ message: "Lead deleted successfully" });
   } catch (err) {
-    console.error("Error deleting lead:", err);
+    logger.error("Error deleting lead:", err);
     res.status(500).json({ error: "Failed to delete lead" });
   }
 });
@@ -860,7 +721,6 @@ router.post(
   auth.authenticateToken,
   upload.array("files", 10),
   async (req, res) => {
-    console.log(req.body);
     const { job_id, file_name, type } = req.body;
     const userId = req.user.id;
 
@@ -900,7 +760,7 @@ router.post(
         files: saved,
       });
     } catch (err) {
-      console.error(err);
+      logger.error("Error saving file metadata:", err);
       res.status(500).json({ message: "Error saving file metadata" });
     } finally {
       if (connection) connection.release();
@@ -908,73 +768,26 @@ router.post(
   }
 );
 
-// router.get("/get-files", auth.authenticateToken, async (req, res) => {
-//   const { job_id } = req.query;
-//   console.log(job_id);
-//   let connection;
-
-//   try {
-//     connection = await pool.getConnection();
-
-//     const userId = req.user && req.user.id ? req.user.id : res.locals.id;
-//     const features = await getActivePlanFeatures(connection, userId);
-
-//     if (!features.length) {
-//       return res.json([]);
-//     }
-
-//     const allowDocs = isAllowedFeature(features, ["job_documents", "documents"]);
-//     const allowPhotos = isAllowedFeature(features, ["job_photos", "photos", "pictures"]);
-
-//     if (!allowDocs && !allowPhotos) {
-//       return res.json([]);
-//     }
-
-//     const [rows] = await connection.execute(
-//       "SELECT id, path, name, lead_id,type FROM lead_documents WHERE job_id = ?",
-//       [job_id]
-//     );
-
-//     const filtered = (rows || []).filter((r) => {
-//       const t = String(r.type || "").toLowerCase();
-//       if (t === "document" || t === "documents") return allowDocs;
-//       if (t === "image" || t === "photo" || t === "photos" || t === "picture" || t === "pictures") {
-//         return allowPhotos;
-//       }
-//       // Unknown type -> only include if user has either permission
-//       return allowDocs || allowPhotos;
-//     });
-
-//     res.json(filtered);
-//   } catch (err) {
-//     console.error("Error fetching documents:", err);
-//     res.status(500).json({ message: "Server error", error: err.message });
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
-
 router.get("/get-files", auth.authenticateToken, async (req, res) => {
   const { job_id } = req.query;
-  console.log(job_id);
   let connection;
 
   try {
     connection = await pool.getConnection();
 
-    // 🔴 Feature checks TEMPORARILY REMOVED
+    // ðŸ”´ Feature checks TEMPORARILY REMOVED
 
     const [rows] = await connection.execute(
       "SELECT id, path, name, lead_id, type FROM lead_documents WHERE lead_id = ?",
       [job_id]
     );
 
-    // 🔴 No filtering by allowDocs / allowPhotos
+    // ðŸ”´ No filtering by allowDocs / allowPhotos
     // Return all files for this job
     res.json(rows || []);
 
   } catch (err) {
-    console.error("Error fetching documents:", err);
+    logger.error("Error fetching documents:", err);
     res.status(500).json({
       message: "Server error",
       error: err.message,
@@ -1002,12 +815,12 @@ router.post("/delete-file", auth.authenticateToken, async (req, res) => {
 
     const filePath = rows[0].path;
 
-    // 🔥 Delete file from uploads folder
+    // ðŸ”¥ Delete file from uploads folder
     if (filePath && fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }
 
-    // 🧹 Delete from DB
+    // ðŸ§¹ Delete from DB
     await connection.execute(
       "DELETE FROM lead_documents WHERE id = ?",
       [rows[0].id]
@@ -1015,7 +828,7 @@ router.post("/delete-file", auth.authenticateToken, async (req, res) => {
 
     res.json({ success: true });
   } catch (err) {
-    console.error("Delete file error:", err);
+    logger.error("Delete file error:", err);
     res.status(500).json({
       message: "Server error",
       error: err.message,
@@ -1026,3 +839,4 @@ router.post("/delete-file", auth.authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+

@@ -1,9 +1,9 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
 const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -42,7 +42,7 @@ let connection;
 
     res.json(rows);
   } catch (err) {
-    console.error("Error fetching jobs:", err);
+    logger.error("Error fetching jobs:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -57,7 +57,7 @@ router.get("/tasks/:jobId", auth.authenticateToken, async (req, res) => {
     );
     res.status(200).json(rows);
   } catch (err) {
-    console.error("Error fetching tasks by job ID", err);
+    logger.error("Error fetching tasks by job ID", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -69,10 +69,8 @@ router.post('/start', auth.authenticateToken, async (req, res) => {
   const userId = req.user.id;
 
   const now = new Date();
-  console.log('now',now)
   const start_time = now.toTimeString().split(' ')[0];
   const start_date = formatLocalDate(now);
-console.log('current time',start_time)
   try {
     const [result] = await pool.query(
       `INSERT INTO clockin (job_id, task_id, start_time, start_date, created_by,is_task_active)
@@ -82,7 +80,7 @@ console.log('current time',start_time)
 
     res.status(201).json({ message: "Clock-in started", clockin_id: result.insertId });
   } catch (err) {
-    console.error("Clock-in start error:", err);
+    logger.error("Clock-in start error:", err);
     res.status(500).json({ message: "Server error" });
   }
 
@@ -177,7 +175,7 @@ router.put('/stop/:id', auth.authenticateToken, async (req, res) => {
 
     res.status(200).json({ message: 'Clock-in stopped', task_duration, break_duration: finalBreakHms });
   } catch (err) {
-    console.error('Clock-in stop error:', err);
+    logger.error('Clock-in stop error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -204,7 +202,7 @@ const [rows] = await pool.query(
 
     res.json(rows[0]);
   } catch (err) {
-    console.error("Error fetching active start time:", err);
+    logger.error("Error fetching active start time:", err);
     res.status(500).json({ message: "Server error" });
   }
 
@@ -247,7 +245,7 @@ router.post('/start-break', auth.authenticateToken, async (req, res) => {
       is_break: true
     });
   } catch (err) {
-    console.error(" Error starting break:", err);
+    logger.error("Error starting break:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -276,7 +274,7 @@ router.put('/stop-break/:id', auth.authenticateToken, async (req, res) => {
 
  
     if (!start_break || !break_start_date) {
-      console.warn("⚠️ Missing start_break or break_start_date for clockin:", clockinId);
+      logger.warn("Missing start_break or break_start_date for clockin: " + clockinId);
       return res.status(400).json({ 
         message: "Break start data missing. Please start a break before stopping it." 
       });
@@ -286,7 +284,7 @@ router.put('/stop-break/:id', auth.authenticateToken, async (req, res) => {
     const breakStartString = `${break_start_date}T${start_break}`;
     const breakStart = new Date(breakStartString);
     if (isNaN(breakStart.getTime())) {
-      console.warn("⚠️ Invalid break_start_date or start_break for clockin:", clockinId, break_start_date, start_break);
+      logger.warn(`Invalid break_start_date or start_break for clockin: ${clockinId} ${break_start_date} ${start_break}`);
       return res.status(400).json({ message: "Invalid break start date/time on record. Please start a new break and try again." });
     }
 
@@ -332,7 +330,7 @@ router.put('/stop-break/:id', auth.authenticateToken, async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ Error stopping break:", err);
+    logger.error("Error stopping break:", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -368,7 +366,7 @@ router.get("/clockin-user", auth.authenticateToken, async (req, res) => {
       data: rows,
     });
   } catch (err) {
-    console.error("Error fetching user clock-in data:", err);
+    logger.error("Error fetching user clock-in data:", err);
     res.status(500).json({ message: "Server error" });
   }
   finally {
@@ -548,7 +546,7 @@ router.get('/daily-hours', auth.authenticateToken, async (req, res) => {
       });
     }
 
-    console.error('Error computing daily hours:', err);
+    logger.error('Error computing daily hours:', err);
 
     return res.status(500).json({ message: 'Server error' });
   } finally {
@@ -629,7 +627,7 @@ let connection;
 
     res.json(r);
   } catch (err) {
-    console.error("MySQL query error:", err);
+    logger.error("MySQL query error:", err);
     res.status(500).json({ error: "Database error" });
   }
   finally {
@@ -659,7 +657,7 @@ let connection;
     );
     res.status(200).json({ message: "All clock-in entries", data: rows });
   } catch (err) {
-    console.error("Error fetching clock-in data:", err);
+    logger.error("Error fetching clock-in data:", err);
     res.status(500).json({ message: "Server error" });
   }
   finally {
@@ -668,3 +666,4 @@ let connection;
 });
 
 module.exports = router;
+

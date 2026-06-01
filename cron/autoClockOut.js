@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const pool = require('../config/connection');
+const logger = require('../common/logger');
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const formatLocalDate = (d) =>
@@ -104,15 +105,15 @@ async function autoClockOutExpiredSessions() {
           );
         }
 
-        console.log(
+        logger.info(
           `[AutoClockOut] Clocked out user=${row.created_by} clockin_id=${row.id} worked=${secToHms(workedSec)} elapsed=${secToHms(elapsedSec)}`
         );
       } catch (innerErr) {
-        console.error(`[AutoClockOut] Error processing clockin id=${row.id}:`, innerErr);
+        logger.error(`[AutoClockOut] Error processing clockin id=${row.id}:`, innerErr);
       }
     }
   } catch (err) {
-    console.error('[AutoClockOut] Cron error:', err);
+    logger.error('[AutoClockOut] Cron error:', err);
   } finally {
     if (connection) connection.release();
   }
@@ -120,10 +121,10 @@ async function autoClockOutExpiredSessions() {
 
 // Run every 5 minutes
 cron.schedule('*/5 * * * *', () => {
-  console.log('[AutoClockOut] Running check...');
+  logger.info('[AutoClockOut] Running check...');
   autoClockOutExpiredSessions();
 });
 
-console.log('[AutoClockOut] Cron job registered – checks every 5 minutes for sessions > 12h');
+logger.info('[AutoClockOut] Cron job registered – checks every 5 minutes for sessions > 12h');
 
 module.exports = { autoClockOutExpiredSessions };

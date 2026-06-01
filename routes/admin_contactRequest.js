@@ -1,6 +1,5 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require('../config/connection');
 const Joi = require("joi");
@@ -10,9 +9,8 @@ const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require('nodemailer');
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { Console } = require("console");
 const admin = require("../config/firebase-admin");
 const crypto = require("crypto");
 
@@ -33,9 +31,9 @@ const transporter = nodemailer.createTransport({
 // Optional: verify transporter
 transporter.verify((err, success) => {
   if (err) {
-    console.error("SMTP connection failed:", err);
+    logger.error("SMTP connection failed:", err);
   } else {
-    console.log("SMTP server is ready to send emails");
+    logger.info("SMTP server is ready to send emails");
   }
 });
 
@@ -69,9 +67,9 @@ async function sendContactEmail(data) {
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log("Contact email sent!");
+    logger.info("Contact email sent!");
   } catch (error) {
-    console.error("Email error:", error);
+    logger.error("Email error:", error);
   }
 }
 
@@ -138,9 +136,9 @@ async function sendOTPEmail(toEmail, otp) {
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log("OTP email sent successfully!");
+    logger.info("OTP email sent successfully!");
   } catch (error) {
-    console.error("Error sending OTP email:", error);
+    logger.error("Error sending OTP email:", error);
     throw error;
   }
 }
@@ -411,7 +409,6 @@ router.post(
   "/contact",
   async (req, res) => {
     let connection;
-    console.log(req.body);
 
     try {
       const { firstName, lastName, email, phone, message } = req.body;
@@ -426,7 +423,7 @@ router.post(
 
       connection = await pool.getConnection();
 
-      // 1️⃣ Insert into DB
+      // 1ï¸âƒ£ Insert into DB
       const [result] = await connection.execute(
         `INSERT INTO contact_request 
         (firstName, lastName, email, phone, message)
@@ -440,7 +437,7 @@ router.post(
         ]
       );
 
-      // 2️⃣ Send Email AFTER successful insert
+      // 2ï¸âƒ£ Send Email AFTER successful insert
       await sendContactEmail({
         firstName,
         lastName,
@@ -456,7 +453,7 @@ router.post(
       });
 
     } catch (err) {
-      console.error(err);
+      logger.error("Contact request error:", err);
       res.status(500).json({
         success: false,
         message: "Database error",
@@ -496,13 +493,13 @@ async function sendDemoEmail(data) {
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log("Demo request email sent!");
+    logger.info("Demo request email sent!");
   } catch (error) {
-    console.error("Demo email error:", error);
+    logger.error("Demo email error:", error);
   }
 }
 
-// --- 2️⃣ API route for demo requests ---
+// --- 2ï¸âƒ£ API route for demo requests ---
 router.post("/demo_request", async (req, res) => {
   let connection;
   const { firstName, lastName, email, phone, message } = req.body;
@@ -536,7 +533,7 @@ router.post("/demo_request", async (req, res) => {
     });
 
   } catch (err) {
-    console.error(err);
+    logger.error("Demo request error:", err);
     res.status(500).json({
       success: false,
       message: "Database or server error",
@@ -744,7 +741,7 @@ router.post("/delete_user", async (req, res) => {
       message: "User deleted successfully",
     });
   } catch (err) {
-    // MySQL: ER_ROW_IS_REFERENCED_2 — child rows still reference this user
+    // MySQL: ER_ROW_IS_REFERENCED_2 â€” child rows still reference this user
     if (err.errno === 1451) {
       return res.status(409).json({
         success: false,
@@ -770,7 +767,7 @@ router.get('/rights', auth.authenticateToken, async (req, res) => {
     const [rows] = await connection.query("SELECT * FROM `right` where admin_module = 1 ORDER BY id ASC");
     res.json(rows);
   } catch (err) {
-    console.error('Error fetching rights:', err);
+    logger.error('Error fetching rights:', err);
     res.status(500).json({ message: 'Internal server error' });
   } finally {
     if (connection) connection.release();
@@ -1023,3 +1020,4 @@ router.get("/support_ticket_list", auth.authenticateToken, async (req, res) => {
   }
 });
 module.exports = router;
+

@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../config/connection');
 const auth = require('../services/authentication');
 const gcal = require('../services/googleCalendar');
+const logger = require('../common/logger');
 
 // GET /calendar/master-tasks
 router.get('/master-tasks', auth.authenticateToken, async (req, res) => {
@@ -15,7 +16,7 @@ router.get('/master-tasks', auth.authenticateToken, async (req, res) => {
     );
     res.status(200).json({ success: true, data: rows });
   } catch (err) {
-    console.error('GET /calendar/master-tasks error', err);
+    logger.error('GET /calendar/master-tasks error', err);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     connection.release();
@@ -47,7 +48,7 @@ router.post('/master-tasks', auth.authenticateToken, async (req, res) => {
     );
     res.status(201).json({ success: true, data: row });
   } catch (err) {
-    console.error('POST /calendar/master-tasks error', err);
+    logger.error('POST /calendar/master-tasks error', err);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     connection.release();
@@ -84,7 +85,7 @@ router.put('/master-tasks/:id', auth.authenticateToken, async (req, res) => {
     );
     res.status(200).json({ success: true, data: row });
   } catch (err) {
-    console.error('PUT /calendar/master-tasks/:id error', err);
+    logger.error('PUT /calendar/master-tasks/:id error', err);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     connection.release();
@@ -112,7 +113,7 @@ router.put('/master-tasks/reorder', auth.authenticateToken, async (req, res) => 
     res.status(200).json({ success: true });
   } catch (err) {
     await connection.rollback();
-    console.error('PUT /calendar/master-tasks/reorder error', err);
+    logger.error('PUT /calendar/master-tasks/reorder error', err);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     connection.release();
@@ -128,7 +129,7 @@ router.delete('/master-tasks/:id', auth.authenticateToken, async (req, res) => {
     await connection.query('DELETE FROM master_calendar_tasks WHERE id = ? LIMIT 1', [id]);
     res.status(200).json({ success: true });
   } catch (err) {
-    console.error('DELETE /calendar/master-tasks/:id error', err);
+    logger.error('DELETE /calendar/master-tasks/:id error', err);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     connection.release();
@@ -146,7 +147,7 @@ router.get('/google/auth-url', auth.authenticateToken, async (req, res) => {
     const url = gcal.getAuthUrl(userId);
     res.json({ success: true, url });
   } catch (err) {
-    console.error('GET /calendar/google/auth-url error:', err);
+    logger.error('GET /calendar/google/auth-url error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -168,7 +169,7 @@ router.get('/google/callback', async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:4200';
     res.redirect(`${frontendUrl}/user-dashboard/calendar?google_connected=true`);
   } catch (err) {
-    console.error('GET /calendar/google/callback error:', err);
+    logger.error('GET /calendar/google/callback error:', err);
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:4200';
     res.redirect(`${frontendUrl}/user-dashboard/calendar?google_connected=false&error=${encodeURIComponent(err.message)}`);
   }
@@ -183,7 +184,7 @@ router.get('/google/status', auth.authenticateToken, async (req, res) => {
     const connected = await gcal.isConnected(userId);
     res.json({ success: true, connected });
   } catch (err) {
-    console.error('GET /calendar/google/status error:', err);
+    logger.error('GET /calendar/google/status error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -197,7 +198,7 @@ router.post('/google/sync', auth.authenticateToken, async (req, res) => {
     const result = await gcal.syncAllAppointments(userId);
     res.json({ success: true, ...result });
   } catch (err) {
-    console.error('POST /calendar/google/sync error:', err);
+    logger.error('POST /calendar/google/sync error:', err);
     res.status(500).json({ success: false, message: err.message || 'Server error' });
   }
 });
@@ -211,7 +212,7 @@ router.delete('/google/disconnect', auth.authenticateToken, async (req, res) => 
     await gcal.disconnect(userId);
     res.json({ success: true, message: 'Google Calendar disconnected' });
   } catch (err) {
-    console.error('DELETE /calendar/google/disconnect error:', err);
+    logger.error('DELETE /calendar/google/disconnect error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

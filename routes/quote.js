@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -10,9 +10,8 @@ const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { Console } = require("console");
 const PDFDocument = require("pdfkit");
 const pdf = require("html-pdf");
 const { v4: uuidv4 } = require("uuid");
@@ -56,7 +55,7 @@ async function sendInviteEmail(toEmail, inviterName) {
               <p><strong>Mr. ${inviterName}</strong> You are invited to join <strong>SeeJobRun</strong>.</p>
               <div class="invite-box">Accept the invitation and sign up today!</div>
               <a href="http://seejobrun.com/user-dashboard/signup" class="signup-link">Accept Invitation</a>
-              <p>If you weren’t expecting this invitation, you may ignore this email.</p>
+              <p>If you werenâ€™t expecting this invitation, you may ignore this email.</p>
             </div>
             <div class="footer">
               <p>&copy; 2025 SeeJobRun. All rights reserved.</p>
@@ -69,9 +68,9 @@ async function sendInviteEmail(toEmail, inviterName) {
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log("Invitation email sent successfully!");
+    logger.info("Invitation email sent successfully!");
   } catch (error) {
-    console.error("Error sending invitation email:", error);
+    logger.error("Error sending invitation email:", error);
   }
 }
 
@@ -308,7 +307,7 @@ router.post('/quotes/:id/send-email', auth.authenticateToken, async (req, res) =
     const mailOptions = {
       from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
       to: quote.client_email,
-      subject: `Quote from ${creatorName} — ${quote.project_address || 'Your Project'}`,
+      subject: `Quote from ${creatorName} â€” ${quote.project_address || 'Your Project'}`,
       html: `
         <!DOCTYPE html>
         <html>
@@ -338,9 +337,9 @@ router.post('/quotes/:id/send-email', auth.authenticateToken, async (req, res) =
               <p>Hello <strong>${quote.client_name || 'there'}</strong>,</p>
               <p><strong>${creatorName}</strong>${quote.company_name ? ' from <strong>' + quote.company_name + '</strong>' : ''} has sent you a quote for your review.</p>
               
-              <div class="info-row"><span class="info-label">Project:</span> ${quote.project_address || '—'}</div>
-              <div class="info-row"><span class="info-label">Quote Date:</span> ${quote.quote_date || '—'}</div>
-              <div class="info-row"><span class="info-label">Valid Until:</span> ${quote.valid_until || '—'}</div>
+              <div class="info-row"><span class="info-label">Project:</span> ${quote.project_address || 'â€”'}</div>
+              <div class="info-row"><span class="info-label">Quote Date:</span> ${quote.quote_date || 'â€”'}</div>
+              <div class="info-row"><span class="info-label">Valid Until:</span> ${quote.valid_until || 'â€”'}</div>
 
               <table>
                 <thead>
@@ -373,13 +372,12 @@ router.post('/quotes/:id/send-email', auth.authenticateToken, async (req, res) =
       `,
     };
 
-    console.log('Sending quote email to:', quote.client_email, 'preview URL:', previewUrl);
+    logger.info(`Sending quote email to: ${quote.client_email} preview URL: ${previewUrl}`);
     await transporter.sendMail(mailOptions);
-    console.log('Quote email sent successfully to:', quote.client_email);
+    logger.info(`Quote email sent successfully to: ${quote.client_email}`);
 
     return res.status(200).json({ code: '200', message: 'Quote email sent to client' });
   } catch (err) {
-    console.error('Quote email send error:', err);
     logger.error('Quote email send error:', err);
     return res.status(500).json({ message: 'Failed to send email', error: err.message });
   } finally {
@@ -1066,7 +1064,7 @@ router.post("/create", auth.authenticateToken, async (req, res) => {
       // Reuse existing unfinished change order
       quoteId = existing[0].id;
     } else {
-      // No unfinished record OR existing is completed → create a new row
+      // No unfinished record OR existing is completed â†’ create a new row
       const [coResult] = await connection.execute(
         `INSERT INTO quote (job_id, created_at, created_by, completed, change_quote_type)
          VALUES (?, ?, ?, 0,?)`,
@@ -1335,7 +1333,7 @@ router.post("/add_contact", auth.authenticateToken, async (req, res) => {
 
     connection = await pool.getConnection();
 
-    // 1️⃣ Find active change_order for this job
+    // 1ï¸âƒ£ Find active change_order for this job
     const [active] = await connection.execute(
       `SELECT id FROM quote 
          WHERE job_id = ? AND completed = 0 AND change_quote_type = ?
@@ -1351,7 +1349,7 @@ router.post("/add_contact", auth.authenticateToken, async (req, res) => {
 
     const quote_id = active[0].id;
 
-    // 2️⃣ Prevent duplicate assignment for the same change_order
+    // 2ï¸âƒ£ Prevent duplicate assignment for the same change_order
     const [existing] = await connection.execute(
       `SELECT id FROM quote_emp 
          WHERE quote_id = ? AND emp_id = ?  AND change_quote_type = ?`,
@@ -1364,7 +1362,7 @@ router.post("/add_contact", auth.authenticateToken, async (req, res) => {
       });
     }
 
-    // 3️⃣ Insert new record with change_order_id
+    // 3ï¸âƒ£ Insert new record with change_order_id
     const [result] = await connection.execute(
       `INSERT INTO quote_emp
          (quote_id, job_id, emp_id, created_at, created_by, change_quote_type)
@@ -1618,7 +1616,7 @@ router.put("/status/:id", auth.authenticateToken, async (req, res) => {
       .status(200)
       .json({ message: "quote status updated successfully" });
   } catch (err) {
-    console.error(err);
+    logger.error("Error updating quote status:", err);
     res.status(500).json({ message: "Database error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -2068,7 +2066,7 @@ router.post(
 
       res.json({ message: "Email sent successfully" });
     } catch (err) {
-      console.error("Email Change Order Error:", err);
+      logger.error("Email Change Order Error:", err);
       res.status(500).json({ message: "Server error", error: err.message });
     } finally {
       if (connection) connection.release();
@@ -2143,8 +2141,8 @@ LEFT JOIN quote_emp coe ON co.id = coe.quote_id
 LEFT JOIN user u              ON coe.emp_id = u.id
 LEFT JOIN category c          ON u.category = c.id
 LEFT JOIN subcategory s       ON u.subcategory = s.id
-JOIN quote_list ql ON ql.quote_id = co.id        -- 🔹 bring quote_list into outer query
-WHERE ql.id = ?                                  -- 🔹 filter here
+JOIN quote_list ql ON ql.quote_id = co.id        -- ðŸ”¹ bring quote_list into outer query
+WHERE ql.id = ?                                  -- ðŸ”¹ filter here
 GROUP BY co.id;`,
         [quoteId]
       );
@@ -2517,7 +2515,7 @@ GROUP BY co.id;`,
       // Generate PDF from HTML
       pdf.create(htmlContent, options).toBuffer((err, buffer) => {
         if (err) {
-          console.error("PDF generation error:", err);
+          logger.error("PDF generation error:", err);
           return res
             .status(500)
             .json({ message: "PDF generation failed", error: err.message });
@@ -2534,7 +2532,7 @@ GROUP BY co.id;`,
         res.send(buffer);
       });
     } catch (err) {
-      console.error(err);
+      logger.error("Error generating download:", err);
       res.status(500).json({ message: "Server error", error: err.message });
     } finally {
       if (connection) connection.release();
@@ -2556,7 +2554,7 @@ router.delete("/job-contact/:id/:job_id/:change_quote_type", auth.authenticateTo
     }
     res.json({ message: "Employee contact deleted successfully" });
   } catch (err) {
-    console.error(err);
+    logger.error("Error deleting job contact:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 
@@ -2573,7 +2571,7 @@ router.delete("/job-contact/:id", auth.authenticateToken, async (req, res) => {
     }
     res.json({ message: "Employee contact deleted successfully" });
   } catch (err) {
-    console.error(err);
+    logger.error("Error deleting job contact:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 
@@ -2603,3 +2601,4 @@ router.get(
 );
 
 module.exports = router;
+

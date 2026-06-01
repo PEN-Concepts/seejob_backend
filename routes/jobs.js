@@ -104,9 +104,9 @@ const transporter = nodemailer.createTransport({
 // Optional: verify transporter
 transporter.verify((err, success) => {
   if (err) {
-    console.error("SMTP connection failed:", err);
+    logger.error("SMTP connection failed:", err);
   } else {
-    console.log("SMTP server is ready to send emails");
+    logger.info("SMTP server is ready to send emails");
   }
 });
 
@@ -198,7 +198,7 @@ async function createInvitedUser(connection, params) {
       });
     } catch (cloneErr) {
       // Don't fail the invite if rights cloning hits an issue — just log.
-      console.error("cloneRightsFromInviter failed:", cloneErr);
+      logger.error("cloneRightsFromInviter failed:", cloneErr);
     }
   }
 
@@ -318,7 +318,7 @@ router.post("/send-invite", auth.authenticateToken, async (req, res) => {
     if (err && err.status) {
       return res.status(err.status).json({ message: err.message });
     }
-    console.error("Failed to send invite:", err);
+    logger.error("Failed to send invite:", err);
     return res.status(500).json({
       message: "Failed to send invite",
       error: err && err.message ? err.message : String(err),
@@ -381,9 +381,9 @@ async function sendInviteEmail(toEmail, inviterName) {
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log("Invitation email sent successfully!");
+    logger.info("Invitation email sent successfully!");
   } catch (error) {
-    console.error("Error sending invitation email:", error);
+    logger.error("Error sending invitation email:", error);
   }
 }
 
@@ -397,10 +397,15 @@ router.put("/update-job-order", async (req, res) => {
   let caseSql = "CASE id ";
   const ids = [];
 
-  order.forEach((o) => {
-    caseSql += `WHEN ${o.job_id} THEN ${o.order} `;
-    ids.push(o.job_id);
-  });
+  for (const o of order) {
+    const jobId = parseInt(o.job_id, 10);
+    const sortOrder = parseInt(o.order, 10);
+    if (isNaN(jobId) || isNaN(sortOrder)) {
+      return res.status(400).json({ success: false, message: "Invalid job_id or order value" });
+    }
+    caseSql += `WHEN ${jobId} THEN ${sortOrder} `;
+    ids.push(jobId);
+  }
 
   caseSql += "END";
 
@@ -414,7 +419,7 @@ router.put("/update-job-order", async (req, res) => {
     await pool.query(query);
     res.json({ success: true, message: "Job order updated successfully" });
   } catch (err) {
-    console.error("Error updating job order:", err);
+    logger.error("Error updating job order:", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
@@ -830,7 +835,7 @@ router.get(
         data: rows,
       });
     } catch (error) {
-      console.error(error);
+      logger.error("Get clients with job error:", error);
       res.status(500).json({
         code: "500",
         message: "Internal server error",
@@ -1041,7 +1046,7 @@ router.put("/jobs/:id", auth.authenticateToken, async (req, res) => {
       message: "Job updated successfully!",
     });
   } catch (err) {
-    console.error("Error updating job:", err);
+    logger.error("Error updating job:", err);
     res.status(500).json({
       code: "DB_ERROR",
       message: "Database error",
@@ -1056,8 +1061,7 @@ router.patch("/jobs/:id/status", auth.authenticateToken, async (req, res) => {
   const jobId = req.params.id;
 
   const { status } = req.body; // expecting status = 0 (completed) or 2 (archived)
-  //const updatedBy = res.locals.id;
-  const updatedBy = 1;
+  const updatedBy = req.user.id;
 
   if (![0, 2, 1].includes(status)) {
     return res.status(400).json({ message: "Invalid status value" });
@@ -1078,7 +1082,7 @@ router.patch("/jobs/:id/status", auth.authenticateToken, async (req, res) => {
 
     res.json({ message: "Job status updated successfully" });
   } catch (err) {
-    console.error("Error updating job status:", err);
+    logger.error("Error updating job status:", err);
     res.status(500).json({ message: "Database error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1105,7 +1109,7 @@ router.post("/stages", auth.authenticateToken, async (req, res) => {
     const [result] = await connection.execute(
       `INSERT INTO stages (user_id, name, csi_code, job_id, status, progress_status, created_at)
        VALUES (?, ?, ?,?, ?, ?, ?)`,
-      [1, name || null, csi_code || null, job_id, status, 0, currentTimestamp]
+      [signedin_user, name || null, csi_code || null, job_id, status, 0, currentTimestamp]
     );
 
     res.json({
@@ -1131,7 +1135,7 @@ router.get("/stages/:job_id", auth.authenticateToken, async (req, res) => {
 
     res.json(rows);
   } catch (err) {
-    console.error("Error fetching submitted stages:", err);
+    logger.error("Error fetching submitted stages:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1242,7 +1246,7 @@ router.post("/send-invite/:jobId", auth.authenticateToken, async (req, res) => {
         invitedUserId = insertResult?.insertId;
       } catch (createUserErr) {
         if (createUserErr.code !== "ER_DUP_ENTRY") {
-          console.error("Failed to create user during invite:", createUserErr);
+          logger.error("Failed to create user during invite:", createUserErr);
           return res.status(500).json({
             message: "Failed to register invited user",
             error: createUserErr.message,
@@ -1266,7 +1270,7 @@ router.post("/send-invite/:jobId", auth.authenticateToken, async (req, res) => {
             newUserRoleId: newUserRole,
           });
         } catch (cloneErr) {
-          console.error("cloneRightsFromInviter failed:", cloneErr);
+          logger.error("cloneRightsFromInviter failed:", cloneErr);
         }
       }
     }
@@ -1321,7 +1325,7 @@ router.post("/send-invite/:jobId", auth.authenticateToken, async (req, res) => {
       });
     }
 
-    console.error("Failed to send invite:", err);
+    logger.error("Failed to send invite:", err);
     res.status(500).json({
       message: "Failed to send invite",
     });
@@ -1421,7 +1425,7 @@ router.post(
       ]);
       res.status(200).json({ message: "Job address added successfully" });
     } catch (err) {
-      console.error(err);
+      logger.error("Error adding job address:", err);
       res.status(500).json({ message: "Error adding job address" });
     } finally {
       if (connection) connection.release();
@@ -1617,7 +1621,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
       checklistTasksByJobId,
     });
   } catch (err) {
-    console.error("Error in /jobs/with-tasks:", err);
+    logger.error("Error in /jobs/with-tasks:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1646,7 +1650,7 @@ router.get("/get-job-address/:id", auth.authenticateToken, async (req, res) => {
       data: rows[0],
     });
   } catch (err) {
-    console.error(err);
+    logger.error("Error fetching job address:", err);
     res.status(500).json({ message: "Error fetching job address" });
   } finally {
     if (connection) connection.release();
@@ -1703,7 +1707,7 @@ router.post(
         files: saved,
       });
     } catch (err) {
-      console.error(err);
+      logger.error("Error saving file metadata:", err);
       res.status(500).json({ message: "Error saving file metadata" });
     } finally {
       if (connection) connection.release();
@@ -1749,7 +1753,7 @@ router.get("/get-files", auth.authenticateToken, async (req, res) => {
 
     res.json(filtered);
   } catch (err) {
-    console.error("Error fetching documents:", err);
+    logger.error("Error fetching documents:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1797,7 +1801,7 @@ router.post(
         leadId: job.lead_id,
       });
     } catch (error) {
-      console.error(error);
+      logger.error("Error converting job back to lead:", error);
       res
         .status(500)
         .json({ message: "Error converting job back to lead", error });
@@ -1855,7 +1859,7 @@ router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
 
     res.status(200).json({ message: "Job deleted successfully" });
   } catch (err) {
-    console.error("Error deleting job:", err);
+    logger.error("Error deleting job:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1891,7 +1895,7 @@ router.get("/materials", auth.authenticateToken, async (req, res) => {
 
     res.status(200).json(materials);
   } catch (err) {
-    console.error("Error fetching materials:", err);
+    logger.error("Error fetching materials:", err);
     res.status(500).json({
       code: "DB_ERROR",
       message: "Database error",
@@ -1930,7 +1934,7 @@ router.post("/materials", auth.authenticateToken, enforcePlanFeatureForMaterials
       material_id: result.insertId,
     });
   } catch (err) {
-    console.error("Error creating material:", err);
+    logger.error("Error creating material:", err);
     res.status(500).json({
       code: "DB_ERROR",
       message: "Database error",
@@ -1967,7 +1971,7 @@ router.delete("/materials/:id", auth.authenticateToken, enforcePlanFeatureForMat
       message: "Material deleted successfully",
     });
   } catch (err) {
-    console.error("Error deleting material:", err);
+    logger.error("Error deleting material:", err);
     res.status(500).json({
       code: "DB_ERROR",
       message: "Database error",

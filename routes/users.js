@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -6,7 +6,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const path = require("path");
 const multer = require("multer");
@@ -181,9 +181,9 @@ const transporter = nodemailer.createTransport({
 // Optional: verify transporter
 transporter.verify((err, success) => {
   if (err) {
-    console.error("SMTP connection failed:", err);
+    logger.error("SMTP connection failed:", err);
   } else {
-    console.log("SMTP server is ready to send emails");
+    logger.info("SMTP server is ready to send emails");
   }
 });
 
@@ -257,9 +257,9 @@ async function sendOTPEmail(toEmail, otp) {
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log("OTP email sent successfully!");
+    logger.info("OTP email sent successfully!");
   } catch (error) {
-    console.error("Error sending OTP email:", error);
+    logger.error("Error sending OTP email:", error);
   }
 }
 
@@ -320,9 +320,9 @@ async function sendPasswordEmail(toEmail, tempPassword) {
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log("Temporary password email sent successfully!");
+    logger.info("Temporary password email sent successfully!");
   } catch (error) {
-    console.error("Error sending temporary password email:", error);
+    logger.error("Error sending temporary password email:", error);
   }
 }
 
@@ -385,112 +385,11 @@ async function sendRecoveryEmail(toEmail, otp) {
 
   try {
     await transporter.sendMail(mailOptions);
-    console.log("Recovery email sent successfully!");
+    logger.info("Recovery email sent successfully!");
   } catch (error) {
-    console.error("Error sending recovery email:", error);
+    logger.error("Error sending recovery email:", error);
   }
 }
-
-// Add a new user publically
-// router.post("/register", async (req, res) => {
-
-//   const currentTimestamp = getTimeStamp();
-//   const result = addUserSchema(req.body);
-
-//   if (result.error) {
-//     return res.status(400).json({
-//       code: "400",
-//       message: result.error.details[0].message,
-//       data: {},
-//     });
-//   }
-
-//   const r = req.body;
-//   console.log(r);
-//   let connection;
-
-//   try {
-//     connection = await pool.getConnection();
-//     const hashedPassword = '';
-//     const otp = generateOTP();
-
-//     const query = `
-//       INSERT INTO user 
-//       (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security,created_by, must_change_password)
-//       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?, ?)
-//     `;
-
-//     const [resultInsert] = await connection.query(query, [
-//       r.name,
-//       r.email,
-//       hashedPassword,
-//       r.subcategory, // 👈 still using subcategory as role_id
-//       r.mobile,
-//       r.category,
-//       r.subcategory,
-//       r.business_name,
-//       r.trade,
-//       otp,
-//       1, // otp_status
-//       currentTimestamp, // created_at
-//       r.employment_type,
-//       r.rate,
-//       r.social_security,
-//       r.created_by,
-//       0
-//     ]);
-
-//     const emp_id = resultInsert.insertId;
-
-//     logger.info("User added successfully");
-//     await sendOTPEmail(r.email, otp);
-
-//     // ✅ ONLY EXECUTE FOR EMPLOYEES (role 2, 3, 4, 5)
-//     const employeeRoles = [2, 3, 4, 5];
-//     if (employeeRoles.includes(Number(r.subcategory))) {
-//       if (Array.isArray(r.leave_ids) && r.leave_ids.length > 0) {
-//         const leavesData = r.leave_ids.map((leave_id) => [
-//           emp_id,
-//           leave_id,
-//           currentTimestamp,
-//           r.created_by,
-//         ]);
-
-//         const leaveInsertQuery = `
-//           INSERT INTO employee_leaves_quota (emp_id, leave_id, created_at, created_by)
-//           VALUES ?
-//         `;
-//         await connection.query(leaveInsertQuery, [leavesData]);
-//         logger.info("Employee leaves quota added successfully");
-//       }
-//     }
-
-//     return res.status(201).json({
-//       code: "201",
-//       message: "Registered successfully",
-//       data: { userId: emp_id, email: r.email },
-//     });
-//   } catch (error) {
-//     if (error.code === "ER_DUP_ENTRY") {
-//       logger.error("Create user error:", error);
-//       return res.status(409).json({
-//         code: "409",
-//         message: "Email and Mobile must be unique",
-//         data: {},
-//       });
-//     } else {
-//       logger.error("Error adding user:", error);
-//       return res.status(500).json({
-//         code: "500",
-//         message: error.message,
-//         stack: error.stack,
-//         data: {},
-//       });
-//     }
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
 
 router.post("/register", async (req, res) => {
   const currentTimestamp = getTimeStamp();
@@ -510,7 +409,7 @@ router.post("/register", async (req, res) => {
   try {
     connection = await pool.getConnection();
 
-    // 🔥 PASSWORD LOGIC
+    // ðŸ”¥ PASSWORD LOGIC
     let plainPassword = null;
     let hashedPassword = null;
 
@@ -519,10 +418,10 @@ router.post("/register", async (req, res) => {
       hashedPassword = await bcrypt.hash(plainPassword, 10);
     }
 
-    // 🔥 OTP
+    // ðŸ”¥ OTP
     const otp = generateOTP();
 
-    // 🔥 INSERT USER
+    // ðŸ”¥ INSERT USER
     const query = `
       INSERT INTO user 
       (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
@@ -546,25 +445,21 @@ router.post("/register", async (req, res) => {
       r.rate,
       r.social_security,
       r.created_by,
-      1 // ✅ ALWAYS FORCE PASSWORD CHANGE
+      1 // âœ… ALWAYS FORCE PASSWORD CHANGE
     ]);
 
     const emp_id = resultInsert.insertId;
 
-    // 🔥 SEND EMAILS
+    // ðŸ”¥ SEND EMAILS
     if (Number(r.category) === 5) {
-  // Send ONLY password
-  await sendPasswordEmail(r.email, plainPassword);
-} else {
-  // Send ONLY OTP
-  await sendOTPEmail(r.email, otp);
-}
-
-    if (plainPassword) {
+      // Send ONLY password
       await sendPasswordEmail(r.email, plainPassword);
+    } else {
+      // Send ONLY OTP
+      await sendOTPEmail(r.email, otp);
     }
 
-    // 🔥 LEAVES LOGIC (ONLY FOR EMPLOYEES)
+    // ðŸ”¥ LEAVES LOGIC (ONLY FOR EMPLOYEES)
     const employeeRoles = [2, 3, 4, 5];
 
     if (employeeRoles.includes(Number(r.subcategory))) {
@@ -605,8 +500,7 @@ router.post("/register", async (req, res) => {
 
     return res.status(500).json({
       code: "500",
-      message: error.message,
-      stack: error.stack,
+      message: "Internal server error",
       data: {},
     });
 
@@ -702,7 +596,7 @@ router.post("/create-pin", async (req, res) => {
     res.json({ message: "PIN created successfully" });
 
   } catch (error) {
-    console.error(error);
+    logger.error("Create PIN error:", error);
     res.status(500).json({ message: "Server error" });
   } finally {
     if (connection) connection.release();
@@ -710,112 +604,7 @@ router.post("/create-pin", async (req, res) => {
 });
 
 
-// router.post("/login", async (req, res) => {
-//   const { email, password } = req.body;
-//   const user_email = email;
-//   let connection;
-
-//   try {
-//     connection = await pool.getConnection();
-//     const query = `
-//       SELECT u.id, u.name, u.email, u.password, u.image, u.status, u.role, 
-//              u.otp_status, u.created_by, u.must_change_password, u.pin_hash
-//       FROM user u
-//       WHERE u.email = ?`;
-//     const [rows] = await connection.query(query, [email]);
-
-//     if (rows.length === 0) {
-//       logger.info(`Login failed: Incorrect Email or Password - ${email} - ${new Date()}`);
-//       return res.status(200).json({ code: "401", message: "Incorrect Email or Password", data: {} });
-//     }
-
-//     const user = rows[0];
-
-//     if (user.status == 0) {
-//       return res.status(200).json({ code: "401", message: "Your account is inactive", data: {} });
-//     }
-
-//     if (!user.password) {
-//       logger.error(`Login error: Password not found - ${email} - ${new Date()}`);
-//       return res.status(200).json({ code: "400", message: "Something went wrong. Please try again later", data: {} });
-//     }
-
-//     // Compare password
-//     const bResult = await bcrypt.compare(password, user.password);
-//     if (!bResult) {
-//       logger.info(`Login failed: Incorrect Email or Password - ${email} - ${new Date()}`);
-//       return res.status(200).json({ code: "401", message: "Incorrect Email or Password", data: {} });
-//     }
-
-//     const { id, name, role, otp_status, must_change_password } = user;
-
-//     // 🔐 Generate device token
-//     const crypto = require("crypto");
-//     const deviceToken = crypto.randomBytes(32).toString("hex");
-
-//     // Save device in DB
-//     await connection.query(
-//       "INSERT INTO user_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)",
-//       [id, deviceToken, req.headers["user-agent"]]
-//     );
-//       console.log('check id', id);
-//     // 🍪 Set HttpOnly cookie (working with Angular localhost)
-//     res.cookie("device_token", deviceToken, {
-//       httpOnly: true,
-//       secure: true,      // set true if using HTTPS
-//       sameSite: "none",    // ✅ must be 'lax' or 'none' for cross-origin
-//       maxAge: 1000 * 60 * 60 * 24 * 30, // 30 days
-//     });
-
-//     let rights = [];
-//     const userId = parseInt(id);
-
-// const [userRightsRows] = await connection.query(`
-//   SELECT 
-//     r.display_name,
-//     r.name,
-//     rrp.\`read\`,
-//     rrp.\`create\`,
-//     rrp.\`update\`,
-//     rrp.\`delete\`,
-//     rrp.user_id AS emp_id
-//   FROM role_right_permission rrp
-//   INNER JOIN \`right\` r ON r.id = rrp.right_id
-//   WHERE rrp.user_id = ?
-//   AND r.sub_heading = 0
-// `, [userId]);
-// console.log("Rights rows:", userRightsRows);
-// const rights = userRightsRows;
-
-//     // First time PIN setup
-//     if (!user.pin_hash) {
-//       return res.json({ requirePinSetup: true, userId: id, rights });
-//     }
-
-//     // Role-based working_id
-//     let working_id = [2,3,4,5].includes(role) ? user.created_by : id;
-
-//     const response = { id, name, email, role, rights, working_id, otp_status, must_change_password };
-//     const accessToken = jwt.sign(response, process.env.ACCESS_TOKEN, { expiresIn: "7d" });
-
-//     logger.info(`Login successful: Employee ID - ${id} - ${new Date()}`);
-//     const photoName = user.image || "user.png";
-
-//     return res.status(200).json({
-//       code: "200",
-//       message: "Login successful",
-//       data: { token: accessToken, basicData: response, photoName },
-//     });
-
-//   } catch (error) {
-//     logger.error(`- ${email} - ${new Date()} - Login error:`, error);
-//     return res.status(200).json({ code: "500", message: "Internal Server Error", data: {} });
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
-
-// ── Passwordless Login OTP ──────────────────────────────────────────
+// â”€â”€ Passwordless Login OTP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
@@ -920,7 +709,7 @@ router.post("/login", async (req, res) => {
     // ===============================
     const userId = parseInt(id);
 
-    console.log("Logged User ID:", userId);
+    logger.info("Logged User ID: " + userId);
 
     const [userRightsRows] = await connection.query(`
   SELECT
@@ -987,8 +776,6 @@ const rights = userRightsRows || [];
     });
 
   } catch (error) {
-    console.error("Login Error:", error);
-
     logger.error(`Login Error - ${email}`, error);
 
     return res.status(200).json({
@@ -1044,110 +831,6 @@ router.post("/login-otp-request", async (req, res) => {
     if (connection) connection.release();
   }
 });
-
-// router.post("/login-otp-verify", async (req, res) => {
-//   const { email, otp } = req.body || {};
-//   if (!email || !otp) {
-//     return res.status(400).json({ code: "400", message: "Email and OTP are required.", data: {} });
-//   }
-
-//   const normalizedEmail = String(email).trim();
-//   const normalizedOtpDigits = String(otp).trim().replace(/\D/g, "");
-//   if (normalizedOtpDigits.length !== 4) {
-//     return res.status(200).json({ code: "400", message: "Invalid or expired OTP.", data: {} });
-//   }
-
-//   let connection;
-//   try {
-//     connection = await pool.getConnection();
-
-//     const [rows] = await connection.query(
-//       `SELECT u.id, u.name, u.email, u.image, u.status, u.role,
-//               u.otp_status, u.created_by, u.must_change_password, u.pin_hash
-//        FROM user u
-//        WHERE u.email = ?
-//          AND LPAD(CAST(u.otp AS CHAR), 4, '0') = ?
-//          AND u.otp_status = 1
-//          AND u.updated_at >= (NOW() - INTERVAL 3 MINUTE)
-//        LIMIT 1`,
-//       [normalizedEmail, normalizedOtpDigits]
-//     );
-
-//     if (!rows.length) {
-//       return res.status(200).json({ code: "400", message: "Invalid or expired OTP.", data: {} });
-//     }
-
-//     const user = rows[0];
-//     if (Number(user.status) === 0) {
-//       return res.status(200).json({ code: "401", message: "Your account is inactive", data: {} });
-//     }
-
-//     const { id, name, role, must_change_password } = user;
-
-//     const deviceToken = generateDeviceToken();
-//     await connection.query(
-//       "INSERT INTO user_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)",
-//       [id, deviceToken, req.headers["user-agent"]]
-//     );
-
-//     res.cookie("device_token", deviceToken, {
-//       httpOnly: true,
-//       secure: true,
-//       sameSite: "none",
-//       maxAge: 1000 * 60 * 60 * 24 * 30,
-//     });
-
-//     // Clear OTP regardless of pin_hash
-//     await connection.query(
-//       "UPDATE user SET otp_status = 0, otp = '', updated_at = NOW(), updated_by = ? WHERE id = ?",
-//       [id, id]
-//     );
-
-//    const userId = parseInt(id);
-
-// const [rightsRows] = await connection.query(
-//   `SELECT 
-//       right_id,
-//       \`read\`,
-//       \`create\`,
-//       \`update\`,
-//       \`delete\`,
-//       user_id
-//    FROM role_right_permission
-//    WHERE user_id = ?`,
-//   [userId]
-// );
-
-// const rights = rightsRows || [];
-
-//     const response = {
-//       id,
-//       name,
-//       email: normalizedEmail,
-//       role,
-//       rights,
-//       working_id,
-//       otp_status: 0,
-//       must_change_password,
-//     };
-//     const accessToken = jwt.sign(response, process.env.ACCESS_TOKEN, { expiresIn: "7d" });
-//     const photoName = user.image || "user.png";
-
-//     logger.info(`Login successful (OTP): Employee ID - ${id} - ${new Date()}`);
-
-//     return res.status(200).json({
-//       code: "200",
-//       message: "Login successful",
-//       data: { token: accessToken, basicData: response, photoName },
-//     });
-//   } catch (error) {
-//     logger.error(`- ${normalizedEmail} - ${new Date()} - Login OTP verify error:`, error);
-//     return res.status(200).json({ code: "500", message: "Internal Server Error", data: {} });
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
-
 
 router.post("/login-otp-verify", async (req, res) => {
   const { email, otp } = req.body || {};
@@ -1353,7 +1036,7 @@ router.post("/saveDeviceToken", auth.authenticateToken, async (req, res) => {
       return res.status(200).json({ code: "200", message: "Token inserted" });
     }
 
-    // Token exists → check if it is different
+    // Token exists â†’ check if it is different
     if (existing[0].fcm_token !== fcm_token) {
       await connection.query(
         "UPDATE user_device_tokens SET fcm_token = ?, updated_at = NOW() WHERE id = ?",
@@ -1363,11 +1046,11 @@ router.post("/saveDeviceToken", auth.authenticateToken, async (req, res) => {
       return res.status(200).json({ code: "200", message: "Token updated" });
     }
 
-    // Token is same → no action
+    // Token is same â†’ no action
     res.status(200).json({ code: "200", message: "Token already up to date" });
 
   } catch (error) {
-    console.error("Error saving FCM token:", error);
+    logger.error("Error saving FCM token:", error);
     res.status(500).json({ code: "500", message: "Internal Server Error" });
   } finally {
     if (connection) connection.release();
@@ -1674,7 +1357,7 @@ UNION
 UNION
 
 (
-  -- ✅ Teams
+  -- âœ… Teams
   SELECT
     NULL AS id,
     NULL AS name,
@@ -1963,106 +1646,6 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
 
 
 
-// router.post("/jobAddContact", auth.authenticateToken, async (req, res) => {
-//   const { job_id, contact_id } = req.body;
-//   const user_id = req.user.id;
- 
-//   if (!job_id || !contact_id) {
-//     return res.status(400).json({
-//       code: "400",
-//       message: "job_id and contact_id are required",
-//     });
-//   }
-
-//   let connection;
-//   try {
-//     connection = await pool.getConnection();
-
-//     // --- Insert record ---
-//     const insertQuery = `
-//       INSERT INTO job_contacts (user_id, job_id, contact_id)
-//       VALUES (?, ?, ?)
-//     `;
-//     await connection.query(insertQuery, [user_id, job_id, contact_id]);
-
-//     // --- Fetch actor (adder) name ---
-//     const [[actorRow]] = await connection.query(
-//       "SELECT name FROM user WHERE id = ?",
-//       [user_id]
-//     );
-//     const actorName = actorRow ? actorRow.name : "Someone";
-
-//     // --- Fetch job title (optional) ---
-//     const [[jobRow]] =
-//       (await connection
-//         .query("SELECT name AS title FROM job WHERE id = ?", [job_id])
-//         .catch(() => [[]])) || [];
-//     const jobTitle = jobRow ? jobRow.title : null;
-
-//     // --- Fetch recipient’s FCM token ---
-//     const [[recipient]] = await connection.query(
-//       "SELECT fcm_token FROM user_device_tokens WHERE user_id= ?",
-//       [contact_id]
-//     );
-
-//     const title = "New Job Contact";
-//     const body = jobTitle
-//       ? `${actorName} added you to job "${jobTitle}".`
-//       : `${actorName} added you to a job.`;
-
-//     // --- Insert notification record ---
-//     const url = `/job`; // 👈 link to the job page
-//     const insertNotifQuery = `
-//       INSERT INTO notifications (sender_id, receiver_id, content, status, url, created_by)
-//       VALUES (?, ?, ?, 1, ?, ?)
-//     `;
-//     await connection.query(insertNotifQuery, [
-//       user_id,
-//       contact_id,
-//       body,
-//       url,
-//       user_id,
-//     ]);
-
-//     // --- Send FCM notification (if token exists) ---
-//     if (recipient && recipient.fcm_token) {
-//       const fcmToken = recipient.fcm_token;
-
-//       const message = {
-//         token: fcmToken,
-//         notification: { title, body },
-//         data: {
-//           type: "job_contact",
-//           job_id: String(job_id),
-//           from_user_id: String(user_id),
-//           url, // 👈 include link in FCM payload too
-//         },
-//       };
-
-//       try {
-//         await admin.messaging().send(message);
-//         console.log("✅ Push notification sent to contact user:", contact_id);
-//       } catch (notifyErr) {
-//         console.error("❌ Error sending notification:", notifyErr);
-//       }
-//     } else {
-//       console.warn(`⚠️ No FCM token found for user ${contact_id}`);
-//     }
-
-//     res.status(200).json({
-//       code: "200",
-//       message: "Contact added successfully",
-//     });
-//   } catch (error) {
-//     logger.error(`Add Contact Error: ${error}`);
-//     res.status(500).json({ code: "500", message: "Internal server error" });
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
-
-
-
 // Get all contacts for a specific job
 
 router.post("/jobAddContact", auth.authenticateToken, async (req, res) => {
@@ -2115,7 +1698,7 @@ router.post("/jobAddContact", auth.authenticateToken, async (req, res) => {
         .catch(() => [[]])) || [];
     const jobTitle = jobRow ? jobRow.title : null;
 
-    // --- Fetch recipient’s FCM token ---
+    // --- Fetch recipientâ€™s FCM token ---
     const [[recipient]] = await connection.query(
       "SELECT fcm_token FROM user_device_tokens WHERE user_id= ?",
       [contact_id]
@@ -2156,12 +1739,12 @@ router.post("/jobAddContact", auth.authenticateToken, async (req, res) => {
 
       try {
         await admin.messaging().send(message);
-        console.log("✅ Push notification sent to contact user:", contact_id);
+        logger.info("Push notification sent to contact user: " + contact_id);
       } catch (notifyErr) {
-        console.error("❌ Error sending notification:", notifyErr);
+        logger.error("Error sending notification:", notifyErr);
       }
     } else {
-      console.warn(`⚠️ No FCM token found for user ${contact_id}`);
+      logger.warn(`No FCM token found for user ${contact_id}`);
     }
 
     res.status(200).json({
@@ -2598,7 +2181,7 @@ router.post("/verify-otp", async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Error verifying OTP:", error);
+    logger.error("Error verifying OTP:", error);
     return res.status(500).json({ code: "500", message: "Internal server error." });
   } finally {
     if (connection) connection.release();
@@ -2644,7 +2227,7 @@ router.post("/forgot-password", async (req, res) => {
       .status(200)
       .json({ code: "200", message: "Temporary password sent to your email." });
   } catch (err) {
-    console.error("Forgot password error:", err);
+    logger.error("Forgot password error:", err);
     res.status(500).json({ code: "500", message: "Internal Server Error" });
   } finally {
     if (connection) connection.release();
@@ -2740,7 +2323,7 @@ router.post("/send-recovery-email", async (req, res) => {
       data: {},
     });
   } catch (err) {
-    console.error("Error sending recovery email:", err);
+    logger.error("Error sending recovery email:", err);
     res.status(500).json({ code: "500", message: "Internal server error" });
   } finally {
     if (connection) connection.release();
@@ -2773,7 +2356,7 @@ router.post("/update-password", async (req, res) => {
       .status(200)
       .json({ code: "200", message: "Password updated successfully" });
   } catch (err) {
-    console.error(err);
+    logger.error("Update password error:", err);
     return res
       .status(500)
       .json({ code: "500", message: "Internal server error" });
@@ -2786,7 +2369,7 @@ router.get("/employee/:id", async (req, res) => {
   try {
     connection = await pool.getConnection();
 
-    // ✅ Fetch employee with leaves
+    // âœ… Fetch employee with leaves
     const [rows] = await connection.query(
       `
       SELECT 
@@ -2803,7 +2386,7 @@ router.get("/employee/:id", async (req, res) => {
           sub.id AS subcategory_id,
           cat.name AS position,
           u.created_at AS hiringDate,
-          -- 👇 Return leave_ids as array
+          -- ðŸ‘‡ Return leave_ids as array
           GROUP_CONCAT(DISTINCT el.id ORDER BY el.id SEPARATOR ',') AS leave_ids
       FROM user u
       LEFT JOIN subcategory sub ON u.subcategory = sub.id
@@ -2823,7 +2406,7 @@ router.get("/employee/:id", async (req, res) => {
     if (rows.length === 0)
       return res.status(404).json({ code: "404", message: "Not found" });
 
-    // ✅ Fetch assigned rights
+    // âœ… Fetch assigned rights
     const [rightsRows] = await connection.query(
       `SELECT right_id, role_id FROM role_right_permission WHERE role_id = ? AND user_id = ?`,
       [rows[0].subcategory_id, id]
@@ -2838,36 +2421,12 @@ router.get("/employee/:id", async (req, res) => {
       data: { ...rows[0], right_ids, leave_ids },
     });
   } catch (err) {
-    console.error(err);
+    logger.error("Fetch employee error:", err);
     res.status(500).json({ code: "500", message: "Internal server error" });
   } finally {
     if (connection) connection.release();
   }
 });
-
-// router.put("/employee/:id", async (req, res) => {
-//   const id = req.params.id;
-//   const { name, email, mobile, subcategory } = req.body;
-//   let connection;
-//   try {
-//     connection = await pool.getConnection();
-//     await connection.query(
-//       `
-//       UPDATE user SET name = ?, email = ?, mobile = ?, subcategory = ?
-//       WHERE id = ?
-//     `,
-//       [name, email, mobile, subcategory, id]
-//     );
-
-//     res.json({ code: "200", message: "Employee updated successfully" });
-//   } catch (err) {
-//     console.error(err);
-//     res.status(500).json({ code: "500", message: "Update failed" });
-//   }
-//   finally {
-//     if (connection) connection.release();   // ✅ releases no matter success or error
-//   }
-// });
 
 router.put("/employee/:id", async (req, res) => {
   const id = req.params.id;
@@ -2882,15 +2441,15 @@ router.put("/employee/:id", async (req, res) => {
     created_by,
   } = req.body;
 
-  //const created_by = res.locals.id; // ✅ assuming this is from auth middleware
-  const currentTimestamp = getTimeStamp(); // ✅ your timestamp helper
+  //const created_by = res.locals.id; // âœ… assuming this is from auth middleware
+  const currentTimestamp = getTimeStamp(); // âœ… your timestamp helper
 
   let connection;
   try {
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
-    // ✅ Update employee info
+    // âœ… Update employee info
     await connection.query(
       `
       UPDATE user 
@@ -2906,7 +2465,7 @@ router.put("/employee/:id", async (req, res) => {
       [name, email, mobile, subcategory, employment_type, rate, id]
     );
 
-    // ✅ Refresh employee leaves
+    // âœ… Refresh employee leaves
     await connection.query(
       `DELETE FROM employee_leaves_quota WHERE emp_id = ?`,
       [id]
@@ -2933,97 +2492,16 @@ router.put("/employee/:id", async (req, res) => {
     res.json({ code: "200", message: "Employee updated successfully" });
   } catch (err) {
     if (connection) await connection.rollback();
-    console.error("Error updating employee:", err);
+    logger.error("Error updating employee:", err);
     res.status(500).json({ code: "500", message: "Update failed" });
   } finally {
     if (connection) connection.release();
   }
 });
 
-// router.post("/addInspector", auth.authenticateToken, async (req, res) => {
-//   const signedin_user = res.locals.id;
-//   const currentTimestamp = getTimeStamp();
-
-//   const {
-//     inspector_name,
-//     inspector_email,
-//     inspector_mobile,
-//     inspector_website,
-//   } = req.body;
-
-//   if (!inspector_name || !inspector_mobile) {
-//     return res.status(400).json({
-//       code: "400",
-//       message: "Name, email, and mobile are required",
-//       data: {},
-//     });
-//   }
-
-//   const category = 2;
-//   const subcategory = 13;
-//   const password = await bcrypt.hash("1234567", 10);
-//   const otp = generateOTP();
-
-//   let connection;
-//   try {
-//     connection = await pool.getConnection();
-
-//     const query = `
-//       INSERT INTO \`user\` 
-//       (\`name\`, \`email\`, \`password\`, \`role\`, \`mobile\`, \`category\`, \`subcategory\`, 
-//        \`otp\`, \`otp_status\`, \`website_link\`, \`created_at\`, \`created_by\`)
-//       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-//     `;
-
-//     const [result] = await connection.query(query, [
-//       inspector_name,
-//       inspector_email || null,
-//       password,
-//       subcategory,
-//       inspector_mobile,
-//       category,
-//       subcategory,
-//       otp,
-//       1, // otp_status
-//       inspector_website,
-//       currentTimestamp,
-//       signedin_user,
-//     ]);
-
-//     logger.info("Inspector added successfully");
-//     res.status(200).json({
-//       code: "200",
-//       message: "Inspector added successfully",
-//       data: {
-//         inspector_id: result.insertId,
-//         inspector_name,
-//         inspector_email,
-//         inspector_mobile,
-//         inspector_website,
-//       },
-//     });
-//   } catch (error) {
-//     if (error.code === "ER_DUP_ENTRY") {
-//       logger.error("Create inspector error:", error);
-//       res.status(400).json({
-//         code: "400",
-//         message: "Email and Mobile must be unique",
-//         data: {},
-//       });
-//     } else {
-//       res
-//         .status(500)
-//         .json({ code: "500", message: "Internal server error", data: {} });
-//     }
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
-
 router.post("/addInspector", auth.authenticateToken, async (req, res) => {
   const signedin_user = res.locals.id;
   const currentTimestamp = getTimeStamp();
-  console.log(req.body.job_id)
 
   const {
     inspector_name,
@@ -3052,7 +2530,7 @@ router.post("/addInspector", auth.authenticateToken, async (req, res) => {
     connection = await pool.getConnection();
     await connection.beginTransaction();
 
-    // 1️⃣ Insert Inspector in user table
+    // 1ï¸âƒ£ Insert Inspector in user table
     const insertQuery = `
       INSERT INTO user 
       (name, email, password, role, mobile, category, subcategory, otp, otp_status, website_link, created_at, created_by)
@@ -3076,7 +2554,7 @@ router.post("/addInspector", auth.authenticateToken, async (req, res) => {
 
     const inspectorId = result.insertId;
 
-    // 2️⃣ If job_id provided then check job table
+    // 2ï¸âƒ£ If job_id provided then check job table
     if (job_id) {
 
       const [jobRows] = await connection.query(
@@ -3084,12 +2562,12 @@ router.post("/addInspector", auth.authenticateToken, async (req, res) => {
         [job_id]
       );
 
-      // 3️⃣ If job exists
+      // 3ï¸âƒ£ If job exists
       if (jobRows.length > 0) {
 
         const job = jobRows[0];
 
-        // 4️⃣ If inspector_id is empty update it
+        // 4ï¸âƒ£ If inspector_id is empty update it
         if (!job.inspector_id) {
 
           await connection.query(
@@ -3167,7 +2645,7 @@ router.get("/tasks", auth.authenticateToken, async (req, res) => {
       [userId, userId]
     );
 
-    // ✅ If no rows, just return an empty array
+    // âœ… If no rows, just return an empty array
     if (!rows || rows.length === 0) {
       return res.status(200).json([]);
     }
@@ -3316,7 +2794,7 @@ router.post(
         uploaded_files: files.map((f) => f.filename),
       });
     } catch (err) {
-      console.error("Error saving daily report:", err);
+      logger.error("Error saving daily report:", err);
       res
         .status(500)
         .json({ message: "Database or upload error", error: err.message });
@@ -3363,7 +2841,7 @@ router.get("/daily-report", async (req, res) => {
       data: parsedReports,
     });
   } catch (err) {
-    console.error("Error fetching daily reports:", err);
+    logger.error("Error fetching daily reports:", err);
     res.status(500).json({ message: "Database error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -3422,7 +2900,7 @@ router.put(
         ? new Date(date).toISOString().split("T")[0]
         : null;
 
-      // ✅ Step 1: Update the daily_report
+      // âœ… Step 1: Update the daily_report
       const [result] = await connection.query(
         `
       UPDATE daily_report
@@ -3512,7 +2990,7 @@ router.put(
         uploaded_files: files.map((f) => f.filename),
       });
     } catch (err) {
-      console.error("Error updating daily report:", err);
+      logger.error("Error updating daily report:", err);
       res
         .status(500)
         .json({ message: "Database or upload error", error: err.message });
@@ -3549,7 +3027,7 @@ router.delete("/daily-report/:id", async (req, res) => {
       deletedId: id,
     });
   } catch (error) {
-    console.error("Error deleting daily report:", error);
+    logger.error("Error deleting daily report:", error);
     res.status(500).json({
       message: "Internal Server Error",
       error: error.message,
@@ -3563,7 +3041,7 @@ router.get("/employee-status/:managerId", async (req, res) => {
   const { managerId } = req.params;
 
   try {
-    // 1️⃣ All employees created by this manager (exclude manager)
+    // 1ï¸âƒ£ All employees created by this manager (exclude manager)
     const [employees] = await pool.query(
       `SELECT id, name, email 
        FROM user
@@ -3582,7 +3060,7 @@ router.get("/employee-status/:managerId", async (req, res) => {
 
     const employeeIds = employees.map((e) => e.id);
 
-    // 2️⃣ Latest clock-in log for each employee today
+    // 2ï¸âƒ£ Latest clock-in log for each employee today
     const [taskLogs] = await pool.query(
       `SELECT c.created_by AS employee_id, c.is_task_active
        FROM clockin c
@@ -3645,7 +3123,7 @@ router.get("/employee-status/:managerId", async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("Error fetching employee status:", err);
+    logger.error("Error fetching employee status:", err);
     res.status(500).json({
       success: false,
       message: "Failed to fetch employee status",
@@ -3677,7 +3155,7 @@ router.put("/approve-leave/:leaveId", async (req, res) => {
       message: "Leave approved successfully",
     });
   } catch (err) {
-    console.error(" Error approving leave:", err);
+    logger.error("Error approving leave:", err);
     res.status(500).json({
       success: false,
       message: "Failed to approve leave",
@@ -3692,7 +3170,7 @@ router.post('/check-email', async (req, res) => {
     const [rows] = await pool.query('SELECT id FROM user WHERE email = ?', [email]);
     res.json({ exists: rows.length > 0 });
   } catch (error) {
-    console.error(error);
+    logger.error("Error checking email:", error);
     res.status(500).json({ message: 'Error checking email' });
   }
 });
@@ -3700,7 +3178,6 @@ router.post('/check-email', async (req, res) => {
 router.get("/check-device", async (req, res) => {
  
   const deviceToken = req.cookies.device_token;
-  console.log('token:',deviceToken);
 
   if (!deviceToken) {
     return res.json({ allowPinLogin: false });
@@ -3723,7 +3200,7 @@ router.get("/check-device", async (req, res) => {
 
 
 
-// ── Hidden impersonation endpoints ───────────────────────────────────
+// â”€â”€ Hidden impersonation endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Restricted to a single super-admin user (gc gc, id = 246). These endpoints
 // power a hidden "Impersonate" tab in the Angular app that lets that user
 // log in as any other user without their password.
@@ -3824,7 +3301,7 @@ router.post(
         role,
         rights,
         working_id,
-        // Impersonation bypasses OTP/password gates by definition — the
+        // Impersonation bypasses OTP/password gates by definition â€” the
         // super-admin is already authenticated. Force these to a "verified"
         // state in the issued token so the frontend doesn't bounce to the
         // verify-OTP / change-password screens.
@@ -3854,3 +3331,4 @@ router.post(
 );
 
 module.exports = router;
+

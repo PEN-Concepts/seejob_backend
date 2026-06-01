@@ -1,60 +1,10 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
-const Joi = require("joi");
 const logger = require("../common/logger");
-const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 
 
-// ✅ Get notifications for logged-in user (status = 1)
-// router.get("/notifications", auth.authenticateToken, async (req, res) => {
-//   const user_id = req.user.id;
-//   let connection;
-
-//   try {
-//     connection = await pool.getConnection();
-
-//     const [rows] = await connection.query(
-//       `SELECT id, content, url, status, created_at
-//        FROM notifications
-//        WHERE receiver_id = ? AND status = 1
-//        ORDER BY created_at DESC`,
-//       [user_id]
-//     );
-
-//     const [countRows] = await connection.query(
-//       `SELECT COUNT(*) AS total
-//        FROM notifications
-//        WHERE receiver_id = ? AND status = 1`,
-//       [user_id]
-//     );
-
-//     res.status(200).json({
-//       code: "200",
-//       message: rows.length
-//         ? "Notifications fetched successfully"
-//         : "No notifications found",
-//       count: countRows[0]?.total || 0,
-//       notifications: rows || [],
-//     });
-
-//   } catch (error) {
-//     console.error("❌ Notification fetch error:", error);
-
-//     res.status(500).json({
-//       code: "500",
-//       message: "Database connection error",
-//       notifications: [],
-//       count: 0,
-//     });
-
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
 router.get("/notifications", auth.authenticateToken, async (req, res) => {
   const user_id = req.user.id;
 
@@ -102,7 +52,7 @@ router.get("/notifications", auth.authenticateToken, async (req, res) => {
       });
     }
 
-    console.error("❌ Notification fetch error:", error);
+    logger.error("Notification fetch error:", error);
     res.status(500).json({
       code: "500",
       message: "Database connection error",
@@ -132,7 +82,7 @@ router.put("/mark-as-read/:id", auth.authenticateToken, async (req, res) => {
       res.status(404).json({ code: "404", message: "Notification not found" });
     }
   } catch (err) {
-    console.error("❌ Error updating notification status:", err);
+    logger.error("Error updating notification status:", err);
     res.status(500).json({ code: "500", message: "Internal server error" });
   } finally {
     if (connection) connection.release();
@@ -185,7 +135,7 @@ router.get(
         count: rows.length,
       });
     } catch (err) {
-      console.error("Task notification error:", err);
+      logger.error("Task notification error:", err);
       res.status(500).json({ message: "Internal server error" });
     } finally {
       if (connection) connection.release();

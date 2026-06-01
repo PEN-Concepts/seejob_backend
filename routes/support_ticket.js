@@ -4,6 +4,7 @@ const pool = require('../config/connection');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const logger = require('../common/logger');
 
 // Local multer setup (do not use shared fileUpload.js)
 const storage = multer.diskStorage({
@@ -84,7 +85,7 @@ router.post('/ticket', upload.single('attachment'), async (req, res) => {
       created_at: created_at && String(created_at).trim() !== '' ? String(created_at) : new Date().toISOString(),
     });
   } catch (err) {
-    console.error('POST /support_ticket error:', err);
+    logger.error('POST /support_ticket error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -97,7 +98,7 @@ const listTickets = async (req, res) => {
     );
     return res.status(200).json(rows);
   } catch (err) {
-    console.error('GET /support_ticket error:', err);
+    logger.error('GET /support_ticket error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 };

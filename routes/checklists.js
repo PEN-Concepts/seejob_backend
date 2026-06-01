@@ -7,6 +7,7 @@ const { getTimeStamp } = require('../common/timdate');
 const multer = require('multer');
 const path = require('path');
 const admin = require('../config/firebase-admin');
+const logger = require('../common/logger');
 
 async function resolveBillingUserId(connection, userId) {
   let billingUserId = userId;
@@ -322,7 +323,7 @@ router.post('/sections', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
   } catch (err) {
-    console.error('Error creating checklist section:', err);
+    logger.error('Error creating checklist section:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -382,7 +383,7 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
   } catch (err) {
-    console.error('Error fetching checklist sections:', err);
+    logger.error('Error fetching checklist sections:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -511,7 +512,7 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
   } catch (err) {
-    console.error('Error fetching checklist sections with items:', err);
+    logger.error('Error fetching checklist sections with items:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -574,7 +575,7 @@ router.put('/sections/:id', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
   } catch (err) {
-    console.error('Error updating checklist section:', err);
+    logger.error('Error updating checklist section:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -615,7 +616,7 @@ router.delete('/sections/:id', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
   } catch (err) {
-    console.error('Error deleting checklist section:', err);
+    logger.error('Error deleting checklist section:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -735,7 +736,7 @@ router.post('/create', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
   } catch (err) {
-    console.error('Error creating checklist item:', err);
+    logger.error('Error creating checklist item:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -813,13 +814,13 @@ router.post('/nudge/:id', auth.authenticateToken, async (req, res) => {
       try {
         await admin.messaging().send(message);
       } catch (err) {
-        console.error('FCM Error:', err);
+        logger.error('FCM Error:', err);
       }
     }
 
     res.status(200).json({ success: true, message: 'Nudge sent' });
   } catch (err) {
-    console.error(err);
+    logger.error("Checklist nudge error:", err);
     res.status(500).json({ success: false, message: 'Internal server error' });
   }
 });
@@ -900,7 +901,7 @@ router.get('/list', auth.authenticateToken, async (req, res) => {
       data: rows,
     });
   } catch (err) {
-    console.error('Error fetching checklist items:', err);
+    logger.error('Error fetching checklist items:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -1019,7 +1020,7 @@ router.put('/update/:id', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
   } catch (err) {
-    console.error('Error updating checklist item:', err);
+    logger.error('Error updating checklist item:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -1072,7 +1073,7 @@ router.put('/status-update', auth.authenticateToken, async (req, res) => {
       data: { affectedRows: result.affectedRows },
     });
   } catch (err) {
-    console.error('Error bulk updating checklist status:', err);
+    logger.error('Error bulk updating checklist status:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -1124,7 +1125,7 @@ router.post(
         connection.release();
       }
     } catch (err) {
-      console.error('Error uploading checklist photo:', err);
+      logger.error('Error uploading checklist photo:', err);
       res.status(500).json({ success: false, message: 'Server error' });
     }
   }
@@ -1200,7 +1201,7 @@ router.delete('/delete/:id', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
   } catch (err) {
-    console.error('Error deleting checklist item:', err);
+    logger.error('Error deleting checklist item:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

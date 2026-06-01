@@ -1,16 +1,12 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
-const { addUserSchema } = require("../models/user");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
-const nodemailer = require("nodemailer");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 const storage = multer.diskStorage({
@@ -32,71 +28,13 @@ const formatDate = (d) => {
   return isNaN(date.getTime()) ? null : date.toISOString().split("T")[0];
 };
 
-// router.post("/create",  upload.single("image"),auth.authenticateToken, async (req, res) => {
-//   let connection;
-//   try {
-//     const {
-//       equipment_name,
-//       job_id,
-//       managed_by,
-//       start_date,
-//       end_date,
-//       user_id,
-//       job_location
-//     } = req.body;
-
-//     const created_by = res.locals.id;
-//     const currentTimestamp = getTimeStamp();
-
-//     const startDate = formatDate(start_date);
-//     const endDate = formatDate(end_date);
-
-//     if (!equipment_name) {
-//       return res.status(400).json({ message: "Equipment name is required" });
-//     }
-
-//     const is_assigned = managed_by != null ? 1 : 0;
-
-//     connection = await pool.getConnection();
-
-//     const [result] = await connection.execute(
-//       `INSERT INTO equipments 
-//        (user_id, equipment_name, job_id, managed_by, start_date, end_date, is_assigned, created_at, created_by, job_location)
-//        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-//       [
-//         user_id,
-//         equipment_name,
-//         job_id,
-//         managed_by ?? null,
-//         startDate,
-//         endDate,
-//         is_assigned,
-//         currentTimestamp,
-//         created_by,
-//         job_location
-//       ]
-//     );
-
-//     res.status(201).json({
-//       success: true,
-//       message: "Equipment created successfully",
-//       equipment_id: result.insertId,
-//     });
-
-//   } catch (err) {
-//     res.status(500).json({ message: "Database error", error: err.message });
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
-
 router.post(
   "/create",
   auth.authenticateToken,
   upload.single("image"),
   async (req, res) => {
     let connection;
-    console.log(req.file );
+    logger.info("Equipment file upload received");
     try {
       const {
         equipment_name,
@@ -144,7 +82,7 @@ router.post(
       });
 
     } catch (err) {
-      console.error(err);
+      logger.error("Error creating equipment:", err);
       res.status(500).json({
         message: "Database error",
         error: err.message,
@@ -155,41 +93,6 @@ router.post(
   }
 );
 
-
-// router.get("/list", auth.authenticateToken, async (req, res) => {
-//   const created_by = res.locals.id;
-//   let connection;
-//   try {
-//     connection = await pool.getConnection();
-//     const [rows] = await connection.execute(
-//       `
-//       SELECT 
-//         e.id,
-//         e.equipment_name,
-//         DATE(e.start_date) as start_date,
-//         DATE(e.end_date) as end_date,
-//         e.is_assigned,
-//         j.id As job_id,
-//         j.name AS job_name,
-//         u.id  AS managed_by,
-//         u.name AS user_name,
-//         e.job_location
-//       FROM equipments e
-//       LEFT JOIN job j ON e.job_id = j.id
-//       LEFT JOIN user u ON e.managed_by = u.id
-//       WHERE e.created_by = ?
-//       ORDER BY e.id DESC
-//       `,
-//       [created_by]
-//     );
-
-//     res.json({ success: true, data: rows });
-//   } catch (err) {
-//     res.status(500).json({ message: "Database error", error: err.message });
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
 
 router.get("/list", auth.authenticateToken, async (req, res) => {
   const created_by = res.locals.id;
@@ -234,67 +137,6 @@ router.get("/list", auth.authenticateToken, async (req, res) => {
 });
 
 
-// router.put("/update/:id", auth.authenticateToken, async (req, res) => {
-//   let connection;
-//   try {
-//     const { id } = req.params;
-//     const {
-//       equipment_name,
-//       job_id,
-//       managed_by,
-//       start_date,
-//       end_date
-//     } = req.body;
-
-//     const updated_at = getTimeStamp();
-//     const updated_by = res.locals.id;
-
-//     // ✅ DERIVE is_assigned from managed_by
-//     const is_assigned = managed_by !== null ? 1 : 0;
-
-
-//     connection = await pool.getConnection();
-
-//     const [result] = await connection.execute(
-//       `UPDATE equipments 
-//        SET equipment_name = ?, 
-//            job_id = ?, 
-//            managed_by = ?, 
-//            start_date = ?, 
-//            end_date = ?, 
-//            is_assigned = ?, 
-//            updated_at = ?, 
-//            updated_by = ? 
-//        WHERE id = ?`,
-//       [
-//         equipment_name,
-//         job_id,
-//         managed_by,
-//         start_date,
-//         end_date,
-//         is_assigned,
-//         updated_at,
-//         updated_by,
-//         id
-//       ]
-//     );
-
-//     if (result.affectedRows === 0) {
-//       return res.status(404).json({ message: "Equipment not found" });
-//     }
-
-//     res.json({
-//       success: true,
-//       message: "Equipment updated successfully"
-//     });
-
-//   } catch (err) {
-//     res.status(500).json({ message: "Database error", error: err.message });
-//   } finally {
-//     if (connection) connection.release();
-//   }
-// });
-
 router.put(
   "/update/:id",
   auth.authenticateToken,
@@ -311,7 +153,7 @@ router.put(
         license,
         vin,
         current_location,
-        is_assigned,   // ✅ directly from frontend
+        is_assigned,   // âœ… directly from frontend
         job_id,
         job_location,
         managed_by
@@ -355,7 +197,7 @@ router.put(
           job_id || null,
           job_location || null,
           managed_by || null,
-          is_assigned,      // ✅ used as-is
+          is_assigned,      // âœ… used as-is
           imagePath,
           updated_at,
           updated_by,
@@ -373,7 +215,7 @@ router.put(
       });
 
     } catch (err) {
-      console.error(err);
+      logger.error("Error updating equipment:", err);
       res.status(500).json({
         message: "Database error",
         error: err.message

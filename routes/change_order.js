@@ -1,16 +1,13 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
-const { addUserSchema } = require("../models/user");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const PDFDocument = require("pdfkit");
 const { v4: uuidv4 } = require("uuid");
@@ -236,7 +233,7 @@ router.post('/change-orders/:id/send-email', auth.authenticateToken, async (req,
     const mailOptions = {
       from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
       to: co.client_email,
-      subject: `Change Order from ${creatorName} — ${co.project_address || 'Your Project'}`,
+      subject: `Change Order from ${creatorName} â€” ${co.project_address || 'Your Project'}`,
       html: `
         <!DOCTYPE html>
         <html>
@@ -266,9 +263,9 @@ router.post('/change-orders/:id/send-email', auth.authenticateToken, async (req,
               <p>Hello <strong>${co.client_name || 'there'}</strong>,</p>
               <p><strong>${creatorName}</strong>${co.company_name ? ' from <strong>' + co.company_name + '</strong>' : ''} has sent you a change order for your review.</p>
               
-              <div class="info-row"><span class="info-label">Project:</span> ${co.project_address || '—'}</div>
-              <div class="info-row"><span class="info-label">Date:</span> ${co.change_order_date || '—'}</div>
-              <div class="info-row"><span class="info-label">Valid Until:</span> ${co.valid_until || '—'}</div>
+              <div class="info-row"><span class="info-label">Project:</span> ${co.project_address || 'â€”'}</div>
+              <div class="info-row"><span class="info-label">Date:</span> ${co.change_order_date || 'â€”'}</div>
+              <div class="info-row"><span class="info-label">Valid Until:</span> ${co.valid_until || 'â€”'}</div>
 
               <table>
                 <thead>
@@ -301,13 +298,13 @@ router.post('/change-orders/:id/send-email', auth.authenticateToken, async (req,
       `,
     };
 
-    console.log('Sending change order email to:', co.client_email, 'preview URL:', previewUrl);
+    logger.info(`Sending change order email to: ${co.client_email} preview URL: ${previewUrl}`);
     await transporter.sendMail(mailOptions);
-    console.log('Change order email sent successfully to:', co.client_email);
+    logger.info(`Change order email sent successfully to: ${co.client_email}`);
 
     return res.status(200).json({ code: '200', message: 'Change order email sent to client' });
   } catch (err) {
-    console.error('Change order email send error:', err);
+    logger.error('Change order email send error:', err);
     logger.error('Change order email send error:', err);
     return res.status(500).json({ message: 'Failed to send email', error: err.message });
   } finally {
@@ -1007,7 +1004,7 @@ router.post("/create", auth.authenticateToken, async (req, res) => {
       // Reuse existing unfinished change order
       changeOrderId = existing[0].id;
     } else {
-      // No unfinished record OR existing is completed → create a new row
+      // No unfinished record OR existing is completed â†’ create a new row
       const [coResult] = await connection.execute(
         `INSERT INTO change_order (job_id, created_at, created_by, completed)
          VALUES (?, ?, ?, 0)`,
@@ -1206,7 +1203,7 @@ router.post("/add_contact", auth.authenticateToken, async (req, res) => {
 
     connection = await pool.getConnection();
 
-    // 1️⃣ Find active change_order for this job
+    // 1ï¸âƒ£ Find active change_order for this job
     const [active] = await connection.execute(
       `SELECT id FROM change_order 
          WHERE job_id = ? AND completed = 0
@@ -1222,7 +1219,7 @@ router.post("/add_contact", auth.authenticateToken, async (req, res) => {
 
     const change_order_id = active[0].id;
 
-    // 2️⃣ Prevent duplicate assignment for the same change_order
+    // 2ï¸âƒ£ Prevent duplicate assignment for the same change_order
     const [existing] = await connection.execute(
       `SELECT id FROM change_order_emp 
          WHERE change_order_id = ? AND emp_id = ?`,
@@ -1235,7 +1232,7 @@ router.post("/add_contact", auth.authenticateToken, async (req, res) => {
       });
     }
 
-    // 3️⃣ Insert new record with change_order_id
+    // 3ï¸âƒ£ Insert new record with change_order_id
     const [result] = await connection.execute(
       `INSERT INTO change_order_emp
          (change_order_id, job_id, emp_id, created_at, created_by)
@@ -1629,7 +1626,7 @@ router.get("/user-details", auth.authenticateToken, async (req, res) => {
         LEFT JOIN category c ON u.category = c.id
         LEFT JOIN subcategory s ON u.subcategory = s.id
 
-        /* 🔥 UPDATED WHERE CONDITION */
+        /* ðŸ”¥ UPDATED WHERE CONDITION */
         WHERE coe.emp_id = ?
         GROUP BY co.id
       )
@@ -1696,7 +1693,7 @@ router.get("/user-details", auth.authenticateToken, async (req, res) => {
         LEFT JOIN category c ON u.category = c.id
         LEFT JOIN subcategory s ON u.subcategory = s.id
 
-        /* 🔥 UPDATED WHERE CONDITION */
+        /* ðŸ”¥ UPDATED WHERE CONDITION */
         WHERE coe.emp_id = ?
         GROUP BY co.id
       )
@@ -1712,7 +1709,7 @@ router.get("/user-details", auth.authenticateToken, async (req, res) => {
       data: rows,
     });
   } catch (err) {
-    console.error(err);
+    logger.error("Error fetching user change orders:", err);
     res.status(500).json({
       code: 500,
       message: "Database error",
@@ -1744,7 +1741,7 @@ router.put("/status/:id", auth.authenticateToken, async (req, res) => {
       .status(200)
       .json({ message: "Change order status updated successfully" });
   } catch (err) {
-    console.error(err);
+    logger.error("Error updating change order status:", err);
     res.status(500).json({ message: "Database error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -2194,7 +2191,7 @@ router.post(
 
       res.json({ message: "Email sent successfully" });
     } catch (err) {
-      console.error("Email Change Order Error:", err);
+      logger.error("Email Change Order Error:", err);
       res.status(500).json({ message: "Server error", error: err.message });
     } finally {
       if (connection) connection.release();
@@ -2715,7 +2712,7 @@ router.get(
       // Finalize PDF
       doc.end();
     } catch (err) {
-      console.error(err);
+      logger.error("Error generating PDF:", err);
       res.status(500).json({ message: "Server error", error: err.message });
     } finally {
       if (connection) connection.release();
@@ -2735,7 +2732,7 @@ router.delete("/job-contact/:id", auth.authenticateToken, async (req, res) => {
     }
     res.json({ message: "Employee contact deleted successfully" });
   } catch (err) {
-    console.error(err);
+    logger.error("Error deleting employee contact:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   }
 });
@@ -3015,7 +3012,7 @@ router.get(
         .fontSize(7)
         .fillColor("#95a5a6")
         .text(
-          `See Job Run  •  Generated ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}`,
+          `See Job Run  â€¢  Generated ${new Date().toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" })}`,
           m,
           footerY + 7,
           { width: cw, align: "center" },
@@ -3023,7 +3020,7 @@ router.get(
 
       doc.end();
     } catch (err) {
-      console.error(err);
+      logger.error("Error generating PDF:", err);
       res.status(500).json({ message: "Server error" });
     } finally {
       if (connection) connection.release();
@@ -3032,3 +3029,4 @@ router.get(
 );
 
 module.exports = router;
+

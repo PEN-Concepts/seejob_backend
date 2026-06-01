@@ -1,9 +1,9 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
 const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 
@@ -183,7 +183,7 @@ router.get('/employees', auth.authenticateToken, async (req, res) => {
     res.json(result);
 
   } catch (err) {
-    console.error('Error fetching employees:', err);
+    logger.error('Error fetching employees:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -257,7 +257,7 @@ router.get('/qb-export', auth.authenticateToken, async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csv);
   } catch (err) {
-    console.error('Error generating QuickBooks CSV export:', err);
+    logger.error('Error generating QuickBooks CSV export:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -307,7 +307,7 @@ router.get('/gc-hours', auth.authenticateToken, async (req, res) => {
 
     res.json({ totalHours });
   } catch (err) {
-    console.error('Error fetching GC hours summary:', err);
+    logger.error('Error fetching GC hours summary:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -360,7 +360,7 @@ router.get('/dashboard/today-labor', auth.authenticateToken, async (req, res) =>
       activeWorkers,
     });
   } catch (err) {
-    console.error('Error computing today labor cost:', err);
+    logger.error('Error computing today labor cost:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -373,7 +373,7 @@ router.get('/dashboard/today-labor', auth.authenticateToken, async (req, res) =>
 // get each user time log
 function getWeekRange(offset = 0) {
   const now = new Date();
-  const day = now.getDay() || 7; // Sunday=0 → 7
+  const day = now.getDay() || 7; // Sunday=0 â†’ 7
   const monday = new Date(now);
   monday.setDate(now.getDate() - day + 1 + offset * 7);
   monday.setHours(0, 0, 0, 0);
@@ -398,7 +398,7 @@ router.get("/time-logs/:userId", async (req, res) => {
     startDate = normalizeToYMD(startDate) || normalizeToYMD(endDate);
     endDate = normalizeToYMD(endDate) || startDate;
 
-    // If only one date was effectively provided, auto-end to +4 days (Mon–Fri)
+    // If only one date was effectively provided, auto-end to +4 days (Monâ€“Fri)
     if (startDate && !endDate) {
       const d = new Date(startDate);
       d.setDate(d.getDate() + 4);
@@ -440,7 +440,7 @@ router.get("/time-logs/:userId", async (req, res) => {
        LEFT JOIN tasks t ON t.id = c.task_id
        WHERE c.created_by = ?
          AND c.start_date BETWEEN ? AND ?
-         AND DAYOFWEEK(c.start_date) BETWEEN 2 AND 6  -- Mon=2…Fri=6
+         AND DAYOFWEEK(c.start_date) BETWEEN 2 AND 6  -- Mon=2â€¦Fri=6
        ORDER BY c.start_date, c.start_time`,
       [userId, startDate, endDate]
     );
@@ -486,7 +486,7 @@ router.get("/time-logs/:userId", async (req, res) => {
       days
     });
   } catch (err) {
-    console.error("Error fetching user logs:", err);
+    logger.error("Error fetching user logs:", err);
     res.status(500).json({
       message: 'Database error',
       error: err.message,
@@ -524,7 +524,7 @@ router.put('/time-logs/approve-job/:id(\\d+)', auth.authenticateToken, async (re
     });
 
   } catch (err) {
-    console.error('Error approving job timecard:', err);
+    logger.error('Error approving job timecard:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -591,7 +591,7 @@ router.put('/time-logs/:id(\\d+)', auth.authenticateToken, async (req, res) => {
       break_duration: finalBreakHms,
     });
   } catch (err) {
-    console.error('Error updating time log:', err);
+    logger.error('Error updating time log:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -621,7 +621,7 @@ router.delete('/time-logs/:id(\\d+)', auth.authenticateToken, async (req, res) =
       deleted: result.affectedRows,
     });
   } catch (err) {
-    console.error('Error deleting time log:', err);
+    logger.error('Error deleting time log:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -658,7 +658,7 @@ router.put('/time-logs/:id/remarks', auth.authenticateToken, async (req, res) =>
       updated: result.affectedRows,
     });
   } catch (err) {
-    console.error('Error updating time log remarks:', err);
+    logger.error('Error updating time log remarks:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -693,7 +693,7 @@ router.put('/time-logs/self-approve/:id', auth.authenticateToken, async (req, re
       updated: result.affectedRows,
     });
   } catch (err) {
-    console.error('Error self-approving time log:', err);
+    logger.error('Error self-approving time log:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -730,7 +730,7 @@ router.put('/time-logs/approve-job/:id', auth.authenticateToken, async (req, res
     });
 
   } catch (err) {
-    console.error('Error approving job timecard:', err);
+    logger.error('Error approving job timecard:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -787,7 +787,7 @@ router.put('/time-logs/approve-week', auth.authenticateToken, async (req, res) =
 
     res.json({ message: 'Timecard approved', updated: result.affectedRows });
   } catch (err) {
-    console.error('Error approving timecard:', err);
+    logger.error('Error approving timecard:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -838,7 +838,7 @@ router.put('/time-logs/payroll-week', auth.authenticateToken, async (req, res) =
 
     res.json({ message: 'Timecard marked as paid for payroll', updated: result.affectedRows });
   } catch (err) {
-    console.error('Error processing payroll for timecard:', err);
+    logger.error('Error processing payroll for timecard:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -889,7 +889,7 @@ router.get('/pending-logs/:userId', auth.authenticateToken, async (req, res) => 
         clockin_id: r.clockin_id,
         clock_in: r.start_time,
         clock_out: r.stop_time,
-        hours: +hrs.toFixed(2), // ✅ numeric
+        hours: +hrs.toFixed(2), // âœ… numeric
         status: r.clockin_status,
         job_id: r.job_id,
         job_address: r.job_address || null,
@@ -923,7 +923,7 @@ router.get('/pending-logs/:userId', auth.authenticateToken, async (req, res) => 
 
     res.json(result);
   } catch (err) {
-    console.error("Error fetching pending logs:", err);
+    logger.error("Error fetching pending logs:", err);
     res.status(500).json({ message: "Database error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -943,7 +943,7 @@ router.get('/current-week', auth.authenticateToken,async (req, res) => {
     const startOfWeek = new Date(today.setDate(first)).toISOString().split('T')[0];
     const endOfWeek = new Date(today.setDate(last)).toISOString().split('T')[0];
 
-    // 1️⃣ Fetch all employees (users)
+    // 1ï¸âƒ£ Fetch all employees (users)
     const [users] = await connection.query(`
       SELECT 
         u.id, u.name, u.email, u.role, r.name as role_name,u.image, u.mobile, u.business, u.trade, u.created_by, u.created_at
@@ -952,7 +952,7 @@ router.get('/current-week', auth.authenticateToken,async (req, res) => {
       WHERE u.role = 2 And u.created_by = ?
     `, [createdBy]);
 
-    // 2️⃣ Fetch timecard entries (clockin table)
+    // 2ï¸âƒ£ Fetch timecard entries (clockin table)
     const [timecards] = await connection.query(`
       SELECT 
         c.id,
@@ -973,18 +973,18 @@ router.get('/current-week', auth.authenticateToken,async (req, res) => {
       WHERE DATE(c.start_date) BETWEEN ? AND ?
     `, [startOfWeek, endOfWeek]);
 
-    // 3️⃣ Group timecards by user (created_by)
-  // 3️⃣ Group timecards by user (created_by)
+    // 3ï¸âƒ£ Group timecards by user (created_by)
+  // 3ï¸âƒ£ Group timecards by user (created_by)
 const employees = users.map(user => {
   const empCards = timecards.filter(t => t.created_by === user.id);
 
-  // ✅ Ensure task_duration is numeric
+  // âœ… Ensure task_duration is numeric
   const totalHours = empCards.reduce((acc, tc) => {
     const hours = Number(tc.task_duration) || 0;  // <-- convert to number safely
     return acc + hours;
   }, 0);
 
-  const numericHours = Number(totalHours) || 0; // ✅ ensure totalHours is numeric
+  const numericHours = Number(totalHours) || 0; // âœ… ensure totalHours is numeric
 
   return {
     name: user.name,
@@ -1028,7 +1028,7 @@ const employees = users.map(user => {
       task: tc.task_name || '-',
       clockIn: tc.start_time,
       clockOut: tc.stop_time,
-      hours: Number(tc.task_duration) || 0, // ✅ ensure numeric
+      hours: Number(tc.task_duration) || 0, // âœ… ensure numeric
       status: tc.status || 'Pending',
     })),
   };
@@ -1037,7 +1037,7 @@ const employees = users.map(user => {
 
     res.json({ weekStart: startOfWeek, weekEnd: endOfWeek, employees });
   } catch (err) {
-    console.error('Error fetching employee data:', err);
+    logger.error('Error fetching employee data:', err);
     res.status(500).json({ error: 'Server error', details: err.message });
   } finally {
     if (connection) connection.release();
@@ -1074,7 +1074,7 @@ router.get('/jobs', auth.authenticateToken, async (req, res) => {
 
     res.json({ data: formatted });
   } catch (err) {
-    console.error('Error fetching jobs:', err);
+    logger.error('Error fetching jobs:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1101,7 +1101,7 @@ router.get('/employees-by-user', auth.authenticateToken, async (req, res) => {
 
     res.json({ data: rows });
   } catch (err) {
-    console.error('Error fetching employees:', err);
+    logger.error('Error fetching employees:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1130,7 +1130,7 @@ router.get('/employees-by-user', auth.authenticateToken, async (req, res) => {
       return res.status(400).json({ message: 'Missing required fields.' });
     }
 
-    // 🔹 Convert break minutes (number) → "HH:mm:ss" format
+    // ðŸ”¹ Convert break minutes (number) â†’ "HH:mm:ss" format
     let breakFormatted = '00:00:00';
     if (break_minutes && !isNaN(break_minutes)) {
       const hrs = Math.floor(break_minutes / 60);
@@ -1138,14 +1138,14 @@ router.get('/employees-by-user', auth.authenticateToken, async (req, res) => {
       breakFormatted = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:00`;
     }
 
-    // 🔹 Convert total hours (float) → "HH:mm:ss" (for task_duration)
+    // ðŸ”¹ Convert total hours (float) â†’ "HH:mm:ss" (for task_duration)
     const totalSeconds = Math.round(total_hours * 3600);
     const thh = Math.floor(totalSeconds / 3600);
     const tmm = Math.floor((totalSeconds % 3600) / 60);
     const tss = totalSeconds % 60;
     const taskDurationFormatted = `${String(thh).padStart(2, '0')}:${String(tmm).padStart(2, '0')}:${String(tss).padStart(2, '0')}`;
 
-    // ✅ Insert query
+    // âœ… Insert query
     const sql = `
       INSERT INTO clockin (
         job_id,
@@ -1192,7 +1192,7 @@ router.get('/employees-by-user', auth.authenticateToken, async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Error inserting task:', err);
+    logger.error('Error inserting task:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1246,7 +1246,7 @@ ORDER BY c.start_date DESC;
 
     res.json({ data });
   } catch (err) {
-    console.error('Error fetching manual timecard entries:', err);
+    logger.error('Error fetching manual timecard entries:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1285,7 +1285,7 @@ router.put('/update-time-card-entry/:id', auth.authenticateToken, async (req, re
       breakFormatted = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:00`;
     }
 
-    // Convert total hours (e.g. 7.5) → "HH:mm:ss"
+    // Convert total hours (e.g. 7.5) â†’ "HH:mm:ss"
     const totalSeconds = Math.round(total_hours * 3600);
     const thh = Math.floor(totalSeconds / 3600);
     const tmm = Math.floor((totalSeconds % 3600) / 60);
@@ -1339,7 +1339,7 @@ router.put('/update-time-card-entry/:id', auth.authenticateToken, async (req, re
     });
 
   } catch (err) {
-    console.error(' Error updating manual timecard entry:', err);
+    logger.error('Error updating manual timecard entry:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1376,7 +1376,7 @@ router.put('/time-logs/approve-day', auth.authenticateToken, async (req, res) =>
     });
 
   } catch (err) {
-    console.error('Error approving day timecards:', err);
+    logger.error('Error approving day timecards:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -1415,7 +1415,7 @@ router.get("/leave_request", auth.authenticateToken, async (req, res) => {
       data: rows,
     });
   } catch (err) {
-    console.error("❌ Error fetching leave requests:", err);
+    logger.error("Error fetching leave requests:", err);
     res.status(500).json({
       success: false,
       message: "Failed to fetch leave requests",
@@ -1470,7 +1470,7 @@ router.post("/leave_request", async (req, res) => {
       data: { id: result.insertId },
     });
   } catch (err) {
-    console.error("Error creating leave request:", err);
+    logger.error("Error creating leave request:", err);
     res.status(500).json({
       success: false,
       message: "Failed to create leave request",
@@ -1494,7 +1494,7 @@ router.get('/leave-types', auth.authenticateToken, async (req, res) => {
       data: rows,
     });
   } catch (err) {
-    console.error('Error fetching leave types:', err);
+    logger.error('Error fetching leave types:', err);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch leave types',
@@ -1538,7 +1538,7 @@ router.get('/leave_request/gc', auth.authenticateToken, async (req, res) => {
       data: rows,
     });
   } catch (err) {
-    console.error('❌ Error fetching GC leave requests:', err);
+    logger.error('Error fetching GC leave requests:', err);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch GC leave requests',
@@ -1571,7 +1571,7 @@ router.put('/approve-leave/:leaveId', auth.authenticateToken, async (req, res) =
       message: 'Leave approved successfully',
     });
   } catch (err) {
-    console.error(' Error approving leave (time_card):', err);
+    logger.error('Error approving leave (time_card):', err);
     res.status(500).json({
       success: false,
       message: 'Failed to approve leave',
@@ -1604,7 +1604,7 @@ router.put('/reject-leave/:leaveId', auth.authenticateToken, async (req, res) =>
       message: 'Leave rejected successfully',
     });
   } catch (err) {
-    console.error(' Error rejecting leave (time_card):', err);
+    logger.error('Error rejecting leave (time_card):', err);
     res.status(500).json({
       success: false,
       message: 'Failed to reject leave',
@@ -1643,7 +1643,7 @@ router.put('/time-logs/self-approve-week', auth.authenticateToken, async (req, r
       updated: result.affectedRows,
     });
   } catch (err) {
-    console.error('Error self-approving weekly timecard:', err);
+    logger.error('Error self-approving weekly timecard:', err);
     res.status(500).json({
       success: false,
       message: 'Failed to self-approve weekly timecard',

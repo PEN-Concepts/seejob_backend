@@ -1,12 +1,10 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { contactSchema } = require("../models/contact");
 
@@ -25,7 +23,7 @@ router.get("/search/:key", auth.authenticateToken, async (req, res) => {
         const [rows] = await connection.query(query, [searchKey, searchKey, searchKey]);
         res.status(200).json({ code: "200", message: "Search contact successfully", data: rows });
     } catch (error) {
-        console.error(error);
+        logger.error("Search contact error:", error);
         res.status(500).json({ code: "500", message: "Internal Server Error" });
     } finally {
         if (connection) connection.release();
@@ -313,3 +311,4 @@ router.post("/create", auth.authenticateToken, async (req, res) => {
 
 
 module.exports = router;
+

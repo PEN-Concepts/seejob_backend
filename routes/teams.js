@@ -1,7 +1,5 @@
-const express = require("express");
+﻿const express = require("express");
 const router = express.Router();
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
@@ -9,8 +7,7 @@ const { addUserSchema } = require("../models/user");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
-const nodemailer = require("nodemailer");
-var auth = require("../services/authentication");
+const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 // helper to convert incoming date (ISO or date string) -> 'YYYY-MM-DD' or null
@@ -45,7 +42,7 @@ router.post("/create", auth.authenticateToken, async (req, res) => {
 
     connection = await pool.getConnection();
 
-    // ✅ COLOR UNIQUENESS CHECK
+    // âœ… COLOR UNIQUENESS CHECK
     const [existingColor] = await connection.execute(
       `SELECT id FROM teams WHERE team_color = ? AND created_by = ? LIMIT 1`,
       [team_color, created_by]
@@ -89,7 +86,7 @@ router.post("/create", auth.authenticateToken, async (req, res) => {
 
   } catch (err) {
     if (connection) await connection.rollback();
-    console.error("Create team error:", err);
+    logger.error("Create team error:", err);
     res.status(500).json({ message: "Database error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -132,7 +129,7 @@ router.put("/update/:id", auth.authenticateToken, async (req, res) => {
 
     connection = await pool.getConnection();
 
-    // ✅ COLOR UNIQUENESS CHECK (exclude current team)
+    // âœ… COLOR UNIQUENESS CHECK (exclude current team)
     const [existingColor] = await connection.execute(
       `SELECT id FROM teams 
        WHERE team_color = ? 
@@ -183,7 +180,7 @@ router.put("/update/:id", auth.authenticateToken, async (req, res) => {
 
   } catch (err) {
     if (connection) await connection.rollback();
-    console.error("Update team error:", err);
+    logger.error("Update team error:", err);
     res.status(500).json({ message: "Database error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -270,7 +267,7 @@ router.delete('/teams/:id', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Delete team error:', err);
+    logger.error('Delete team error:', err);
     res.status(500).json({
       success: false,
       message: 'Database error while deleting team',

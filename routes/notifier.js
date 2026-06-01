@@ -3,36 +3,14 @@ const admin = require('./firebaseAdmin');
 const pool = require("../config/connection");
 const express = require("express");
 const router = express.Router();
-const path = require("path");
-// async function sendPushToTokens(tokens, payload) {
-//   if (!tokens || tokens.length === 0) return { successCount: 0 };
+const logger = require("../common/logger");
 
-//   const message = {
-//     tokens,
-//     notification: {
-//       title: payload.title,
-//       body: payload.body,
-//     },
-//     data: payload.data || {}, // optional data payload
-//     android: { priority: 'high' },
-//     apns: { headers: { 'apns-priority': '10' } },
-//   };
-
-//   try {
-//     const response = await admin.messaging().sendMulticast(message);
-//     return response; // contains responses array per token
-//   } catch (err) {
-//     console.error('sendMulticast error', err);
-//     throw err;
-//   }
-// }
 async function sendPushToTokens(tokens, payload) {
   if (!tokens || tokens.length === 0) return { successCount: 0 };
 
   const message = {
     tokens,
 
-    // ✅ REMOVE notification completely
     data: {
       title: payload.title || "New Notification",
       body: payload.body || "",
@@ -47,7 +25,7 @@ async function sendPushToTokens(tokens, payload) {
     const response = await admin.messaging().sendMulticast(message);
     return response;
   } catch (err) {
-    console.error('sendMulticast error', err);
+    logger.error('sendMulticast error', err);
     throw err;
   }
 }
@@ -82,7 +60,7 @@ async function sendNotificationToUser(userId, payload) {
 
     return { sent: response.successCount || 0, invalidTokensCount: invalidTokens.length };
   } catch (err) {
-    console.error('sendNotificationToUser error', err);
+    logger.error('sendNotificationToUser error', err);
     throw err;
   } finally {
     if (conn) conn.release();

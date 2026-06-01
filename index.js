@@ -2,7 +2,7 @@ require('./cron/nudgeReminder');
 require('./cron/autoClockOut');
 require('dotenv').config();
 const express = require("express");
-var cors = require("cors");
+const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
 const { getCurrentDateTime } = require("./common/timdate")
@@ -126,7 +126,7 @@ app.get('/checkdb', async (req, res) => {
         logger.info(`Get Hit on /checkdb - ${currentTime}`);
         res.status(200).json({ message: 'Database connection is active.' });
     } catch (error) {
-        console.error('Error checking database connection:', error);
+        logger.error('Error checking database connection:', error);
         res.status(500).json({ error: 'Database connection is not available.' });
     }
 });
@@ -135,10 +135,10 @@ app.get('/checkdb', async (req, res) => {
 const checkDatabaseConnection = async () => {
     try {
         const [rows, fields] = await pool.query('SELECT 1');
-        console.log('Database connected with', process.env.NODE_ENV);
+        logger.info('Database connected with ' + process.env.NODE_ENV);
         return true;
     } catch (error) {
-        console.error('Error connecting to the database:', error);
+        logger.error('Error connecting to the database:', error);
         return false;
     }
 };
@@ -149,15 +149,15 @@ const startServer = async (retries = 5, delay = 5000) => {
         const dbConnected = await checkDatabaseConnection();
         if (dbConnected) {
             const port = process.env.PORT || 3000;
-            app.listen(port, () => console.log(`Listening on port ${port}`));
+            app.listen(port, () => logger.info(`Listening on port ${port}`));
             return;
         } else {
-            console.log(`Retrying to connect to the database... (${retries - 1} retries left)`);
+            logger.warn(`Retrying to connect to the database... (${retries - 1} retries left)`);
             retries--;
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
-    console.error('Failed to connect to the database after multiple attempts.');
+    logger.error('Failed to connect to the database after multiple attempts.');
     process.exit(1); // Exit the application if unable to connect to the database
 };
 

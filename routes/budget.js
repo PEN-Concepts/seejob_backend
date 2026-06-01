@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
+const logger = require("../common/logger");
 
 async function resolveBillingUserId(connection, userId) {
   let billingUserId = userId;
@@ -147,7 +148,7 @@ router.get(
       );
       return res.json(rows);
     } catch (err) {
-      console.error("Error fetching subcontractors", err);
+      logger.error("Error fetching subcontractors", err);
       return res.status(500).json({ message: "Failed to fetch subcontractors" });
     } finally {
       if (connection) connection.release();
@@ -204,7 +205,7 @@ router.get(
       if (err && err.code === 'ER_NO_SUCH_TABLE') {
         return res.json([]);
       }
-      console.error("Error fetching pay history", err);
+      logger.error("Error fetching pay history", err);
       return res.status(500).json({ message: "Failed to fetch pay history" });
     } finally {
       if (connection) connection.release();
@@ -224,7 +225,7 @@ router.get("/divisions", auth.authenticateToken, requireJobBudgetFeature, async 
     );
     res.json(rows);
   } catch (err) {
-    console.error("Error fetching divisions", err);
+    logger.error("Error fetching divisions", err);
     res.status(500).json({ message: "Failed to fetch divisions" });
   } finally {
     if (connection) connection.release();
@@ -252,7 +253,7 @@ router.get("/lineitems", auth.authenticateToken, requireJobBudgetFeature, async 
     );
     return res.json(rows);
   } catch (err) {
-    console.error("Error fetching all lineitems", err);
+    logger.error("Error fetching all lineitems", err);
     return res.status(500).json({ message: "Failed to fetch lineitems" });
   } finally {
     if (connection) connection.release();
@@ -286,7 +287,7 @@ router.post("/contingency", auth.authenticateToken, requireJobBudgetFeature, asy
       contingency: value,
     });
   } catch (err) {
-    console.error("Error updating contingency", err);
+    logger.error("Error updating contingency", err);
     return res.status(500).json({ message: "Failed to update contingency" });
   } finally {
     if (connection) connection.release();
@@ -314,7 +315,7 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJo
     const [rows] = await connection.query(sql, params);
     res.json(rows);
   } catch (err) {
-    console.error("Error fetching lineitems", err);
+    logger.error("Error fetching lineitems", err);
     res.status(500).json({ message: "Failed to fetch lineitems" });
   } finally {
     if (connection) connection.release();
@@ -540,13 +541,13 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJ
       });
     } catch (err) {
       await connection.rollback();
-      console.error("Error creating line items", err);
+      logger.error("Error creating line items", err);
       return res.status(500).json({ message: "Failed to create line items" });
     } finally {
       connection.release();
     }
   } catch (err) {
-    console.error("Unexpected error creating line items", err);
+    logger.error("Unexpected error creating line items", err);
     return res.status(500).json({ message: "Unexpected error" });
   }
 });
@@ -579,7 +580,7 @@ router.get(
       if (err && err.code === 'ER_NO_SUCH_TABLE') {
         return res.json([]);
       }
-      console.error("Error fetching foreman history", err);
+      logger.error("Error fetching foreman history", err);
       return res.status(500).json({ message: "Failed to fetch foreman history" });
     } finally {
       if (connection) connection.release();
@@ -643,7 +644,7 @@ router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken
     try {
       if (connection) await connection.rollback();
     } catch (_) {}
-    console.error("Error deleting line item", err);
+    logger.error("Error deleting line item", err);
     return res.status(500).json({ message: "Failed to delete line item" });
   } finally {
     if (connection) connection.release();

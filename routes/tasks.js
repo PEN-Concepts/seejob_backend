@@ -8,6 +8,7 @@ const multer = require('multer');
 const auth = require("../services/authentication");
 const { getTimeStamp } = require("../common/timdate");
 const admin = require("../config/firebase-admin");
+const logger = require("../common/logger");
 
 async function attachTaskImages(connectionOrPool, tasks) {
   if (!tasks || tasks.length === 0) return tasks;
@@ -229,13 +230,13 @@ router.post('/nudge/:id', auth.authenticateToken, async (req, res) => {
       try {
         await admin.messaging().send(message);
       } catch (err) {
-        console.error('FCM Error:', err);
+        logger.error('FCM Error:', err);
       }
     }
 
     res.status(200).json({ message: 'Nudge sent' });
   } catch (err) {
-    console.error(err);
+    logger.error("Nudge error:", err);
     res.status(500).json({ message: 'Internal server error' });
   }
 });
@@ -369,7 +370,7 @@ router.post("/create", auth.authenticateToken, upload.single('image'), async (re
 
   } catch (err) {
     if (connection) await connection.rollback();
-    console.error("Error creating task(s):", err);
+    logger.error("Error creating task(s):", err);
     res.status(500).json({
       success: false,
       message: err.message || "Server error",
@@ -451,7 +452,7 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
 
     res.status(200).json(rows);
   } catch (err) {
-    console.error("Error fetching tasks", err);
+    logger.error("Error fetching tasks", err);
     res.status(500).json({ message: "Server error" });
   } finally {
     if (connection) connection.release();
@@ -503,7 +504,7 @@ router.get("/all_lead_task/:id", auth.authenticateToken, async (req, res) => {
     await attachTaskImages(pool, rows);
     res.status(200).json(rows);
   } catch (err) {
-    console.error("Error fetching lead tasks", err);
+    logger.error("Error fetching lead tasks", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -568,7 +569,7 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
 
     res.status(200).json(rows);
   } catch (err) {
-    console.error("Error fetching tasks", err);
+    logger.error("Error fetching daily tasks", err);
     res.status(500).json({ message: "Server error" });
   } finally {
     if (connection) connection.release();
@@ -576,7 +577,7 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
 });
 
 // READ single task
-router.get("/:id", async (req, res) => {
+router.get("/:id", auth.authenticateToken, async (req, res) => {
   try {
     const [rows] = await pool.query("SELECT * FROM tasks WHERE id = ?", [
       req.params.id,
@@ -589,7 +590,7 @@ router.get("/:id", async (req, res) => {
 
     res.status(200).json(task);
   } catch (err) {
-    console.error("Error fetching task", err);
+    logger.error("Error fetching task", err);
     res.status(500).json({ message: "Server error" });
   }
 });
@@ -800,7 +801,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, async 
       setClauses.splice(2, 0, 'job_id = ?'); // insert after user_id
       params.splice(2, 0, parsedJobId);
       if (Number(oldTask.job_id || 0) !== Number(parsedJobId || 0)) {
-        console.warn('Task job_id changing:', { id: req.params.id, from: oldTask.job_id, to: parsedJobId });
+        logger.warn(`Task job_id changing: id=${req.params.id} from=${oldTask.job_id} to=${parsedJobId}`);
       }
     }
 
@@ -888,9 +889,9 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, async 
 
         try {
           await admin.messaging().send(fcmMessage);
-          console.log("🔔 Notification sent to user:", notifyUser);
+          logger.info("Notification sent to user: " + notifyUser);
         } catch (err) {
-          console.log("FCM Error:", err);
+          logger.error("FCM Error:", err);
         }
       }
     }
@@ -902,7 +903,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, async 
     res.status(200).json({ message: "Task updated successfully" });
 
   } catch (err) {
-    console.error(err);
+    logger.error("Error updating task:", err);
     if (connection) {
       try {
         await connection.rollback();
@@ -982,7 +983,7 @@ router.delete("/delete/:id", async (req, res) => {
     try {
       if (connection) await connection.rollback();
     } catch (_) {}
-    console.error("Error deleting task", err);
+    logger.error("Error deleting task", err);
     res.status(500).json({ message: "Server error" });
   } finally {
     if (connection) connection.release();
@@ -1012,7 +1013,7 @@ router.post('/upload-photo/:taskId', upload.single('photo'), async (req, res) =>
     );
     res.status(200).json({ message: 'Photo uploaded', image: relPath });
   } catch (err) {
-    console.error(err);
+    logger.error("Error uploading photo:", err);
     res.status(500).json({ message: 'Upload failed', error: err.message });
   }
 });
@@ -1047,7 +1048,7 @@ router.post('/upload-photos/:taskId', auth.authenticateToken, upload.array('phot
     }
     res.status(200).json({ message: 'Photos uploaded', images: inserted });
   } catch (err) {
-    console.error(err);
+    logger.error("Error uploading photos:", err);
     res.status(500).json({ message: 'Upload failed', error: err.message });
   }
 });
@@ -1061,7 +1062,7 @@ router.get('/images/:taskId', auth.authenticateToken, async (req, res) => {
     );
     res.status(200).json(rows);
   } catch (err) {
-    console.error(err);
+    logger.error("Error fetching task images:", err);
     res.status(500).json({ message: 'Failed to fetch images', error: err.message });
   }
 });
@@ -1094,7 +1095,7 @@ router.delete('/delete-image/:imageId', auth.authenticateToken, async (req, res)
 
     res.status(200).json({ message: 'Image deleted' });
   } catch (err) {
-    console.error(err);
+    logger.error("Error deleting task image:", err);
     res.status(500).json({ message: 'Delete failed', error: err.message });
   }
 });
