@@ -1,9 +1,10 @@
 /node_modules
 /logs
+/uploads
 
 .env
-
 .qodo
+.claude
 
 config/serviceAccountKey.json
-config/serviceAccountKey.json 
+
