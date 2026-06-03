@@ -18,6 +18,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd /home/ubuntu/code/freelance_seejob_node
-            git pull origin main
+            git fetch origin main
+            git reset --hard origin/main
             npm install --production
-            pm2 restart user-back
+            source ~/.nvm/nvm.sh && pm2 restart user-back
