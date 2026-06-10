@@ -27,6 +27,9 @@ async function ensureCslbColumns(connection) {
     ['address', 'TEXT DEFAULT NULL'],
     ['cslb_status', 'VARCHAR(50) DEFAULT NULL'],
     ['cslb_checked_at', 'DATETIME DEFAULT NULL'],
+    ['cslb_classification', 'VARCHAR(255) DEFAULT NULL'],
+    ['cslb_address', 'VARCHAR(255) DEFAULT NULL'],
+    ['cslb_phone', 'VARCHAR(50) DEFAULT NULL'],
   ]) {
     const [[row]] = await connection.query(
       `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
@@ -598,6 +601,9 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
         u.address,
         u.cslb_status,
         u.cslb_checked_at,
+        u.cslb_classification,
+        u.cslb_address,
+        u.cslb_phone,
         (
           SELECT COUNT(*) FROM contact
           WHERE status = 'Accept' AND (request_by = u.id OR request_to = u.id)
@@ -1870,8 +1876,13 @@ router.get('/check-licenses', auth.authenticateToken, async (req, res) => {
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
     for (const r of results) {
       await connection.query(
-        `UPDATE \`user\` SET cslb_status = ?, cslb_checked_at = ? WHERE id = ?`,
-        [r.cslb_status, now, r.id]
+        `UPDATE \`user\`
+         SET cslb_status = ?, cslb_checked_at = ?,
+             cslb_classification = COALESCE(?, cslb_classification),
+             cslb_address = COALESCE(?, cslb_address),
+             cslb_phone = COALESCE(?, cslb_phone)
+         WHERE id = ?`,
+        [r.cslb_status, now, r.cslb_classification, r.cslb_address, r.cslb_phone, r.id]
       );
       r.cslb_checked_at = now;
     }

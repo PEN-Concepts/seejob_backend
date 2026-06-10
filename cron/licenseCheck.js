@@ -34,8 +34,13 @@ cron.schedule('0 2 * * *', async () => {
     const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
     for (const r of results) {
       await connection.query(
-        `UPDATE user SET cslb_status = ?, cslb_checked_at = ? WHERE id = ?`,
-        [r.cslb_status, now, r.id]
+        `UPDATE user
+         SET cslb_status = ?, cslb_checked_at = ?,
+             cslb_classification = COALESCE(?, cslb_classification),
+             cslb_address = COALESCE(?, cslb_address),
+             cslb_phone = COALESCE(?, cslb_phone)
+         WHERE id = ?`,
+        [r.cslb_status, now, r.cslb_classification, r.cslb_address, r.cslb_phone, r.id]
       );
     }
 
