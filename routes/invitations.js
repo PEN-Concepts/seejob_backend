@@ -1763,7 +1763,7 @@ router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async
 // ── Update a contact's profile info (business_name, license, address) ──
 router.post('/update-contact-info', auth.authenticateToken, async (req, res) => {
   const userId = req.user.id;
-  const { contact_user_id, name, mobile, email, business_name, license_number, license_state, address } = req.body;
+  const { contact_user_id, name, mobile, email, business_name, license_number, license_state, manual_status, address } = req.body;
   if (!contact_user_id) return res.status(400).json({ message: 'contact_user_id required' });
 
   let connection;
@@ -1782,8 +1782,9 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
 
     await ensureCslbColumns(connection);
 
-    await connection.query(
-      `UPDATE \`user\`
+    // Out-of-state licenses have no auto-checker; the status is set manually
+    const stateUpper = (license_state || 'CA').toUpperCase();
+    let sql = `UPDATE \`user\`
        SET name = COALESCE(?, name),
            mobile = COALESCE(?, mobile),
            email = COALESCE(?, email),
@@ -1791,20 +1792,24 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
            organization_name = COALESCE(?, organization_name),
            license_number = ?,
            license_state = ?,
-           address = ?
-       WHERE id = ?`,
-      [
-        name || null,
-        mobile || null,
-        email || null,
-        business_name || null,
-        business_name || null,
-        license_number || null,
-        license_state || null,
-        address || null,
-        contact_user_id,
-      ]
-    );
+           address = ?`;
+    const params = [
+      name || null,
+      mobile || null,
+      email || null,
+      business_name || null,
+      business_name || null,
+      license_number || null,
+      license_state || null,
+      address || null,
+    ];
+    if (stateUpper !== 'CA') {
+      sql += `, cslb_status = ?`;
+      params.push(manual_status || null);
+    }
+    sql += ` WHERE id = ?`;
+    params.push(contact_user_id);
+    await connection.query(sql, params);
 
     res.json({ message: 'Contact updated successfully' });
   } catch (err) {
@@ -1846,9 +1851,10 @@ router.post('/check-license/:contactUserId', auth.authenticateToken, async (req,
     }
     const state = (contact.license_state || 'CA').toUpperCase();
     if (state !== 'CA') {
-      // No checker for this state yet — clear any stale CSLB status
+      // No checker for this state yet — clear CSLB-sourced details but keep
+      // any manually-set Active/Inactive status
       await connection.query(
-        `UPDATE \`user\` SET cslb_status = NULL, cslb_classification = NULL,
+        `UPDATE \`user\` SET cslb_classification = NULL,
          cslb_address = NULL, cslb_phone = NULL, cslb_checked_at = NULL WHERE id = ?`,
         [contactUserId]
       );
