@@ -17,6 +17,27 @@ const admin = require("../config/firebase-admin");
 const gcal = require("../services/googleCalendar");
 const { checkAllLicenses } = require("../services/cslbChecker");
 
+// Ensure CSLB-related columns exist on the user table (safe one-time migration).
+// Runs the INFORMATION_SCHEMA check only once per process.
+let cslbColumnsEnsured = false;
+async function ensureCslbColumns(connection) {
+  if (cslbColumnsEnsured) return;
+  for (const [col, def] of [
+    ['license_number', 'VARCHAR(100) DEFAULT NULL'],
+    ['address', 'TEXT DEFAULT NULL'],
+    ['cslb_status', 'VARCHAR(50) DEFAULT NULL'],
+    ['cslb_checked_at', 'DATETIME DEFAULT NULL'],
+  ]) {
+    const [[row]] = await connection.query(
+      `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = ?`,
+      [col]
+    );
+    if (!row) await connection.query(`ALTER TABLE \`user\` ADD COLUMN \`${col}\` ${def}`);
+  }
+  cslbColumnsEnsured = true;
+}
+
 //get contacts
 router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
   let connection;
@@ -560,6 +581,7 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
 
   try {
     connection = await pool.getConnection();
+    await ensureCslbColumns(connection);
 
     const sql = `
       SELECT
@@ -1775,20 +1797,7 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
     );
     if (!conn) return res.status(403).json({ message: 'No accepted connection with this user' });
 
-    // Ensure columns exist (safe one-time migration)
-    for (const [col, def] of [
-      ['license_number', 'VARCHAR(100) DEFAULT NULL'],
-      ['address', 'TEXT DEFAULT NULL'],
-      ['cslb_status', 'VARCHAR(50) DEFAULT NULL'],
-      ['cslb_checked_at', 'DATETIME DEFAULT NULL'],
-    ]) {
-      const [[row]] = await connection.query(
-        `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = ?`,
-        [col]
-      );
-      if (!row) await connection.query(`ALTER TABLE \`user\` ADD COLUMN \`${col}\` ${def}`);
-    }
+    await ensureCslbColumns(connection);
 
     await connection.query(
       `UPDATE \`user\`
@@ -1828,19 +1837,7 @@ router.get('/check-licenses', auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
-    // Ensure columns exist
-    for (const [col, def] of [
-      ['license_number', 'VARCHAR(100) DEFAULT NULL'],
-      ['cslb_status', 'VARCHAR(50) DEFAULT NULL'],
-      ['cslb_checked_at', 'DATETIME DEFAULT NULL'],
-    ]) {
-      const [[row]] = await connection.query(
-        `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = ?`,
-        [col]
-      );
-      if (!row) await connection.query(`ALTER TABLE \`user\` ADD COLUMN \`${col}\` ${def}`);
-    }
+    await ensureCslbColumns(connection);
 
     // Get all accepted contacts who are contractors and have a license number
     const [contractors] = await connection.query(
