@@ -821,7 +821,10 @@ router.post("/login-otp-request", async (req, res) => {
       [otp, Number(user.id), Number(user.id)]
     );
 
-    await sendOTPEmail(normalizedEmail, otp);
+    // Send the email in the background — don't make the user wait on SMTP
+    sendOTPEmail(normalizedEmail, otp).catch((mailErr) => {
+      logger.error(`OTP email failed for ${normalizedEmail}:`, mailErr);
+    });
 
     return res.status(200).json({ code: "200", message: "OTP sent", data: {} });
   } catch (error) {
