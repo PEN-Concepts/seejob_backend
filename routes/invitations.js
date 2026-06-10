@@ -15,6 +15,7 @@ const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { Console } = require("console");
 const admin = require("../config/firebase-admin");
 const gcal = require("../services/googleCalendar");
+const { checkAllLicenses } = require("../services/cslbChecker");
 
 //get contacts
 router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
@@ -561,24 +562,29 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
     connection = await pool.getConnection();
 
     const sql = `
-      SELECT 
+      SELECT
         u.id,
         u.name,
         u.email,
         u.image,
         u.mobile,
         u.created_at AS joined_at,
-        sub.name AS subcategory_name, -- ✅ fetch category name
+        sub.name AS subcategory_name,
         cat.name AS position,
+        COALESCE(u.business, u.organization_name, '') AS business_name,
+        u.license_number,
+        u.address,
+        u.cslb_status,
+        u.cslb_checked_at,
         (
-          SELECT COUNT(*) FROM contact 
+          SELECT COUNT(*) FROM contact
           WHERE status = 'Accept' AND (request_by = u.id OR request_to = u.id)
         ) AS total_connections,
         c.updated_at AS connected_at
       FROM contact c
       JOIN user u ON (u.id = IF(c.request_by = ?, c.request_to, c.request_by))
-      LEFT JOIN subcategory sub ON u.subcategory = sub.id -- ✅ join with subcategory
-      left join category cat ON cat.id = u.category
+      LEFT JOIN subcategory sub ON u.subcategory = sub.id
+      LEFT JOIN category cat ON cat.id = u.category
       WHERE c.status = 'Accept' AND (c.request_by = ? OR c.request_to = ?)
       ORDER BY c.updated_at DESC
     `;
@@ -1717,6 +1723,167 @@ router.get("/get_job_contacts/:job_id", auth.authenticateToken, async (req, res)
   } catch (err) {
     console.error("Error fetching job contacts:", err);
     res.status(500).json({ message: "Database error", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ── Remove an accepted contact connection ──────────────────────────────
+router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const contactUserId = Number(req.params.contactUserId);
+  if (!contactUserId) return res.status(400).json({ message: 'Invalid contact ID' });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [result] = await connection.query(
+      `DELETE FROM contact
+       WHERE status = 'Accept'
+         AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?))`,
+      [userId, contactUserId, contactUserId, userId]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: 'Connection not found' });
+    }
+    res.json({ message: 'Contact removed successfully' });
+  } catch (err) {
+    logger.error('Remove contact error:', err);
+    res.status(500).json({ message: 'Failed to remove contact', error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ── Update a contact's profile info (business_name, license, address) ──
+router.post('/update-contact-info', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const { contact_user_id, name, mobile, email, business_name, license_number, address } = req.body;
+  if (!contact_user_id) return res.status(400).json({ message: 'contact_user_id required' });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Verify an accepted connection exists
+    const [[conn]] = await connection.query(
+      `SELECT id FROM contact
+       WHERE status = 'Accept'
+         AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?))
+       LIMIT 1`,
+      [userId, contact_user_id, contact_user_id, userId]
+    );
+    if (!conn) return res.status(403).json({ message: 'No accepted connection with this user' });
+
+    // Ensure columns exist (safe one-time migration)
+    for (const [col, def] of [
+      ['license_number', 'VARCHAR(100) DEFAULT NULL'],
+      ['address', 'TEXT DEFAULT NULL'],
+      ['cslb_status', 'VARCHAR(50) DEFAULT NULL'],
+      ['cslb_checked_at', 'DATETIME DEFAULT NULL'],
+    ]) {
+      const [[row]] = await connection.query(
+        `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = ?`,
+        [col]
+      );
+      if (!row) await connection.query(`ALTER TABLE \`user\` ADD COLUMN \`${col}\` ${def}`);
+    }
+
+    await connection.query(
+      `UPDATE \`user\`
+       SET name = COALESCE(?, name),
+           mobile = COALESCE(?, mobile),
+           email = COALESCE(?, email),
+           business = COALESCE(?, business),
+           organization_name = COALESCE(?, organization_name),
+           license_number = ?,
+           address = ?
+       WHERE id = ?`,
+      [
+        name || null,
+        mobile || null,
+        email || null,
+        business_name || null,
+        business_name || null,
+        license_number || null,
+        address || null,
+        contact_user_id,
+      ]
+    );
+
+    res.json({ message: 'Contact updated successfully' });
+  } catch (err) {
+    logger.error('update-contact-info error:', err);
+    res.status(500).json({ message: 'Failed to update contact', error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ── Check all contractor licenses against CSLB ─────────────────────────
+router.get('/check-licenses', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Ensure columns exist
+    for (const [col, def] of [
+      ['license_number', 'VARCHAR(100) DEFAULT NULL'],
+      ['cslb_status', 'VARCHAR(50) DEFAULT NULL'],
+      ['cslb_checked_at', 'DATETIME DEFAULT NULL'],
+    ]) {
+      const [[row]] = await connection.query(
+        `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = ?`,
+        [col]
+      );
+      if (!row) await connection.query(`ALTER TABLE \`user\` ADD COLUMN \`${col}\` ${def}`);
+    }
+
+    // Get all accepted contacts who are contractors and have a license number
+    const [contractors] = await connection.query(
+      `SELECT DISTINCT
+         u.id,
+         u.name,
+         COALESCE(u.business, u.organization_name, '') AS business_name,
+         u.license_number,
+         u.cslb_status,
+         u.cslb_checked_at,
+         cat.name AS position
+       FROM contact c
+       JOIN user u ON (u.id = IF(c.request_by = ?, c.request_to, c.request_by))
+       LEFT JOIN category cat ON cat.id = u.category
+       WHERE c.status = 'Accept'
+         AND (c.request_by = ? OR c.request_to = ?)
+         AND u.license_number IS NOT NULL
+         AND u.license_number != ''`,
+      [userId, userId, userId]
+    );
+
+    if (!contractors.length) {
+      return res.json({ checked: 0, results: [], message: 'No contractors with license numbers found. Add a license # to a contractor contact first.' });
+    }
+
+    // Run CSLB checks (sequential with delay — respectful to CSLB server)
+    const results = await checkAllLicenses(contractors);
+
+    // Persist updated statuses
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    for (const r of results) {
+      await connection.query(
+        `UPDATE \`user\` SET cslb_status = ?, cslb_checked_at = ? WHERE id = ?`,
+        [r.cslb_status, now, r.id]
+      );
+      r.cslb_checked_at = now;
+    }
+
+    const flagged = results.filter(r => !['Active', 'No License #', 'Unknown'].includes(r.cslb_status));
+    res.json({ checked: results.length, flagged: flagged.length, results });
+  } catch (err) {
+    logger.error('check-licenses error:', err);
+    res.status(500).json({ message: 'License check failed', error: err.message });
   } finally {
     if (connection) connection.release();
   }
