@@ -1880,9 +1880,11 @@ router.get('/check-licenses', auth.authenticateToken, async (req, res) => {
          SET cslb_status = ?, cslb_checked_at = ?,
              cslb_classification = COALESCE(?, cslb_classification),
              cslb_address = COALESCE(?, cslb_address),
-             cslb_phone = COALESCE(?, cslb_phone)
+             cslb_phone = COALESCE(?, cslb_phone),
+             mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
+             address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
          WHERE id = ?`,
-        [r.cslb_status, now, r.cslb_classification, r.cslb_address, r.cslb_phone, r.id]
+        [r.cslb_status, now, r.cslb_classification, r.cslb_address, r.cslb_phone, r.cslb_phone, r.cslb_address, r.id]
       );
       r.cslb_checked_at = now;
     }
