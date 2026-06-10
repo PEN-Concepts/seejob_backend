@@ -15,31 +15,7 @@ const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { Console } = require("console");
 const admin = require("../config/firebase-admin");
 const gcal = require("../services/googleCalendar");
-const { checkAllLicenses } = require("../services/cslbChecker");
-
-// Ensure CSLB-related columns exist on the user table (safe one-time migration).
-// Runs the INFORMATION_SCHEMA check only once per process.
-let cslbColumnsEnsured = false;
-async function ensureCslbColumns(connection) {
-  if (cslbColumnsEnsured) return;
-  for (const [col, def] of [
-    ['license_number', 'VARCHAR(100) DEFAULT NULL'],
-    ['address', 'TEXT DEFAULT NULL'],
-    ['cslb_status', 'VARCHAR(50) DEFAULT NULL'],
-    ['cslb_checked_at', 'DATETIME DEFAULT NULL'],
-    ['cslb_classification', 'VARCHAR(255) DEFAULT NULL'],
-    ['cslb_address', 'VARCHAR(255) DEFAULT NULL'],
-    ['cslb_phone', 'VARCHAR(50) DEFAULT NULL'],
-  ]) {
-    const [[row]] = await connection.query(
-      `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = ?`,
-      [col]
-    );
-    if (!row) await connection.query(`ALTER TABLE \`user\` ADD COLUMN \`${col}\` ${def}`);
-  }
-  cslbColumnsEnsured = true;
-}
+const { checkLicense, checkAllLicenses, ensureCslbColumns } = require("../services/cslbChecker");
 
 //get contacts
 router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
@@ -598,6 +574,7 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
         cat.name AS position,
         COALESCE(u.business, u.organization_name, '') AS business_name,
         u.license_number,
+        u.license_state,
         u.address,
         u.cslb_status,
         u.cslb_checked_at,
@@ -1786,7 +1763,7 @@ router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async
 // ── Update a contact's profile info (business_name, license, address) ──
 router.post('/update-contact-info', auth.authenticateToken, async (req, res) => {
   const userId = req.user.id;
-  const { contact_user_id, name, mobile, email, business_name, license_number, address } = req.body;
+  const { contact_user_id, name, mobile, email, business_name, license_number, license_state, address } = req.body;
   if (!contact_user_id) return res.status(400).json({ message: 'contact_user_id required' });
 
   let connection;
@@ -1813,6 +1790,7 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
            business = COALESCE(?, business),
            organization_name = COALESCE(?, organization_name),
            license_number = ?,
+           license_state = ?,
            address = ?
        WHERE id = ?`,
       [
@@ -1822,6 +1800,7 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
         business_name || null,
         business_name || null,
         license_number || null,
+        license_state || null,
         address || null,
         contact_user_id,
       ]
@@ -1831,6 +1810,76 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
   } catch (err) {
     logger.error('update-contact-info error:', err);
     res.status(500).json({ message: 'Failed to update contact', error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ── Check one contact's license against CSLB (runs after a contact save) ──
+// Only California licenses can be auto-verified; other states are stored
+// without a status until per-state checkers are added.
+router.post('/check-license/:contactUserId', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const contactUserId = req.params.contactUserId;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Verify an accepted connection exists
+    const [[conn]] = await connection.query(
+      `SELECT id FROM contact
+       WHERE status = 'Accept'
+         AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?))
+       LIMIT 1`,
+      [userId, contactUserId, contactUserId, userId]
+    );
+    if (!conn) return res.status(403).json({ message: 'No accepted connection with this user' });
+
+    await ensureCslbColumns(connection);
+
+    const [[contact]] = await connection.query(
+      `SELECT id, license_number, license_state FROM \`user\` WHERE id = ?`,
+      [contactUserId]
+    );
+    if (!contact || !contact.license_number) {
+      return res.json({ checked: false, reason: 'no_license' });
+    }
+    const state = (contact.license_state || 'CA').toUpperCase();
+    if (state !== 'CA') {
+      // No checker for this state yet — clear any stale CSLB status
+      await connection.query(
+        `UPDATE \`user\` SET cslb_status = NULL, cslb_classification = NULL,
+         cslb_address = NULL, cslb_phone = NULL, cslb_checked_at = NULL WHERE id = ?`,
+        [contactUserId]
+      );
+      return res.json({ checked: false, reason: 'unsupported_state', state });
+    }
+
+    const result = await checkLicense(contact.license_number);
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    await connection.query(
+      `UPDATE \`user\`
+       SET cslb_status = ?, cslb_checked_at = ?,
+           cslb_classification = ?,
+           cslb_address = ?,
+           cslb_phone = ?,
+           mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
+           address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
+       WHERE id = ?`,
+      [result.status, now, result.classification || null, result.address || null,
+       result.phone || null, result.phone || null, result.address || null, contactUserId]
+    );
+
+    const [[updated]] = await connection.query(
+      `SELECT mobile, address, cslb_status, cslb_checked_at, cslb_classification,
+              cslb_address, cslb_phone
+       FROM \`user\` WHERE id = ?`,
+      [contactUserId]
+    );
+    res.json({ checked: true, ...updated });
+  } catch (err) {
+    logger.error('check-license error:', err);
+    res.status(500).json({ message: 'License check failed', error: err.message });
   } finally {
     if (connection) connection.release();
   }

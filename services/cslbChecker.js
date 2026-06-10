@@ -156,4 +156,29 @@ async function checkAllLicenses(contractors) {
   return results;
 }
 
-module.exports = { checkLicense, checkAllLicenses, normalizeStatus };
+// Ensure license-related columns exist on the user table (safe one-time migration).
+// Runs the INFORMATION_SCHEMA check only once per process.
+let columnsEnsured = false;
+async function ensureCslbColumns(connection) {
+  if (columnsEnsured) return;
+  for (const [col, def] of [
+    ['license_number', 'VARCHAR(100) DEFAULT NULL'],
+    ['license_state', 'VARCHAR(30) DEFAULT NULL'],
+    ['address', 'TEXT DEFAULT NULL'],
+    ['cslb_status', 'VARCHAR(50) DEFAULT NULL'],
+    ['cslb_checked_at', 'DATETIME DEFAULT NULL'],
+    ['cslb_classification', 'VARCHAR(255) DEFAULT NULL'],
+    ['cslb_address', 'VARCHAR(255) DEFAULT NULL'],
+    ['cslb_phone', 'VARCHAR(50) DEFAULT NULL'],
+  ]) {
+    const [[row]] = await connection.query(
+      `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = ?`,
+      [col]
+    );
+    if (!row) await connection.query(`ALTER TABLE \`user\` ADD COLUMN \`${col}\` ${def}`);
+  }
+  columnsEnsured = true;
+}
+
+module.exports = { checkLicense, checkAllLicenses, normalizeStatus, ensureCslbColumns };

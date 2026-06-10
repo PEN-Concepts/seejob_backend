@@ -1,7 +1,7 @@
 'use strict';
 const cron = require('node-cron');
 const pool = require('../config/connection');
-const { checkAllLicenses } = require('../services/cslbChecker');
+const { checkAllLicenses, ensureCslbColumns } = require('../services/cslbChecker');
 const logger = require('../common/logger');
 
 // Runs every weekday at 2:00 AM Pacific — checks all contractor licenses and updates cslb_status
@@ -10,12 +10,15 @@ cron.schedule('0 2 * * 1-5', async () => {
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureCslbColumns(connection);
 
-    // Get all connected users who have a license number
+    // Get all connected users who have a California license number
+    // (other states have no auto-checker yet)
     const [contractors] = await connection.query(`
       SELECT DISTINCT u.id, u.name, u.business, u.organization_name, u.license_number
       FROM user u
       WHERE (u.license_number IS NOT NULL AND u.license_number != '')
+        AND (u.license_state IS NULL OR UPPER(u.license_state) = 'CA')
         AND EXISTS (
           SELECT 1 FROM contact c
           WHERE c.status = 'Accept'
