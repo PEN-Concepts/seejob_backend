@@ -1854,6 +1854,9 @@ router.get('/check-licenses', auth.authenticateToken, async (req, res) => {
          u.license_number,
          u.cslb_status,
          u.cslb_checked_at,
+         u.cslb_classification,
+         u.cslb_address,
+         u.cslb_phone,
          cat.name AS position
        FROM contact c
        JOIN user u ON (u.id = IF(c.request_by = ?, c.request_to, c.request_by))
@@ -1869,28 +1872,39 @@ router.get('/check-licenses', auth.authenticateToken, async (req, res) => {
       return res.json({ checked: 0, results: [], message: 'No contractors with license numbers found. Add a license # to a contractor contact first.' });
     }
 
-    // Run CSLB checks (sequential with delay — respectful to CSLB server)
-    const results = await checkAllLicenses(contractors);
+    // Only contact CSLB for licenses not checked within the last 24 hours.
+    // Recently-checked ones are served from the database — the nightly cron
+    // keeps them fresh. This caps CSLB traffic regardless of user count.
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const cutoff = Date.now() - DAY_MS;
+    const stale = contractors.filter(c => !c.cslb_checked_at || new Date(c.cslb_checked_at).getTime() < cutoff);
+    const cached = contractors.filter(c => !stale.includes(c));
 
-    // Persist updated statuses
-    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
-    for (const r of results) {
-      await connection.query(
-        `UPDATE \`user\`
-         SET cslb_status = ?, cslb_checked_at = ?,
-             cslb_classification = COALESCE(?, cslb_classification),
-             cslb_address = COALESCE(?, cslb_address),
-             cslb_phone = COALESCE(?, cslb_phone),
-             mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
-             address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
-         WHERE id = ?`,
-        [r.cslb_status, now, r.cslb_classification, r.cslb_address, r.cslb_phone, r.cslb_phone, r.cslb_address, r.id]
-      );
-      r.cslb_checked_at = now;
+    let updated = [];
+    if (stale.length) {
+      // Run CSLB checks (sequential with delay — respectful to CSLB server)
+      updated = await checkAllLicenses(stale);
+
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      for (const r of updated) {
+        await connection.query(
+          `UPDATE \`user\`
+           SET cslb_status = ?, cslb_checked_at = ?,
+               cslb_classification = COALESCE(?, cslb_classification),
+               cslb_address = COALESCE(?, cslb_address),
+               cslb_phone = COALESCE(?, cslb_phone),
+               mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
+               address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
+           WHERE id = ?`,
+          [r.cslb_status, now, r.cslb_classification, r.cslb_address, r.cslb_phone, r.cslb_phone, r.cslb_address, r.id]
+        );
+        r.cslb_checked_at = now;
+      }
     }
 
+    const results = [...updated, ...cached];
     const flagged = results.filter(r => !['Active', 'No License #', 'Unknown'].includes(r.cslb_status));
-    res.json({ checked: results.length, flagged: flagged.length, results });
+    res.json({ checked: updated.length, cached: cached.length, flagged: flagged.length, results });
   } catch (err) {
     logger.error('check-licenses error:', err);
     res.status(500).json({ message: 'License check failed', error: err.message });

@@ -4,8 +4,8 @@ const pool = require('../config/connection');
 const { checkAllLicenses } = require('../services/cslbChecker');
 const logger = require('../common/logger');
 
-// Runs every day at 2:00 AM — checks all contractor licenses and updates cslb_status
-cron.schedule('0 2 * * *', async () => {
+// Runs every weekday at 2:00 AM Pacific — checks all contractor licenses and updates cslb_status
+cron.schedule('0 2 * * 1-5', async () => {
   logger.info('[LicenseCheck] Starting nightly CSLB license check...');
   let connection;
   try {
