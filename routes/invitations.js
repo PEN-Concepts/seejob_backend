@@ -195,8 +195,8 @@ router.post("/send-invite", auth.authenticateToken, async (req, res) => {
     const title = "New Contact Invitation";
     const body = `${senderName} sent you a contact request.`;
 
-    // url will come to dashboard (same structure as your other API)
-    const url = `/invitation`; // update if you have specific page
+    // Contact requests now live on the Contacts page
+    const url = `/contact`;
 
     // ---------------------------------------------------
     // Insert notification record in DB
@@ -416,7 +416,7 @@ router.get('/get_requested_contacts', auth.authenticateToken, async (req, res) =
       FROM contact c
       JOIN user u1 ON c.request_by = u1.id
       JOIN user u2 ON c.request_to = u2.id
-      WHERE c.request_to  = ? and c.status != 'Accept'
+      WHERE c.request_to = ? AND c.status = 'Pending'
       ORDER BY c.created_at DESC
     `;
 
@@ -585,16 +585,18 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
           SELECT COUNT(*) FROM contact
           WHERE status = 'Accept' AND (request_by = u.id OR request_to = u.id)
         ) AS total_connections,
-        c.updated_at AS connected_at
+        c.updated_at AS connected_at,
+        c.status AS connection_status
       FROM contact c
       JOIN user u ON (u.id = IF(c.request_by = ?, c.request_to, c.request_by))
       LEFT JOIN subcategory sub ON u.subcategory = sub.id
       LEFT JOIN category cat ON cat.id = u.category
-      WHERE c.status = 'Accept' AND (c.request_by = ? OR c.request_to = ?)
+      WHERE (c.status = 'Accept' AND (c.request_by = ? OR c.request_to = ?))
+         OR (c.status IN ('Pending','Saved') AND c.request_by = ?)
       ORDER BY c.updated_at DESC
     `;
 
-    const [rows] = await connection.query(sql, [userId, userId, userId]);
+    const [rows] = await connection.query(sql, [userId, userId, userId, userId]);
 
     res.json(rows);
   } catch (err) {
@@ -1744,8 +1746,7 @@ router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async
     connection = await pool.getConnection();
     const [result] = await connection.query(
       `DELETE FROM contact
-       WHERE status = 'Accept'
-         AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?))`,
+       WHERE (request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)`,
       [userId, contactUserId, contactUserId, userId]
     );
     if (result.affectedRows === 0) {
@@ -1770,15 +1771,15 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
   try {
     connection = await pool.getConnection();
 
-    // Verify an accepted connection exists
+    // Verify a connection exists (accepted, or one we created/invited)
     const [[conn]] = await connection.query(
       `SELECT id FROM contact
-       WHERE status = 'Accept'
-         AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?))
+       WHERE (status = 'Accept' AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)))
+          OR (status IN ('Pending','Saved') AND request_by = ? AND request_to = ?)
        LIMIT 1`,
-      [userId, contact_user_id, contact_user_id, userId]
+      [userId, contact_user_id, contact_user_id, userId, userId, contact_user_id]
     );
-    if (!conn) return res.status(403).json({ message: 'No accepted connection with this user' });
+    if (!conn) return res.status(403).json({ message: 'No connection with this user' });
 
     await ensureCslbColumns(connection);
 
@@ -1820,6 +1821,182 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
   }
 });
 
+// ── Create a contact directly from the Contacts page ───────────────────
+// Creates (or finds) the user, applies profile fields, and links a contact
+// row. send_invite=true emails an invitation (status 'Pending');
+// send_invite=false just stores them (status 'Saved').
+const inviteMailer = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: parseInt(process.env.SMTP_PORT),
+  secure: true,
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  tls: { rejectUnauthorized: false },
+});
+
+async function sendContactInviteEmail(toEmail, inviterName) {
+  await inviteMailer.sendMail({
+    from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
+    to: toEmail,
+    subject: 'Invitation to Join SeeJobRun',
+    text: `${inviterName} invited you to join SeeJobRun. Please sign up and accept the invitation at: https://seejobrun.com/signup`,
+    html: `<p>Hello,</p><p><strong>${inviterName}</strong> invited you to join SeeJobRun.</p><p><a href="https://seejobrun.com/signup">Click here to sign up and accept the invitation.</a></p>`,
+  });
+}
+
+router.post('/save-contact', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const role = Number(req.user && req.user.role);
+  if (role === 12) {
+    return res.status(403).json({ message: 'You are not allowed to create contacts.' });
+  }
+  const {
+    name, email, mobile, business_name, user_type, subcategory,
+    license_number, license_state, address, send_invite,
+  } = req.body;
+  if (!name || !email) return res.status(400).json({ message: 'Name and email are required' });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureCslbColumns(connection);
+    const now = getTimeStamp();
+
+    // Find or create the user (same mapping as the job invite flow)
+    const [[existingUser]] = await connection.query(
+      'SELECT id FROM user WHERE email = ? LIMIT 1', [email]
+    );
+    let contactUserId = existingUser ? existingUser.id : null;
+
+    if (!contactUserId) {
+      const newUserRole = user_type === 'client' ? 3 : Number(subcategory);
+      const newUserCategory = user_type === 'client' ? 3 : 2;
+      const newUserSubcategory = user_type === 'client' ? 11 : 12;
+      const [insertResult] = await connection.query(
+        `INSERT INTO user
+         (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
+         VALUES (?, ?, '', ?, ?, ?, ?, ?, '', '', 1, ?, '', 0, '', ?, 0)`,
+        [name, email, newUserRole, mobile || null, newUserCategory, newUserSubcategory,
+         business_name || '', now, userId]
+      );
+      contactUserId = insertResult.insertId;
+    }
+    if (!contactUserId) return res.status(500).json({ message: 'Could not create contact user' });
+
+    // Apply profile fields (only fill blanks on existing users)
+    await connection.query(
+      `UPDATE \`user\`
+       SET mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
+           business = IF(business IS NULL OR business = '', COALESCE(?, business), business),
+           license_number = COALESCE(license_number, ?),
+           license_state = COALESCE(license_state, ?),
+           address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
+       WHERE id = ?`,
+      [mobile || null, business_name || null, license_number || null,
+       license_state || null, address || null, contactUserId]
+    );
+
+    // Link the contact (unless one already exists)
+    const [[existingLink]] = await connection.query(
+      `SELECT id, status FROM contact
+       WHERE (request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)
+       LIMIT 1`,
+      [userId, contactUserId, contactUserId, userId]
+    );
+
+    const targetStatus = send_invite ? 'Pending' : 'Saved';
+    if (existingLink) {
+      if (existingLink.status === 'Accept') {
+        return res.status(409).json({ message: 'This person is already in your contacts.' });
+      }
+      // Upgrade Saved → Pending when inviting; never downgrade
+      if (send_invite && existingLink.status === 'Saved') {
+        await connection.query(`UPDATE contact SET status = 'Pending', updated_at = NOW() WHERE id = ?`, [existingLink.id]);
+      }
+    } else {
+      await connection.query(
+        `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
+         VALUES (?, ?, ?, NOW(), NOW())`,
+        [userId, contactUserId, targetStatus]
+      );
+    }
+
+    if (send_invite) {
+      // Track for signup sync + send the email
+      const [[existingInvite]] = await connection.query(
+        `SELECT id FROM invited_contacts WHERE email = ? LIMIT 1`, [email]
+      );
+      if (!existingInvite) {
+        await connection.query(
+          `INSERT INTO invited_contacts (name, email, status, created_at, created_by)
+           VALUES (?, ?, 0, ?, ?)`,
+          [name, email, now, userId]
+        );
+      }
+      const [[me]] = await connection.query('SELECT name FROM user WHERE id = ?', [userId]);
+      try {
+        await sendContactInviteEmail(email, me ? me.name : 'A SeeJobRun user');
+      } catch (mailErr) {
+        logger.error('Invite email failed:', mailErr);
+        return res.json({ contact_user_id: contactUserId, status: targetStatus, email_sent: false, message: 'Contact saved, but the invitation email could not be sent. Try Resend Invitation later.' });
+      }
+    }
+
+    res.json({ contact_user_id: contactUserId, status: targetStatus, email_sent: !!send_invite });
+  } catch (err) {
+    logger.error('save-contact error:', err);
+    res.status(500).json({ message: 'Failed to save contact', error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ── Resend (or first-send) an invitation for a Pending/Saved contact ───
+router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const contactUserId = Number(req.params.contactUserId);
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [[link]] = await connection.query(
+      `SELECT id, status FROM contact
+       WHERE request_by = ? AND request_to = ? AND status IN ('Pending','Saved')
+       LIMIT 1`,
+      [userId, contactUserId]
+    );
+    if (!link) return res.status(404).json({ message: 'No pending contact found' });
+
+    const [[contactUser]] = await connection.query(
+      'SELECT name, email FROM user WHERE id = ?', [contactUserId]
+    );
+    if (!contactUser || !contactUser.email) {
+      return res.status(404).json({ message: 'Contact has no email on file' });
+    }
+
+    const [[existingInvite]] = await connection.query(
+      `SELECT id FROM invited_contacts WHERE email = ? LIMIT 1`, [contactUser.email]
+    );
+    if (!existingInvite) {
+      await connection.query(
+        `INSERT INTO invited_contacts (name, email, status, created_at, created_by)
+         VALUES (?, ?, 0, ?, ?)`,
+        [contactUser.name, contactUser.email, getTimeStamp(), userId]
+      );
+    }
+    if (link.status === 'Saved') {
+      await connection.query(`UPDATE contact SET status = 'Pending', updated_at = NOW() WHERE id = ?`, [link.id]);
+    }
+
+    const [[me]] = await connection.query('SELECT name FROM user WHERE id = ?', [userId]);
+    await sendContactInviteEmail(contactUser.email, me ? me.name : 'A SeeJobRun user');
+    res.json({ message: 'Invitation sent', status: 'Pending' });
+  } catch (err) {
+    logger.error('resend-invite error:', err);
+    res.status(500).json({ message: 'Failed to send invitation', error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // ── Check one contact's license against CSLB (runs after a contact save) ──
 // Only California licenses can be auto-verified; other states are stored
 // without a status until per-state checkers are added.
@@ -1830,15 +2007,15 @@ router.post('/check-license/:contactUserId', auth.authenticateToken, async (req,
   try {
     connection = await pool.getConnection();
 
-    // Verify an accepted connection exists
+    // Verify a connection exists (accepted, or one we created/invited)
     const [[conn]] = await connection.query(
       `SELECT id FROM contact
-       WHERE status = 'Accept'
-         AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?))
+       WHERE (status = 'Accept' AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)))
+          OR (status IN ('Pending','Saved') AND request_by = ? AND request_to = ?)
        LIMIT 1`,
-      [userId, contactUserId, contactUserId, userId]
+      [userId, contactUserId, contactUserId, userId, userId, contactUserId]
     );
-    if (!conn) return res.status(403).json({ message: 'No accepted connection with this user' });
+    if (!conn) return res.status(403).json({ message: 'No connection with this user' });
 
     await ensureCslbColumns(connection);
 
