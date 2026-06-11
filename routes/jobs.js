@@ -750,7 +750,49 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
         }
       }
     }
-    res.json({ processed: jobs.length, linked });
+
+    // Jobs whose client is a picked user (client_id) with no contact link yet
+    const [idJobs] = await connection.query(
+      `SELECT DISTINCT j.client_id
+       FROM job j
+       JOIN user u ON u.id = j.client_id
+       WHERE j.created_by = ?
+         AND j.client_id IS NOT NULL AND j.client_id != 0 AND j.client_id != ?`,
+      [userId, userId]
+    );
+    for (const row of idJobs) {
+      const [[link]] = await connection.query(
+        `SELECT id FROM contact
+         WHERE (request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)
+         LIMIT 1`,
+        [userId, row.client_id, row.client_id, userId]
+      );
+      if (!link) {
+        await connection.query(
+          `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
+           VALUES (?, ?, 'Saved', NOW(), NOW())`,
+          [userId, row.client_id]
+        );
+        linked++;
+      }
+    }
+
+    // Jobs with only a client name — nothing to match or create a user on
+    const [nameOnly] = await connection.query(
+      `SELECT DISTINCT additional_client_name AS name
+       FROM job
+       WHERE created_by = ?
+         AND (additional_client_email IS NULL OR additional_client_email = '')
+         AND (client_id IS NULL OR client_id = 0)
+         AND additional_client_name IS NOT NULL AND additional_client_name != ''`,
+      [userId]
+    );
+
+    res.json({
+      processed: jobs.length + idJobs.length,
+      linked,
+      skipped: nameOnly.map((n) => n.name),
+    });
   } catch (err) {
     logger.error("sync-job-clients error:", err);
     res.status(500).json({ message: "Failed to sync job clients", error: err.message });
