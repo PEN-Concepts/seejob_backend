@@ -720,16 +720,25 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
+
+    // Same visibility rule as GET /jobs: employees inherit their creator's jobs
+    const [userRows] = await connection.query(
+      "SELECT created_by FROM user WHERE id = ?",
+      [userId]
+    );
+    const managerId =
+      userRows.length && userRows[0].created_by ? userRows[0].created_by : userId;
+
     const [jobs] = await connection.query(
       `SELECT id, client_id,
               additional_client_name AS name,
               additional_client_email AS email,
               additional_client_mobile AS mobile
        FROM job
-       WHERE created_by = ?
+       WHERE created_by IN (?, ?)
          AND additional_client_email IS NOT NULL
          AND additional_client_email != ''`,
-      [userId]
+      [userId, managerId]
     );
 
     let linked = 0;
@@ -756,9 +765,9 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
       `SELECT DISTINCT j.client_id
        FROM job j
        JOIN user u ON u.id = j.client_id
-       WHERE j.created_by = ?
+       WHERE j.created_by IN (?, ?)
          AND j.client_id IS NOT NULL AND j.client_id != 0 AND j.client_id != ?`,
-      [userId, userId]
+      [userId, managerId, userId]
     );
     for (const row of idJobs) {
       const [[link]] = await connection.query(
@@ -781,15 +790,22 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
     const [nameOnly] = await connection.query(
       `SELECT DISTINCT additional_client_name AS name
        FROM job
-       WHERE created_by = ?
+       WHERE created_by IN (?, ?)
          AND (additional_client_email IS NULL OR additional_client_email = '')
          AND (client_id IS NULL OR client_id = 0)
          AND additional_client_name IS NOT NULL AND additional_client_name != ''`,
-      [userId]
+      [userId, managerId]
+    );
+
+    const [[jobCount]] = await connection.query(
+      `SELECT COUNT(*) AS total FROM job WHERE created_by IN (?, ?)`,
+      [userId, managerId]
     );
 
     res.json({
-      processed: jobs.length + idJobs.length,
+      total_jobs: jobCount.total,
+      with_client_email: jobs.length,
+      with_picked_client: idJobs.length,
       linked,
       skipped: nameOnly.map((n) => n.name),
     });
