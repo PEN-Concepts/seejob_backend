@@ -253,6 +253,25 @@ async function ensureClientContact(connection, { createdBy, name, email, mobile 
       [cleanEmail]
     );
     clientUserId = existing ? existing.id : null;
+
+    // A real email arriving for a previously email-less imported client
+    // upgrades that contact instead of creating a duplicate
+    if (!clientUserId && cleanName) {
+      const [[placeholder]] = await connection.query(
+        `SELECT id FROM user
+         WHERE name = ? AND created_by = ?
+           AND (email IS NULL OR email = '' OR email LIKE '%@no-email.invalid')
+         LIMIT 1`,
+        [cleanName, createdBy]
+      );
+      if (placeholder) {
+        await connection.query("UPDATE user SET email = ? WHERE id = ?", [
+          cleanEmail,
+          placeholder.id,
+        ]);
+        clientUserId = placeholder.id;
+      }
+    }
   } else {
     // Email-less clients carry a unique placeholder on a no-mail domain
     const [[existing]] = await connection.query(
@@ -736,7 +755,7 @@ const [result] = await connection.execute(
 });
 
 // Deploy marker: lets tooling confirm which sweep version is live
-router.get("/client-sync-version", (req, res) => res.json({ v: 6 }));
+router.get("/client-sync-version", (req, res) => res.json({ v: 7 }));
 
 // One-time/idempotent sweep: pull clients typed into existing jobs into the
 // creator's contacts as 'Saved'. Safe to call repeatedly.
