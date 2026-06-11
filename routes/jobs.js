@@ -12,6 +12,7 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
+const { ensureContactStatusColumn } = require("../services/dbMigrations");
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
 const jobSchema = Joi.object({
@@ -721,6 +722,7 @@ const [result] = await connection.execute(
 
     // Typed-in client info becomes a Saved contact automatically
     try {
+      await ensureContactStatusColumn(connection);
       const clientContact = await ensureClientContact(connection, {
         createdBy: created_by,
         name: client_name,
@@ -755,7 +757,7 @@ const [result] = await connection.execute(
 });
 
 // Deploy marker: lets tooling confirm which sweep version is live
-router.get("/client-sync-version", (req, res) => res.json({ v: 7 }));
+router.get("/client-sync-version", (req, res) => res.json({ v: 8 }));
 
 // One-time/idempotent sweep: pull clients typed into existing jobs into the
 // creator's contacts as 'Saved'. Safe to call repeatedly.
@@ -764,6 +766,7 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureContactStatusColumn(connection);
 
     // Same visibility rule as GET /jobs: employees inherit their creator's jobs
     const [userRows] = await connection.query(

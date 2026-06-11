@@ -16,6 +16,7 @@ const { Console } = require("console");
 const admin = require("../config/firebase-admin");
 const gcal = require("../services/googleCalendar");
 const { checkLicense, checkAllLicenses, ensureCslbColumns } = require("../services/cslbChecker");
+const { ensureContactStatusColumn } = require("../services/dbMigrations");
 
 //get contacts
 router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
@@ -1859,6 +1860,7 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
     await ensureCslbColumns(connection);
+    await ensureContactStatusColumn(connection);
     const now = getTimeStamp();
 
     // Find or create the user (same mapping as the job invite flow)
