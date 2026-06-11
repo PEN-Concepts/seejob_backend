@@ -731,7 +731,7 @@ const [result] = await connection.execute(
 });
 
 // Deploy marker: lets tooling confirm which sweep version is live
-router.get("/client-sync-version", (req, res) => res.json({ v: 4 }));
+router.get("/client-sync-version", (req, res) => res.json({ v: 5 }));
 
 // One-time/idempotent sweep: pull clients typed into existing jobs into the
 // creator's contacts as 'Saved'. Safe to call repeatedly.
@@ -820,6 +820,7 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
     );
 
     const failed = [];
+    let firstError = null;
     for (const j of nameOnlyJobs) {
       try {
         const clientContact = await ensureClientContact(connection, {
@@ -839,6 +840,7 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
         }
       } catch (rowErr) {
         logger.error(`sync-job-clients failed for "${j.name}":`, rowErr);
+        if (!firstError) firstError = rowErr.message;
         failed.push(j.name);
       }
     }
@@ -856,6 +858,7 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
       name_only: nameOnly.length,
       linked,
       skipped: failed,
+      first_error: firstError,
     });
   } catch (err) {
     logger.error("sync-job-clients error:", err);
