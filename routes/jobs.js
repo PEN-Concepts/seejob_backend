@@ -237,6 +237,51 @@ async function linkContact(connection, requestBy, requestTo) {
   );
 }
 
+// Ensure a typed-in job client exists as a user and shows in the creator's
+// contacts as 'Saved' (not invited). Requires an email to dedupe on;
+// returns the client's user id or null.
+async function ensureClientContact(connection, { createdBy, name, email, mobile }) {
+  const cleanEmail = String(email || "").trim();
+  if (!cleanEmail || !createdBy) return null;
+
+  const [[existing]] = await connection.query(
+    "SELECT id FROM user WHERE email = ? LIMIT 1",
+    [cleanEmail]
+  );
+  let clientUserId = existing ? existing.id : null;
+
+  if (!clientUserId) {
+    const [ins] = await connection.query(
+      `INSERT INTO user
+       (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
+       VALUES (?, ?, '', 3, ?, 3, 11, '', '', '', 1, ?, '', 0, '', ?, 0)`,
+      [name || cleanEmail, cleanEmail, mobile || null, getTimeStamp(), createdBy]
+    );
+    clientUserId = ins.insertId;
+  } else if (mobile) {
+    await connection.query(
+      `UPDATE user SET mobile = IF(mobile IS NULL OR mobile = '', ?, mobile) WHERE id = ?`,
+      [mobile, clientUserId]
+    );
+  }
+  if (!clientUserId || Number(clientUserId) === Number(createdBy)) return clientUserId;
+
+  const [[link]] = await connection.query(
+    `SELECT id FROM contact
+     WHERE (request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)
+     LIMIT 1`,
+    [createdBy, clientUserId, clientUserId, createdBy]
+  );
+  if (!link) {
+    await connection.query(
+      `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
+       VALUES (?, ?, 'Saved', NOW(), NOW())`,
+      [createdBy, clientUserId]
+    );
+  }
+  return clientUserId;
+}
+
 // ---- /send-invite route ------------------------------------------------
 
 router.post("/send-invite", auth.authenticateToken, async (req, res) => {
@@ -633,6 +678,24 @@ const [result] = await connection.execute(
   safeValues
 );
 
+    // Typed-in client info becomes a Saved contact automatically
+    try {
+      const clientUserId = await ensureClientContact(connection, {
+        createdBy: created_by,
+        name: client_name,
+        email: client_email,
+        mobile: client_mobile,
+      });
+      if (clientUserId && !client_id) {
+        await connection.query("UPDATE job SET client_id = ? WHERE id = ?", [
+          clientUserId,
+          result.insertId,
+        ]);
+      }
+    } catch (contactErr) {
+      logger.error("Auto client contact failed on job create:", contactErr);
+    }
+
     res.status(201).json({
       // ✅ use 201 here
       code: "JOB_CREATED",
@@ -645,6 +708,52 @@ const [result] = await connection.execute(
       message: "Database error",
       error: err.message,
     });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// One-time/idempotent sweep: pull clients typed into existing jobs into the
+// creator's contacts as 'Saved'. Safe to call repeatedly.
+router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [jobs] = await connection.query(
+      `SELECT id, client_id,
+              additional_client_name AS name,
+              additional_client_email AS email,
+              additional_client_mobile AS mobile
+       FROM job
+       WHERE created_by = ?
+         AND additional_client_email IS NOT NULL
+         AND additional_client_email != ''`,
+      [userId]
+    );
+
+    let linked = 0;
+    for (const j of jobs) {
+      const clientUserId = await ensureClientContact(connection, {
+        createdBy: userId,
+        name: j.name,
+        email: j.email,
+        mobile: j.mobile,
+      });
+      if (clientUserId) {
+        linked++;
+        if (!j.client_id) {
+          await connection.query("UPDATE job SET client_id = ? WHERE id = ?", [
+            clientUserId,
+            j.id,
+          ]);
+        }
+      }
+    }
+    res.json({ processed: jobs.length, linked });
+  } catch (err) {
+    logger.error("sync-job-clients error:", err);
+    res.status(500).json({ message: "Failed to sync job clients", error: err.message });
   } finally {
     if (connection) connection.release();
   }
