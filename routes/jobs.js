@@ -238,24 +238,37 @@ async function linkContact(connection, requestBy, requestTo) {
 }
 
 // Ensure a typed-in job client exists as a user and shows in the creator's
-// contacts as 'Saved' (not invited). Requires an email to dedupe on;
-// returns the client's user id or null.
+// contacts as 'Saved' (not invited). Dedupes by email when present, else by
+// name among this creator's email-less clients.
+// Returns { id, linkedNow } or null.
 async function ensureClientContact(connection, { createdBy, name, email, mobile }) {
   const cleanEmail = String(email || "").trim();
-  if (!cleanEmail || !createdBy) return null;
+  const cleanName = String(name || "").trim();
+  if (!createdBy || (!cleanEmail && !cleanName)) return null;
 
-  const [[existing]] = await connection.query(
-    "SELECT id FROM user WHERE email = ? LIMIT 1",
-    [cleanEmail]
-  );
-  let clientUserId = existing ? existing.id : null;
+  let clientUserId = null;
+  if (cleanEmail) {
+    const [[existing]] = await connection.query(
+      "SELECT id FROM user WHERE email = ? LIMIT 1",
+      [cleanEmail]
+    );
+    clientUserId = existing ? existing.id : null;
+  } else {
+    const [[existing]] = await connection.query(
+      `SELECT id FROM user
+       WHERE name = ? AND created_by = ? AND (email IS NULL OR email = '')
+       LIMIT 1`,
+      [cleanName, createdBy]
+    );
+    clientUserId = existing ? existing.id : null;
+  }
 
   if (!clientUserId) {
     const [ins] = await connection.query(
       `INSERT INTO user
        (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
        VALUES (?, ?, '', 3, ?, 3, 11, '', '', '', 1, ?, '', 0, '', ?, 0)`,
-      [name || cleanEmail, cleanEmail, mobile || null, getTimeStamp(), createdBy]
+      [cleanName || cleanEmail, cleanEmail || null, mobile || null, getTimeStamp(), createdBy]
     );
     clientUserId = ins.insertId;
   } else if (mobile) {
@@ -264,7 +277,9 @@ async function ensureClientContact(connection, { createdBy, name, email, mobile 
       [mobile, clientUserId]
     );
   }
-  if (!clientUserId || Number(clientUserId) === Number(createdBy)) return clientUserId;
+  if (!clientUserId || Number(clientUserId) === Number(createdBy)) {
+    return clientUserId ? { id: clientUserId, linkedNow: false } : null;
+  }
 
   const [[link]] = await connection.query(
     `SELECT id FROM contact
@@ -272,14 +287,16 @@ async function ensureClientContact(connection, { createdBy, name, email, mobile 
      LIMIT 1`,
     [createdBy, clientUserId, clientUserId, createdBy]
   );
+  let linkedNow = false;
   if (!link) {
     await connection.query(
       `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
        VALUES (?, ?, 'Saved', NOW(), NOW())`,
       [createdBy, clientUserId]
     );
+    linkedNow = true;
   }
-  return clientUserId;
+  return { id: clientUserId, linkedNow };
 }
 
 // ---- /send-invite route ------------------------------------------------
@@ -680,15 +697,15 @@ const [result] = await connection.execute(
 
     // Typed-in client info becomes a Saved contact automatically
     try {
-      const clientUserId = await ensureClientContact(connection, {
+      const clientContact = await ensureClientContact(connection, {
         createdBy: created_by,
         name: client_name,
         email: client_email,
         mobile: client_mobile,
       });
-      if (clientUserId && !client_id) {
+      if (clientContact && !client_id) {
         await connection.query("UPDATE job SET client_id = ? WHERE id = ?", [
-          clientUserId,
+          clientContact.id,
           result.insertId,
         ]);
       }
@@ -743,17 +760,17 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
 
     let linked = 0;
     for (const j of jobs) {
-      const clientUserId = await ensureClientContact(connection, {
+      const clientContact = await ensureClientContact(connection, {
         createdBy: userId,
         name: j.name,
         email: j.email,
         mobile: j.mobile,
       });
-      if (clientUserId) {
-        linked++;
+      if (clientContact) {
+        if (clientContact.linkedNow) linked++;
         if (!j.client_id) {
           await connection.query("UPDATE job SET client_id = ? WHERE id = ?", [
-            clientUserId,
+            clientContact.id,
             j.id,
           ]);
         }
@@ -786,9 +803,10 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
       }
     }
 
-    // Jobs with only a client name — nothing to match or create a user on
+    // Jobs with only a client name — import as email-less Saved contacts
     const [nameOnly] = await connection.query(
-      `SELECT DISTINCT additional_client_name AS name
+      `SELECT DISTINCT additional_client_name AS name,
+              additional_client_mobile AS mobile
        FROM job
        WHERE created_by IN (?, ?)
          AND (additional_client_email IS NULL OR additional_client_email = '')
@@ -796,6 +814,23 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
          AND additional_client_name IS NOT NULL AND additional_client_name != ''`,
       [userId, managerId]
     );
+
+    const failed = [];
+    for (const n of nameOnly) {
+      try {
+        const clientContact = await ensureClientContact(connection, {
+          createdBy: userId,
+          name: n.name,
+          email: null,
+          mobile: n.mobile,
+        });
+        if (clientContact && clientContact.linkedNow) linked++;
+        if (!clientContact) failed.push(n.name);
+      } catch (rowErr) {
+        logger.error(`sync-job-clients failed for "${n.name}":`, rowErr);
+        failed.push(n.name);
+      }
+    }
 
     const [[jobCount]] = await connection.query(
       `SELECT COUNT(*) AS total FROM job WHERE created_by IN (?, ?)`,
@@ -806,8 +841,9 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
       total_jobs: jobCount.total,
       with_client_email: jobs.length,
       with_picked_client: idJobs.length,
+      name_only: nameOnly.length,
       linked,
-      skipped: nameOnly.map((n) => n.name),
+      skipped: failed,
     });
   } catch (err) {
     logger.error("sync-job-clients error:", err);
