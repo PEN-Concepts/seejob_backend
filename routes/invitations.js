@@ -582,6 +582,9 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
         u.cslb_classification,
         u.cslb_address,
         u.cslb_phone,
+        u.spouse_name,
+        u.spouse_email,
+        u.spouse_phone,
         (
           SELECT COUNT(*) FROM contact
           WHERE status = 'Accept' AND (request_by = u.id OR request_to = u.id)
@@ -1765,7 +1768,7 @@ router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async
 // ── Update a contact's profile info (business_name, license, address) ──
 router.post('/update-contact-info', auth.authenticateToken, async (req, res) => {
   const userId = req.user.id;
-  const { contact_user_id, name, mobile, email, business_name, license_number, license_state, manual_status, address } = req.body;
+  const { contact_user_id, name, mobile, email, business_name, license_number, license_state, manual_status, address, spouse_name, spouse_email, spouse_phone } = req.body;
   if (!contact_user_id) return res.status(400).json({ message: 'contact_user_id required' });
 
   let connection;
@@ -1794,7 +1797,10 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
            organization_name = COALESCE(?, organization_name),
            license_number = ?,
            license_state = ?,
-           address = ?`;
+           address = ?,
+           spouse_name = ?,
+           spouse_email = ?,
+           spouse_phone = ?`;
     const params = [
       name || null,
       mobile || null,
@@ -1804,6 +1810,9 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
       license_number || null,
       license_state || null,
       address || null,
+      spouse_name || null,
+      spouse_email || null,
+      spouse_phone || null,
     ];
     if (stateUpper !== 'CA') {
       sql += `, cslb_status = ?`;

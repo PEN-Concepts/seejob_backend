@@ -170,6 +170,9 @@ async function ensureCslbColumns(connection) {
     ['cslb_classification', 'VARCHAR(255) DEFAULT NULL'],
     ['cslb_address', 'VARCHAR(255) DEFAULT NULL'],
     ['cslb_phone', 'VARCHAR(50) DEFAULT NULL'],
+    ['spouse_name', 'VARCHAR(150) DEFAULT NULL'],
+    ['spouse_email', 'VARCHAR(150) DEFAULT NULL'],
+    ['spouse_phone', 'VARCHAR(50) DEFAULT NULL'],
   ]) {
     const [[row]] = await connection.query(
       `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS

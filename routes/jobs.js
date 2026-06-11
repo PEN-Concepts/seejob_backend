@@ -757,7 +757,7 @@ const [result] = await connection.execute(
 });
 
 // Deploy marker: lets tooling confirm which sweep version is live
-router.get("/client-sync-version", (req, res) => res.json({ v: 8 }));
+router.get("/client-sync-version", (req, res) => res.json({ v: 9 }));
 
 // One-time/idempotent sweep: pull clients typed into existing jobs into the
 // creator's contacts as 'Saved'. Safe to call repeatedly.
@@ -858,10 +858,15 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
         });
         if (clientContact) {
           if (clientContact.linkedNow) linked++;
-          await connection.query("UPDATE job SET client_id = ? WHERE id = ?", [
-            clientContact.id,
-            j.id,
-          ]);
+          // Promote to formal client and free the Additional slot for a spouse/CC
+          await connection.query(
+            `UPDATE job SET client_id = ?,
+               additional_client_name = NULL,
+               additional_client_email = NULL,
+               additional_client_mobile = NULL
+             WHERE id = ?`,
+            [clientContact.id, j.id]
+          );
         } else {
           failed.push(j.name);
         }
@@ -872,6 +877,17 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
       }
     }
     const nameOnly = nameOnlyJobs;
+
+    // Tidy: clear Additional slots that just duplicate the formal client
+    await connection.query(
+      `UPDATE job j
+       JOIN user u ON u.id = j.client_id
+       SET j.additional_client_name = NULL,
+           j.additional_client_email = NULL,
+           j.additional_client_mobile = NULL
+       WHERE j.created_by IN (?, ?) AND j.additional_client_name = u.name`,
+      [userId, managerId]
+    );
 
     const [[jobCount]] = await connection.query(
       `SELECT COUNT(*) AS total FROM job WHERE created_by IN (?, ?)`,
@@ -1617,6 +1633,8 @@ router.post(
   async (req, res) => {
     const {
       client_id,
+      client_email,
+      client_mobile,
       client_address,
       client_city,
       client_state,
@@ -1668,6 +1686,21 @@ router.post(
         updated_by,
         jobId,
       ]);
+      // Editing client email/phone here updates the client's contact record
+      if (client_id) {
+        const cleanEmail = String(client_email || "").trim();
+        const cleanMobile = String(client_mobile || "").trim();
+        if (cleanEmail || cleanMobile) {
+          await connection.query(
+            `UPDATE \`user\`
+             SET email = IF(? != '', ?, email),
+                 mobile = IF(? != '', ?, mobile)
+             WHERE id = ?`,
+            [cleanEmail, cleanEmail, cleanMobile, cleanMobile, client_id]
+          );
+        }
+      }
+
       res.status(200).json({ message: "Job address added successfully" });
     } catch (err) {
       logger.error("Error adding job address:", err);
