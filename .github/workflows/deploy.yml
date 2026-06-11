@@ -21,4 +21,5 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             npm install --production
-            /home/ubuntu/.npm-global/bin/pm2 restart user-back
+            /home/ubuntu/.npm-global/bin/pm2 restart user-back || /home/ubuntu/.npm-global/bin/pm2 start index.js --name user-back
+            /home/ubuntu/.npm-global/bin/pm2 save
