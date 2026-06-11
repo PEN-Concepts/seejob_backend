@@ -254,9 +254,11 @@ async function ensureClientContact(connection, { createdBy, name, email, mobile 
     );
     clientUserId = existing ? existing.id : null;
   } else {
+    // Email-less clients carry a unique placeholder on a no-mail domain
     const [[existing]] = await connection.query(
       `SELECT id FROM user
-       WHERE name = ? AND created_by = ? AND (email IS NULL OR email = '')
+       WHERE name = ? AND created_by = ?
+         AND (email IS NULL OR email = '' OR email LIKE '%@no-email.invalid')
        LIMIT 1`,
       [cleanName, createdBy]
     );
@@ -264,11 +266,14 @@ async function ensureClientContact(connection, { createdBy, name, email, mobile 
   }
 
   if (!clientUserId) {
+    const insertEmail =
+      cleanEmail ||
+      `client-${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}-${Date.now()}@no-email.invalid`;
     const [ins] = await connection.query(
       `INSERT INTO user
        (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
        VALUES (?, ?, '', 3, ?, 3, 11, '', '', '', 1, ?, '', 0, '', ?, 0)`,
-      [cleanName || cleanEmail, cleanEmail || null, mobile || null, getTimeStamp(), createdBy]
+      [cleanName || cleanEmail, insertEmail, mobile || null, getTimeStamp(), createdBy]
     );
     clientUserId = ins.insertId;
   } else if (mobile) {
@@ -731,7 +736,7 @@ const [result] = await connection.execute(
 });
 
 // Deploy marker: lets tooling confirm which sweep version is live
-router.get("/client-sync-version", (req, res) => res.json({ v: 5 }));
+router.get("/client-sync-version", (req, res) => res.json({ v: 6 }));
 
 // One-time/idempotent sweep: pull clients typed into existing jobs into the
 // creator's contacts as 'Saved'. Safe to call repeatedly.

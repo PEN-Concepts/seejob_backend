@@ -1968,8 +1968,8 @@ router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req,
     const [[contactUser]] = await connection.query(
       'SELECT name, email FROM user WHERE id = ?', [contactUserId]
     );
-    if (!contactUser || !contactUser.email) {
-      return res.status(404).json({ message: 'Contact has no email on file' });
+    if (!contactUser || !contactUser.email || contactUser.email.endsWith('@no-email.invalid')) {
+      return res.status(404).json({ message: 'This contact has no email on file yet — add one in Edit first.' });
     }
 
     const [[existingInvite]] = await connection.query(
