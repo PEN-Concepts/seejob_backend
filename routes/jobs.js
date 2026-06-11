@@ -730,6 +730,9 @@ const [result] = await connection.execute(
   }
 });
 
+// Deploy marker: lets tooling confirm which sweep version is live
+router.get("/client-sync-version", (req, res) => res.json({ v: 4 }));
+
 // One-time/idempotent sweep: pull clients typed into existing jobs into the
 // creator's contacts as 'Saved'. Safe to call repeatedly.
 router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
@@ -804,8 +807,9 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
     }
 
     // Jobs with only a client name — import as email-less Saved contacts
-    const [nameOnly] = await connection.query(
-      `SELECT DISTINCT additional_client_name AS name,
+    // and link each job to its client (job.client_id)
+    const [nameOnlyJobs] = await connection.query(
+      `SELECT id, additional_client_name AS name,
               additional_client_mobile AS mobile
        FROM job
        WHERE created_by IN (?, ?)
@@ -816,21 +820,29 @@ router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
     );
 
     const failed = [];
-    for (const n of nameOnly) {
+    for (const j of nameOnlyJobs) {
       try {
         const clientContact = await ensureClientContact(connection, {
           createdBy: userId,
-          name: n.name,
+          name: j.name,
           email: null,
-          mobile: n.mobile,
+          mobile: j.mobile,
         });
-        if (clientContact && clientContact.linkedNow) linked++;
-        if (!clientContact) failed.push(n.name);
+        if (clientContact) {
+          if (clientContact.linkedNow) linked++;
+          await connection.query("UPDATE job SET client_id = ? WHERE id = ?", [
+            clientContact.id,
+            j.id,
+          ]);
+        } else {
+          failed.push(j.name);
+        }
       } catch (rowErr) {
-        logger.error(`sync-job-clients failed for "${n.name}":`, rowErr);
-        failed.push(n.name);
+        logger.error(`sync-job-clients failed for "${j.name}":`, rowErr);
+        failed.push(j.name);
       }
     }
+    const nameOnly = nameOnlyJobs;
 
     const [[jobCount]] = await connection.query(
       `SELECT COUNT(*) AS total FROM job WHERE created_by IN (?, ?)`,
