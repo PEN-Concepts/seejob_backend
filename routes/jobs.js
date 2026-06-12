@@ -2060,23 +2060,49 @@ router.post(
       }
       const job = jobRows[0];
 
-      if (!job.lead_id) {
-        return res
-          .status(400)
-          .json({ message: "This job has no linked lead_id" });
-      }
+      let leadId = job.lead_id;
 
-      // 2. Update lead status = 1
-      await connection.query(`UPDATE leads SET status = 1 WHERE id = ?`, [
-        job.lead_id,
-      ]);
+      if (leadId) {
+        // 2a. Job came from a lead — re-activate it
+        await connection.query(`UPDATE leads SET status = 1 WHERE id = ?`, [
+          leadId,
+        ]);
+      } else {
+        // 2b. Direct job — create a lead record from the job's info
+        const [leadIns] = await connection.query(
+          `INSERT INTO leads
+            (lead_name, lead_type, client_id, client_name, client_email, client_phone,
+             project_street_address, project_town, project_state,
+             leads_street_address, leads_town_city, leads_state, leads_zipcode,
+             status, created_at, user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+          [
+            job.name,
+            job.type || "Residential",
+            job.client_id || null,
+            job.additional_client_name || null,
+            job.additional_client_email || null,
+            job.additional_client_mobile || null,
+            job.address || "",
+            job.city || "",
+            job.state || "",
+            job.job_address || "",
+            job.job_city || "",
+            job.job_state || "",
+            job.job_zipcode || "",
+            getTimeStamp(),
+            userId,
+          ]
+        );
+        leadId = leadIns.insertId;
+      }
 
       // 3. Delete the job
       await connection.query(`DELETE FROM job WHERE id = ?`, [jobId]);
 
       res.json({
         message: "Job converted back to Lead successfully",
-        leadId: job.lead_id,
+        leadId,
       });
     } catch (error) {
       logger.error("Error converting job back to lead:", error);
