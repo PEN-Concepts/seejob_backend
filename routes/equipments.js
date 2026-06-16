@@ -7,6 +7,7 @@ const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
 const auth = require("../services/authentication");
+const { denyExpiredFreeWrites } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 const storage = multer.diskStorage({
@@ -31,6 +32,7 @@ const formatDate = (d) => {
 router.post(
   "/create",
   auth.authenticateToken,
+  denyExpiredFreeWrites,
   upload.single("image"),
   async (req, res) => {
     let connection;
@@ -140,6 +142,7 @@ router.get("/list", auth.authenticateToken, async (req, res) => {
 router.put(
   "/update/:id",
   auth.authenticateToken,
+  denyExpiredFreeWrites,
   upload.single('image'),
   async (req, res) => {
 
@@ -228,7 +231,7 @@ router.put(
 
 
 
-router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/delete/:id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -256,6 +259,7 @@ router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
 router.put(
   "/toggle-assignment",
   auth.authenticateToken,
+  denyExpiredFreeWrites,
   async (req, res) => {
     const { id, is_assigned } = req.body;
     const created_by = res.locals.id;

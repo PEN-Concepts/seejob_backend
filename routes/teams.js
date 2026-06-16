@@ -8,6 +8,7 @@ const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
 const auth = require("../services/authentication");
+const { denyExpiredFreeWrites } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 // helper to convert incoming date (ISO or date string) -> 'YYYY-MM-DD' or null
@@ -18,7 +19,7 @@ function toSqlDate(value) {
   return d.toISOString().slice(0, 10);
 }
 
-router.post("/create", auth.authenticateToken, async (req, res) => {
+router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   try {
     const { team_name, team_color, job_id, team_leader, start_date, end_date, team_users } = req.body;
@@ -94,7 +95,7 @@ router.post("/create", auth.authenticateToken, async (req, res) => {
 });
 
 
-router.put("/update/:id", auth.authenticateToken, async (req, res) => {
+router.put("/update/:id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   const teamId = req.params.id;
 

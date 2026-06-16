@@ -15,6 +15,7 @@ const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { ensureContactStatusColumn } = require("../services/dbMigrations");
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
+const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob } = require("../utils/access");
 const jobSchema = Joi.object({
   type: Joi.string().valid("Residential", "Commercial").required(),
   name: Joi.string().max(100).required(),
@@ -326,7 +327,7 @@ async function ensureClientContact(connection, { createdBy, name, email, mobile 
 
 // ---- /send-invite route ------------------------------------------------
 
-router.post("/send-invite", auth.authenticateToken, async (req, res) => {
+router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const { error, value } = inviteSchema.validate(req.body);
   if (error) {
     return res.status(400).json({ message: error.details[0].message });
@@ -639,7 +640,7 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/jobs", auth.authenticateToken, async (req, res) => {
+router.post("/jobs", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
  
   const { error, value } = jobSchema.validate(req.body);
   if (error) {
@@ -761,7 +762,7 @@ router.get("/client-sync-version", (req, res) => res.json({ v: 9 }));
 
 // One-time/idempotent sweep: pull clients typed into existing jobs into the
 // creator's contacts as 'Saved'. Safe to call repeatedly.
-router.post("/sync-job-clients", auth.authenticateToken, async (req, res) => {
+router.post("/sync-job-clients", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const userId = req.user.id;
   let connection;
   try {
@@ -929,11 +930,16 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
         ? userRows[0].created_by
         : userId;
 
-    const [rows] = await connection.execute(
-      `
-        SELECT 
+    // Access tier decides WHAT a user can see:
+    //  - expired_free: ONLY jobs assigned to them (a task is assigned to them);
+    //    their own created jobs are hidden (preserved, visible again on upgrade).
+    //  - paid / trial_active: their account's jobs + any job they're a contact
+    //    on + any job they have a task on (unchanged behavior).
+    const mode = await getAccessMode(userId, connection);
+
+    const baseQuery = `
+        SELECT
           j.*,
-          -- Prefer real client details from user table
           u.name  AS client_name,
           u.email AS client_email,
           u.mobile AS client_mobile,
@@ -941,39 +947,39 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
           u.city   AS client_city,
           u.state  AS client_state,
           u.zipcode AS client_zipcode,
-
-          -- Fallback display values when no linked client exists
           COALESCE(u.name, j.additional_client_name)   AS client_name_display,
           COALESCE(u.email, j.additional_client_email) AS client_email_display,
           COALESCE(u.mobile, j.additional_client_mobile) AS client_mobile_display,
-
-          -- Inspector details
           u2.name  AS inspector_name,
           u2.mobile AS inspector_mobile,
           u2.email AS inspector_email,
           u2.city  AS inspector_city,
           u2.website_link AS inspector_website,
-
-          -- Who added the contact to the job (if any)
           jc.user_id AS added_by_user_id,
           u3.name   AS added_by_user_name
-
         FROM job j
         LEFT JOIN user u  ON u.id = j.client_id
         LEFT JOIN user u2 ON u2.id = j.inspector_id
-
-        -- Join job_contacts to find who added contact
-        LEFT JOIN job_contacts jc ON jc.job_id = j.id AND jc.contact_id IN (?, ?) 
-
-        -- Join user table again to get added user's name
+        LEFT JOIN job_contacts jc ON jc.job_id = j.id AND jc.contact_id IN (?, ?)
         LEFT JOIN user u3 ON u3.id = jc.user_id
+      `;
 
-        WHERE 
+    let whereClause;
+    let whereParams;
+    if (mode === "expired_free") {
+      whereClause = `
+        WHERE j.created_by <> ?
+          AND j.id IN (SELECT DISTINCT job_id FROM tasks WHERE user_id = ?)
+      `;
+      whereParams = [userId, userId];
+    } else {
+      whereClause = `
+        WHERE
           (
-            j.created_by = ? 
+            j.created_by = ?
             OR j.id IN (
-              SELECT job_id 
-              FROM job_contacts 
+              SELECT job_id
+              FROM job_contacts
               WHERE contact_id IN (?, ?)
             )
             OR j.id IN (
@@ -982,17 +988,13 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
               WHERE user_id = ? OR created_by = ?
             )
           )
-        ORDER BY j.id ASC;
-      `,
-      [
-        userId,
-        managerId,
-        managerId,
-        userId,
-        managerId,
-        userId,
-        managerId,
-      ],
+      `;
+      whereParams = [managerId, userId, managerId, userId, managerId];
+    }
+
+    const [rows] = await connection.execute(
+      `${baseQuery} ${whereClause} ORDER BY j.id ASC;`,
+      [userId, managerId, ...whereParams],
     );
 
     res.json(rows);
@@ -1231,7 +1233,7 @@ router.post(
   }
 );
 
-router.put("/jobs/:id", auth.authenticateToken, async (req, res) => {
+router.put("/jobs/:id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const jobId = req.params.id;
 
   const { error, value } = jobSchema.validate(req.body);
@@ -1285,11 +1287,26 @@ router.put("/jobs/:id", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
+    // Rule 2 (ownership): may only edit a job owned by the actor's account.
+    const [ownRows] = await connection.query(
+      "SELECT created_by FROM job WHERE id = ? LIMIT 1",
+      [jobId]
+    );
+    if (!ownRows.length) {
+      return res.status(404).json({ code: "NOT_FOUND", message: "Job not found" });
+    }
+    if (!(await isSameAccount(req.user.id, ownRows[0].created_by, connection))) {
+      return res.status(403).json({
+        code: "OWNERSHIP_DENIED",
+        message: "You can only edit jobs that belong to your account.",
+      });
+    }
+
     const [result] = await connection.execute(
       `UPDATE job SET
-        type = ?, name = ?, permit_no = ?, gate_no = ?, lock_box_code = ?, 
+        type = ?, name = ?, permit_no = ?, gate_no = ?, lock_box_code = ?,
         inspector_id = ?, client_id = ?, additional_client_email = ?,
-        additional_client_mobile = ?, additional_client_name = ?, address = ?, city = ?, state = ?, 
+        additional_client_mobile = ?, additional_client_name = ?, address = ?, city = ?, state = ?,
         zipcode = ?, contract_status = ?, updated_by = ?
       WHERE id = ?`,
       safeValues
@@ -1318,7 +1335,7 @@ router.put("/jobs/:id", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.patch("/jobs/:id/status", auth.authenticateToken, async (req, res) => {
+router.patch("/jobs/:id/status", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const jobId = req.params.id;
 
   const { status } = req.body; // expecting status = 0 (completed) or 2 (archived)
@@ -1331,6 +1348,21 @@ router.patch("/jobs/:id/status", auth.authenticateToken, async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
+
+    // Rule 2 (ownership): may only change status of a job in the actor's account.
+    const [ownRows] = await connection.query(
+      "SELECT created_by FROM job WHERE id = ? LIMIT 1",
+      [jobId]
+    );
+    if (!ownRows.length) {
+      return res.status(404).json({ message: "Job not found" });
+    }
+    if (!(await isSameAccount(req.user.id, ownRows[0].created_by, connection))) {
+      return res.status(403).json({
+        code: "OWNERSHIP_DENIED",
+        message: "You can only change jobs that belong to your account.",
+      });
+    }
 
     const [result] = await connection.execute(
       `UPDATE job SET status = ?, updated_by = ? WHERE id = ?`,
@@ -1350,7 +1382,7 @@ router.patch("/jobs/:id/status", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/stages", auth.authenticateToken, async (req, res) => {
+router.post("/stages", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
  
   const signedin_user = res.locals.id;
   const currentTimestamp = getTimeStamp();
@@ -1403,7 +1435,7 @@ router.get("/stages/:job_id", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.put("/stages/:id", auth.authenticateToken, async (req, res) => {
+router.put("/stages/:id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const stageId = req.params.id;
 
 
@@ -1437,7 +1469,7 @@ router.put("/stages/:id", auth.authenticateToken, async (req, res) => {
 });
 
 
-router.post("/send-invite/:jobId", auth.authenticateToken, async (req, res) => {
+router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const jobId = Number(req.params.jobId);
   if (!jobId) {
     return res.status(400).json({ message: "jobId is required" });
@@ -1601,6 +1633,16 @@ router.get("/jobs_general/:id", auth.authenticateToken, async (req, res) => {
 
   try {
     connection = await pool.getConnection();
+
+    // Don't let a direct by-id request bypass list visibility (e.g. an expired
+    // user opening their own hidden job, or anyone opening a foreign job).
+    if (!(await canViewJob(req.user.id, jobId, connection))) {
+      return res.status(403).json({
+        code: "ACCESS_DENIED",
+        message: "You don't have access to this job.",
+      });
+    }
+
     const query = `
       SELECT 
         j.*, 
@@ -2143,20 +2185,26 @@ router.get("/jobs/all/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // DELETE - Job by ID
-router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/delete/:id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
 
     connection = await pool.getConnection();
 
-    // Optional: check if job exists first
+    // Check the job exists and belongs to the actor's account (Rule 2).
     const [existing] = await connection.execute(
-      "SELECT id FROM job WHERE id = ?",
+      "SELECT id, created_by FROM job WHERE id = ?",
       [id]
     );
     if (existing.length === 0) {
       return res.status(404).json({ message: "Job not found" });
+    }
+    if (!(await isSameAccount(req.user.id, existing[0].created_by, connection))) {
+      return res.status(403).json({
+        code: "OWNERSHIP_DENIED",
+        message: "You can only delete jobs that belong to your account.",
+      });
     }
 
     await connection.execute("DELETE FROM job WHERE id = ?", [id]);
@@ -2210,7 +2258,7 @@ router.get("/materials", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/materials", auth.authenticateToken, enforcePlanFeatureForMaterials, async (req, res) => {
+router.post("/materials", auth.authenticateToken, denyExpiredFreeWrites, enforcePlanFeatureForMaterials, async (req, res) => {
   const { error, value } = materialSchema.validate(req.body);
 
   if (error) {
@@ -2249,7 +2297,7 @@ router.post("/materials", auth.authenticateToken, enforcePlanFeatureForMaterials
   }
 });
 
-router.delete("/materials/:id", auth.authenticateToken, enforcePlanFeatureForMaterials, async (req, res) => {
+router.delete("/materials/:id", auth.authenticateToken, denyExpiredFreeWrites, enforcePlanFeatureForMaterials, async (req, res) => {
   let connection;
   const { id } = req.params;
 

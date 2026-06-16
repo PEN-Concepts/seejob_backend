@@ -5,6 +5,7 @@ const Joi = require("joi");
 const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
+const { denyExpiredFreeWrites, getAccessMode } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { contactSchema } = require("../models/contact");
 
@@ -76,6 +77,11 @@ router.get("/mycontactrequest", auth.authenticateToken, async (req, res) => {
 
     try {
         connection = await pool.getConnection();
+        // Expired free trial: contacts are hidden (saved, visible again on upgrade).
+        if ((await getAccessMode(req.user.id, connection)) === 'expired_free') {
+            res.status(200).json({ code: "200", message: "mycontactrequest data successfully", data: [] });
+            return;
+        }
         query = "SELECT u.id, u.name, u.email, u.mobile, c.status FROM user u join contact c on (c.request_to = u.id) where c.request_by = ? order by u.id asc";
         const [rows] = await connection.query(query, [signedin_user]);
         res.status(200).json({ code: "200", message: "mycontactrequest data successfully", data: rows });
@@ -99,6 +105,11 @@ router.get("/mypendingcontactrequest", auth.authenticateToken, async (req, res) 
 
     try {
         connection = await pool.getConnection();
+        // Expired free trial: contacts are hidden (saved, visible again on upgrade).
+        if ((await getAccessMode(req.user.id, connection)) === 'expired_free') {
+            res.status(200).json({ code: "200", message: "mypendingcontactrequest data successfully", data: [] });
+            return;
+        }
         query = "SELECT c.id as requestid, u.id, u.name, u.email, u.mobile, c.status FROM user u join contact c on (c.request_by = u.id) where c.request_to = ? order by u.id asc";
         const [rows] = await connection.query(query, [signedin_user]);
         res.status(200).json({ code: "200", message: "mypendingcontactrequest data successfully", data: rows });
@@ -119,6 +130,11 @@ router.get("/mycontact", auth.authenticateToken, async (req, res) => {
 
     try {
         connection = await pool.getConnection();
+        // Expired free trial: contacts are hidden (saved, visible again on upgrade).
+        if ((await getAccessMode(req.user.id, connection)) === 'expired_free') {
+            res.status(200).json({ code: "200", message: "mycontact data successfully", data: [] });
+            return;
+        }
         query = "SELECT u.id, u.name, u.email, u.mobile, c.status FROM user u join contact c on (c.request_to = u.id) where c.request_by = ? and c.status = 'Accept' order by u.id asc";
         const [rows] = await connection.query(query, [signedin_user]);
         res.status(200).json({ code: "200", message: "mycontact data successfully", data: rows });
@@ -140,6 +156,11 @@ router.get("/mycontact/:subcategory", auth.authenticateToken, async (req, res) =
 
     try {
         connection = await pool.getConnection();
+        // Expired free trial: contacts are hidden (saved, visible again on upgrade).
+        if ((await getAccessMode(req.user.id, connection)) === 'expired_free') {
+            res.status(200).json({ code: "200", message: "mycontact by subcategory data successfully", data: [] });
+            return;
+        }
         query = "SELECT u.id, u.name, u.email, u.mobile, c.status FROM user u join contact c on (c.request_to = u.id) where c.request_by = ? and c.status = 'Accept' and u.subcategory = ? order by u.id asc";
         const [rows] = await connection.query(query, [signedin_user, subcategory]);
         res.status(200).json({ code: "200", message: "mycontact by subcategory data successfully", data: rows });
@@ -154,7 +175,7 @@ router.get("/mycontact/:subcategory", auth.authenticateToken, async (req, res) =
 
 });
 
-router.post("/statuschange/:id/:status", auth.authenticateToken, async (req, res) => {
+router.post("/statuschange/:id/:status", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
     const reqid = req.params.id
     const status = req.params.status
 
@@ -244,7 +265,7 @@ router.post("/statuschange/:id/:status", auth.authenticateToken, async (req, res
 });
 
 
-router.post("/create", auth.authenticateToken, async (req, res) => {
+router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
     const signedin_user = res.locals.working_id;
     const currentTimestamp = getTimeStamp();
     const result = contactSchema(req.body);

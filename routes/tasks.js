@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const auth = require("../services/authentication");
+const { denyExpiredFreeWrites, isSameAccount } = require("../utils/access");
 const { getTimeStamp } = require("../common/timdate");
 const admin = require("../config/firebase-admin");
 const logger = require("../common/logger");
@@ -180,7 +181,7 @@ const upload = multer({
 });
 
 // Send an immediate nudge to the assigned user of a task
-router.post('/nudge/:id', auth.authenticateToken, async (req, res) => {
+router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   try {
     const taskId = req.params.id;
     const actorId = req.user.id;
@@ -243,7 +244,7 @@ router.post('/nudge/:id', auth.authenticateToken, async (req, res) => {
 
 
 // CREATE task
-router.post("/create", auth.authenticateToken, upload.single('image'), async (req, res) => {
+router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.single('image'), async (req, res) => {
   if (req.fileValidationError) {
     return res.status(400).json({ message: req.fileValidationError });
   }
@@ -596,7 +597,7 @@ router.get("/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // Update Images
-router.put("/update/:id", upload.single("image"), auth.authenticateToken, async (req, res) => {
+router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   try {
     const signedin_user = res.locals.id;
@@ -647,6 +648,38 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, async 
     const actorId = req.user.id;
     const actorRole = Number(req.user.role);
     const isGC = actorRole === 14;
+
+    // Rule 2 (ownership): only the owning account may edit a task. The assignee
+    // of a task assigned from ANOTHER account may not edit it freely — the one
+    // thing they may do is re-assign it, and only to one of their OWN contacts.
+    const ownsTask = await isSameAccount(actorId, oldTask.created_by, connection);
+    const isAssignee = Number(oldTask.user_id || 0) === Number(actorId);
+    if (!ownsTask && !isAssignee) {
+      await connection.rollback();
+      return res.status(403).json({
+        code: "OWNERSHIP_DENIED",
+        message: "You can only edit tasks that belong to your account.",
+      });
+    }
+    if (
+      !ownsTask &&
+      isAssignee &&
+      newUser &&
+      Number(newUser) !== Number(oldUser)
+    ) {
+      const [contactRows] = await connection.query(
+        "SELECT 1 FROM contact WHERE request_by = ? AND request_to = ? AND status = 'Accept' LIMIT 1",
+        [actorId, newUser]
+      );
+      if (!contactRows.length) {
+        await connection.rollback();
+        return res.status(403).json({
+          code: "NOT_YOUR_CONTACT",
+          message:
+            "You can only re-assign this task to someone in your own contacts.",
+        });
+      }
+    }
 
     // Employees (foreman) may be allowed to complete tasks on behalf of their GC/creator.
     // Determine manager (creator) for this user.
@@ -1019,7 +1052,7 @@ router.post('/upload-photo/:taskId', upload.single('photo'), async (req, res) =>
 });
 
 // Multi-photo upload
-router.post('/upload-photos/:taskId', auth.authenticateToken, upload.array('photos', 20), async (req, res) => {
+router.post('/upload-photos/:taskId', auth.authenticateToken, denyExpiredFreeWrites, upload.array('photos', 20), async (req, res) => {
   try {
     if (req.fileValidationError) {
       return res.status(400).json({ message: req.fileValidationError });
@@ -1068,7 +1101,7 @@ router.get('/images/:taskId', auth.authenticateToken, async (req, res) => {
 });
 
 // Delete a specific task image
-router.delete('/delete-image/:imageId', auth.authenticateToken, async (req, res) => {
+router.delete('/delete-image/:imageId', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   try {
     const [[row]] = await pool.query(
       `SELECT task_id, file_path, file_name FROM tasks_images WHERE id = ?`,
@@ -1097,6 +1130,65 @@ router.delete('/delete-image/:imageId', auth.authenticateToken, async (req, res)
   } catch (err) {
     logger.error("Error deleting task image:", err);
     res.status(500).json({ message: 'Delete failed', error: err.message });
+  }
+});
+
+
+// Dedicated task check-off. This is the ONE write an expired free-trial user is
+// allowed, so it intentionally does NOT use denyExpiredFreeWrites. Scope is
+// strictly narrow: the assignee (or the leader of an assigned team) toggling
+// their own assignee_completed flag — no other task field can change here. The
+// assigner sees the result because the flag is stored on the task.
+router.patch("/:id/complete", auth.authenticateToken, async (req, res) => {
+  const taskId = req.params.id;
+  const actorId = Number(req.user.id);
+  const completed =
+    req.body &&
+    (req.body.assignee_completed === 0 ||
+      req.body.assignee_completed === false ||
+      req.body.assignee_completed === "0")
+      ? 0
+      : 1;
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [[task]] = await connection.query(
+      "SELECT id, user_id, team_id FROM tasks WHERE id = ? LIMIT 1",
+      [taskId]
+    );
+    if (!task) {
+      return res.status(404).json({ success: false, message: "Task not found" });
+    }
+
+    // Authorize: the individual assignee, or the leader of the assigned team.
+    let allowed = Number(task.user_id || 0) === actorId;
+    if (!allowed && task.team_id) {
+      const [[teamRow]] = await connection.query(
+        "SELECT team_leader FROM teams WHERE id = ? LIMIT 1",
+        [task.team_id]
+      );
+      allowed = !!teamRow && Number(teamRow.team_leader || 0) === actorId;
+    }
+    if (!allowed) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the assignee can check off this task.",
+      });
+    }
+
+    await connection.query(
+      "UPDATE tasks SET assignee_completed = ? WHERE id = ?",
+      [completed, taskId]
+    );
+    return res.json({ success: true, assignee_completed: completed });
+  } catch (err) {
+    logger.error("task check-off error: " + err.message);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  } finally {
+    if (connection) connection.release();
   }
 });
 

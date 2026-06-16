@@ -8,6 +8,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
+const { getAccessInfo } = require("../utils/access");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -154,7 +155,21 @@ router.get("/my-rights", auth.authenticateToken, async (req, res) => {
         rightsRows = roleDefaults;
       }
     }
-    return res.json({ success: true, rights: rightsRows });
+    // ---- Access tier (30-day trial derived from signup date) ----
+    // Single source of truth lives in utils/access.js so the client signal
+    // here and the server-side write/read guards never drift apart.
+    const { mode, trialEndsAt, daysLeft, hasActiveSubscription } =
+      await getAccessInfo(userId, connection);
+
+    return res.json({
+      success: true,
+      rights: rightsRows,
+      accessMode: mode,
+      trialEndsAt,
+      daysLeft,
+      isTrialActive: mode === "trial_active",
+      hasActiveSubscription,
+    });
   } catch (error) {
     logger.error("Error fetching user rights: ", error);
     return res.status(500).json({ success: false, message: "Internal server error" });
