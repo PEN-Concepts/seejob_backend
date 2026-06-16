@@ -22,6 +22,16 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // Roles that are internal/admin and must never be trial-gated.
 const NEVER_GATED_ROLES = new Set([12]);
 
+// Owner / internal accounts that must ALWAYS have full access, regardless of
+// subscription status or account age. This protects the platform owner from
+// ever being swept into the expired-trial state if a comped/manual
+// subscription is ever switched off. Compared case-insensitively. Add more
+// internal emails here as needed.
+const OWNER_EXEMPT_EMAILS = new Set([
+  "poul@oakcoast.net",
+  "admin@oakcoast.net",
+]);
+
 async function withConnection(connection, fn) {
   if (connection) return fn(connection);
   const conn = await pool.getConnection();
@@ -67,12 +77,13 @@ async function getAccessInfo(userId, connection) {
     };
     try {
       const [userRows] = await conn.query(
-        "SELECT id, role, created_at FROM user WHERE id = ? LIMIT 1",
+        "SELECT id, role, created_at, email FROM user WHERE id = ? LIMIT 1",
         [userId]
       );
       if (!userRows.length) return fallback;
 
       const role = userRows[0].role;
+      const email = String(userRows[0].email || "").trim().toLowerCase();
       const [subRows] = await conn.query(
         "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
         [userId]
@@ -91,7 +102,11 @@ async function getAccessInfo(userId, connection) {
       }
 
       let mode;
-      if (NEVER_GATED_ROLES.has(Number(role)) || hasActiveSubscription) {
+      if (
+        OWNER_EXEMPT_EMAILS.has(email) ||
+        NEVER_GATED_ROLES.has(Number(role)) ||
+        hasActiveSubscription
+      ) {
         mode = "paid";
       } else if (!createdAt || isNaN(createdAt.getTime())) {
         // Unknown signup date -> don't restrict.
