@@ -55,6 +55,23 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req
       });
     }
 
+    // One employee → one team: reject any selected member already on a team.
+    if (Array.isArray(team_users) && team_users.length > 0) {
+      const [assigned] = await connection.query(
+        `SELECT tu.user_id, t.team_name
+           FROM team_user tu JOIN teams t ON t.id = tu.team_id
+          WHERE tu.user_id IN (?)`,
+        [team_users]
+      );
+      if (assigned.length > 0) {
+        const names = [...new Set(assigned.map((a) => a.team_name).filter(Boolean))];
+        return res.status(409).json({
+          code: "MEMBER_ALREADY_ON_TEAM",
+          message: `Some selected members are already on another team (${names.join(", ")}). Remove them from that team first.`,
+        });
+      }
+    }
+
     await connection.beginTransaction();
 
     const [teamResult] = await connection.execute(
@@ -144,6 +161,24 @@ router.put("/update/:id", auth.authenticateToken, denyExpiredFreeWrites, async (
       return res.status(409).json({
         message: "Another team with this color already exists. Please choose a different color."
       });
+    }
+
+    // One employee → one team: reject members already on a DIFFERENT team
+    // (members already on THIS team are fine).
+    if (Array.isArray(team_users) && team_users.length > 0) {
+      const [assigned] = await connection.query(
+        `SELECT tu.user_id, t.team_name
+           FROM team_user tu JOIN teams t ON t.id = tu.team_id
+          WHERE tu.user_id IN (?) AND tu.team_id <> ?`,
+        [team_users, teamId]
+      );
+      if (assigned.length > 0) {
+        const names = [...new Set(assigned.map((a) => a.team_name).filter(Boolean))];
+        return res.status(409).json({
+          code: "MEMBER_ALREADY_ON_TEAM",
+          message: `Some selected members are already on another team (${names.join(", ")}). Remove them from that team first.`,
+        });
+      }
     }
 
     await connection.beginTransaction();
