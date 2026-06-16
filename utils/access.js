@@ -43,18 +43,31 @@ async function withConnection(connection, fn) {
 }
 
 /**
- * Resolve the account-owner id for a user. Invited sub-users (created_by set)
- * belong to the account that created them; account owners belong to themselves.
- * Mirrors the owner-resolution pattern already used across the job routes.
+ * Resolve the account-owner id for a user — i.e. whose data this user is part of.
+ *
+ * Only EMPLOYEES (category = 1) share their inviter's account: they work the
+ * owner's jobs/data (subject to the permissions the owner grants). Everyone
+ * else — contractors/subcontractors (category 2), clients (category 3), and
+ * top-level account owners — belongs to THEMSELVES. So a contractor never sees
+ * or edits the inviter's jobs; they only ever get their own data + tasks
+ * specifically assigned to them.
  */
+const EMPLOYEE_CATEGORY = 1;
+
 async function resolveOwnerId(userId, connection) {
   return withConnection(connection, async (conn) => {
     try {
       const [rows] = await conn.query(
-        "SELECT created_by FROM user WHERE id = ? LIMIT 1",
+        "SELECT created_by, category FROM user WHERE id = ? LIMIT 1",
         [userId]
       );
-      if (rows.length && rows[0].created_by) return Number(rows[0].created_by);
+      if (
+        rows.length &&
+        rows[0].created_by &&
+        Number(rows[0].category) === EMPLOYEE_CATEGORY
+      ) {
+        return Number(rows[0].created_by);
+      }
     } catch (err) {
       logger.error("resolveOwnerId error: " + err.message);
     }

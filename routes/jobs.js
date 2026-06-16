@@ -15,7 +15,7 @@ const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { ensureContactStatusColumn } = require("../services/dbMigrations");
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
-const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob } = require("../utils/access");
+const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId } = require("../utils/access");
 const jobSchema = Joi.object({
   type: Joi.string().valid("Residential", "Commercial").required(),
   name: Joi.string().max(100).required(),
@@ -920,15 +920,11 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
 
     const userId = req.user.id; // from JWT token
 
-    // Employees should inherit visibility of their GC/creator.
-    const [userRows] = await connection.query(
-      "SELECT created_by FROM user WHERE id = ?",
-      [userId],
-    );
-    const managerId =
-      userRows.length && userRows[0].created_by
-        ? userRows[0].created_by
-        : userId;
+    // Account scope: EMPLOYEES inherit their GC/creator's visibility (see the
+    // owner's jobs); contractors, clients, and owners are self-scoped, so a
+    // contractor only ever sees their own jobs + jobs they're assigned tasks
+    // on — never the inviter's other jobs. (resolveOwnerId is category-aware.)
+    const managerId = await resolveOwnerId(userId, connection);
 
     // Access tier decides WHAT a user can see:
     //  - expired_free: ONLY jobs assigned to them (a task is assigned to them);
