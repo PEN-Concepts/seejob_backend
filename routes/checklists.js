@@ -126,13 +126,16 @@ async function getOwnedSection(connection, sectionId, userId) {
 async function ensureDefaultSection(connection, userId, type) {
   const normalizedType = normalizeChecklistType(type);
   const defaultTitle = getDefaultSectionTitle(normalizedType);
+  // Seed a default ONLY when the user has NO section of this type at all.
+  // (Checking by exact default title would wrongly resurrect a default page
+  // after the user deletes it, when their remaining pages are renamed/numbered.)
   const [[existing]] = await connection.query(
     `SELECT id, owner_user_id, shared_with_user_id, type, title, sort_order, created_at, updated_at
      FROM checklist_sections
-     WHERE owner_user_id = ? AND type = ? AND title = ?
+     WHERE owner_user_id = ? AND type = ?
      ORDER BY id ASC
       LIMIT 1`,
-    [userId, normalizedType, defaultTitle],
+    [userId, normalizedType],
   );
 
   if (existing) {

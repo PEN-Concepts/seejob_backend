@@ -32,6 +32,7 @@ const checklists = require("./routes/checklists");
 const adminContact = require("./routes/admin_contactRequest");
 const cookieParser = require("cookie-parser");
 const calendar = require("./routes/calendar");
+const spartan = require("./routes/spartan");
 const app = express();
 const api = process.env.API_URL;
 
@@ -104,6 +105,7 @@ app.use(`${api}/payments`, payments);
 app.use(`${api}/checklists`, checklists);
 app.use(`${api}/admin_contactRequest`, adminContact);
 app.use(`${api}/calendar`, calendar);
+app.use(`${api}/spartan`, spartan);
 
 
 // Global error handler to log unexpected exceptions
