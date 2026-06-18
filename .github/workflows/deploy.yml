@@ -22,4 +22,8 @@ jobs:
             git reset --hard origin/main
             npm install --production
             /home/ubuntu/.npm-global/bin/pm2 restart user-back || /home/ubuntu/.npm-global/bin/pm2 start index.js --name user-back
+            # Install a boot service so pm2 resurrects the app automatically after
+            # any reboot (no more manual "kick the app" 502 step). Idempotent;
+            # non-fatal so it can never block a deploy.
+            sudo env PATH=$PATH:/usr/bin:/home/ubuntu/.npm-global/bin /home/ubuntu/.npm-global/bin/pm2 startup systemd -u ubuntu --hp /home/ubuntu || echo "pm2 startup setup skipped (non-fatal)"
             /home/ubuntu/.npm-global/bin/pm2 save
