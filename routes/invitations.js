@@ -1977,6 +1977,7 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
 
   let connection;
   const created = [];
+  const skipped = [];
   const failed = [];
   try {
     connection = await pool.getConnection();
@@ -1987,65 +1988,82 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
       const cleaned = String(raw || '').replace(/[^a-zA-Z0-9]/g, '').trim();
       if (!cleaned) { failed.push({ license_number: raw, reason: 'Invalid' }); continue; }
 
-      let info;
-      try { info = await checkLicense(cleaned); } catch (e) { info = { status: 'Error' }; }
+      // Each license is isolated: a problem with one never fails the batch.
+      try {
+        let info;
+        try { info = await checkLicense(cleaned); } catch (e) { info = { status: 'Error' }; }
 
-      if (['Not Found', 'Invalid #', 'No License #'].includes(info.status)) {
-        failed.push({ license_number: cleaned, reason: info.status });
-        continue;
-      }
+        if (['Not Found', 'Invalid #', 'No License #'].includes(info.status)) {
+          failed.push({ license_number: cleaned, reason: info.status });
+          continue;
+        }
 
-      const name = (info.name && info.name.trim()) || `Contractor (Lic ${cleaned})`;
-      const email = `lic-${cleaned.toLowerCase()}@no-email.invalid`;
-      const now = getTimeStamp();
+        const name = (info.name && info.name.trim()) || `Contractor (Lic ${cleaned})`;
+        const email = `lic-${cleaned.toLowerCase()}@no-email.invalid`;
+        const phone = info.phone || null;
+        const now = getTimeStamp();
 
-      const [[existing]] = await connection.query(
-        'SELECT id FROM user WHERE email = ? LIMIT 1', [email]
-      );
-      let contactUserId = existing ? existing.id : null;
+        // Skip when this license already coincides with an existing record —
+        // by license number, by our placeholder email, or by mobile number
+        // (user.mobile is UNIQUE, so a shared phone means it's already a
+        // contact, often the user's own profile).
+        const dupeConds = ['license_number = ?', 'email = ?'];
+        const dupeParams = [cleaned, email];
+        if (phone) { dupeConds.push("(mobile IS NOT NULL AND mobile <> '' AND mobile = ?)"); dupeParams.push(phone); }
+        const [[dupe]] = await connection.query(
+          `SELECT id FROM \`user\` WHERE ${dupeConds.join(' OR ')} LIMIT 1`,
+          dupeParams
+        );
+        if (dupe) {
+          skipped.push({ license_number: cleaned, reason: 'Already a contact' });
+          continue;
+        }
 
-      if (!contactUserId) {
         const [ins] = await connection.query(
           `INSERT INTO user
            (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
            VALUES (?, ?, '', 12, ?, 2, 12, ?, '', '', 1, ?, '', 0, '', ?, 0)`,
-          [name, email, info.phone || null, name, now, userId]
+          [name, email, phone, name, now, userId]
         );
-        contactUserId = ins.insertId;
-      }
-      if (!contactUserId) { failed.push({ license_number: cleaned, reason: 'Create failed' }); continue; }
+        const contactUserId = ins.insertId;
 
-      await connection.query(
-        `UPDATE \`user\` SET
-           name = IF(name IS NULL OR name = '', ?, name),
-           mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
-           business = IF(business IS NULL OR business = '', ?, business),
-           address = IF(address IS NULL OR address = '', COALESCE(?, address), address),
-           license_number = ?,
-           license_state = 'CA',
-           cslb_status = ?, cslb_classification = ?, cslb_address = ?, cslb_phone = ?, cslb_checked_at = ?
-         WHERE id = ?`,
-        [name, info.phone || null, name, info.address || null, cleaned,
-         info.status || null, info.classification || null, info.address || null, info.phone || null, now, contactUserId]
-      );
-
-      const [[link]] = await connection.query(
-        `SELECT id FROM contact
-         WHERE (request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?) LIMIT 1`,
-        [userId, contactUserId, contactUserId, userId]
-      );
-      if (!link) {
         await connection.query(
-          `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
-           VALUES (?, ?, 'Saved', NOW(), NOW())`,
-          [userId, contactUserId]
+          `UPDATE \`user\` SET
+             address = IF(address IS NULL OR address = '', COALESCE(?, address), address),
+             license_number = ?,
+             license_state = 'CA',
+             cslb_status = ?, cslb_classification = ?, cslb_address = ?, cslb_phone = ?, cslb_checked_at = ?
+           WHERE id = ?`,
+          [info.address || null, cleaned,
+           info.status || null, info.classification || null, info.address || null, phone, now, contactUserId]
         );
-      }
 
-      created.push({ id: contactUserId, name, license_number: cleaned, cslb_status: info.status || 'Unknown' });
+        const [[link]] = await connection.query(
+          `SELECT id FROM contact
+           WHERE (request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?) LIMIT 1`,
+          [userId, contactUserId, contactUserId, userId]
+        );
+        if (!link) {
+          await connection.query(
+            `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
+             VALUES (?, ?, 'Saved', NOW(), NOW())`,
+            [userId, contactUserId]
+          );
+        }
+
+        created.push({ id: contactUserId, name, license_number: cleaned, cslb_status: info.status || 'Unknown' });
+      } catch (e) {
+        // Duplicate mobile/email (or any per-row issue) → skip, keep going.
+        if (e && e.code === 'ER_DUP_ENTRY') {
+          skipped.push({ license_number: cleaned, reason: 'Already a contact' });
+        } else {
+          logger.error(`bulk-create license ${cleaned} failed:`, e);
+          failed.push({ license_number: cleaned, reason: 'Error' });
+        }
+      }
     }
 
-    res.json({ created, failed, total: list.length });
+    res.json({ created, skipped, failed, total: list.length });
   } catch (err) {
     logger.error('bulk-create-from-licenses error:', err);
     res.status(500).json({ message: 'Failed to create contacts from licenses', error: err.message });
