@@ -61,7 +61,7 @@ function stripTags(s) {
 }
 
 function parseDetailPage(html) {
-  const result = { status: 'Unknown', classification: null, address: null, phone: null };
+  const result = { status: 'Unknown', name: null, classification: null, address: null, phone: null };
   if (!html || html.length < 100) return result;
 
   // Invalid / nonexistent license number
@@ -85,6 +85,7 @@ function parseDetailPage(html) {
       .split(/<br\s*\/?>/i)
       .map(stripTags)
       .filter(Boolean);
+    if (lines.length) result.name = lines[0]; // line 0 is the business name
     const addressLines = [];
     for (let i = 1; i < lines.length; i++) { // line 0 is the business name
       const phoneMatch = lines[i].match(/business phone number\s*:?\s*(.*)/i);
