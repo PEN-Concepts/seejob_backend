@@ -1720,6 +1720,16 @@ router.post('/employee-leave', auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
     await ensureEmployeeLeaveDaysColumn(connection);
+    // One-time: keep the legacy "Casual Leaves" type but rename it to
+    // "Unplanned Days Off" (preserves its id, so logged history carries over).
+    const [[hasUnplanned]] = await connection.query(
+      "SELECT id FROM employees_leaves WHERE LOWER(leave_type) = 'unplanned days off' LIMIT 1"
+    );
+    if (!hasUnplanned) {
+      await connection.query(
+        "UPDATE employees_leaves SET leave_type = 'Unplanned Days Off' WHERE LOWER(leave_type) = 'casual leaves'"
+      );
+    }
     for (const it of items) {
       const name = String((it && it.leave_type) || '').trim();
       if (!name) continue;
