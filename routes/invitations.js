@@ -2011,11 +2011,11 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
         const dupeParams = [cleaned, email];
         if (phone) { dupeConds.push("(mobile IS NOT NULL AND mobile <> '' AND mobile = ?)"); dupeParams.push(phone); }
         const [[dupe]] = await connection.query(
-          `SELECT id FROM \`user\` WHERE ${dupeConds.join(' OR ')} LIMIT 1`,
+          `SELECT id, name FROM \`user\` WHERE ${dupeConds.join(' OR ')} LIMIT 1`,
           dupeParams
         );
         if (dupe) {
-          skipped.push({ license_number: cleaned, reason: 'Already a contact' });
+          skipped.push({ license_number: cleaned, name: dupe.name || name, reason: 'Already a contact' });
           continue;
         }
 
