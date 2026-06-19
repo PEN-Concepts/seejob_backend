@@ -1613,6 +1613,48 @@ router.put('/reject-leave/:leaveId', auth.authenticateToken, async (req, res) =>
   }
 });
 
+// Edit a logged leave entry's dates (boss/office fixing a mistake).
+// Scoped to the manager's own employees via manager_id.
+router.put('/leave_request/:id', auth.authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { from_date, to_date } = req.body;
+    if (!from_date || !to_date) {
+      return res.status(400).json({ success: false, message: 'from_date and to_date are required' });
+    }
+    const [result] = await pool.query(
+      `UPDATE leave_request SET from_date = ?, to_date = ?
+       WHERE id = ? AND manager_id = ?`,
+      [from_date, to_date, id, req.user.id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Leave entry not found' });
+    }
+    res.json({ success: true, message: 'Leave entry updated' });
+  } catch (err) {
+    logger.error('Error updating leave entry:', err);
+    res.status(500).json({ success: false, message: 'Failed to update leave entry', error: err.message });
+  }
+});
+
+// Delete a logged leave entry (boss/office removing a wrong entry).
+router.delete('/leave_request/:id', auth.authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [result] = await pool.query(
+      `DELETE FROM leave_request WHERE id = ? AND manager_id = ?`,
+      [id, req.user.id]
+    );
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'Leave entry not found' });
+    }
+    res.json({ success: true, message: 'Leave entry deleted' });
+  } catch (err) {
+    logger.error('Error deleting leave entry:', err);
+    res.status(500).json({ success: false, message: 'Failed to delete leave entry', error: err.message });
+  }
+});
+
 // Employee weekly self-approve: update self_approve column for own timecard
 router.put('/time-logs/self-approve-week', auth.authenticateToken, async (req, res) => {
   let connection;
