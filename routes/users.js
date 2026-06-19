@@ -2455,6 +2455,7 @@ router.put("/employee/:id", async (req, res) => {
     subcategory,
     employment_type,
     rate,
+    hiring_date,
     leave_ids = [],
     created_by,
   } = req.body;
@@ -2470,17 +2471,18 @@ router.put("/employee/:id", async (req, res) => {
     // âœ… Update employee info
     await connection.query(
       `
-      UPDATE user 
-      SET 
-        name = ?, 
-        email = ?, 
-        mobile = ?, 
-        subcategory = ?, 
-        employment_type = ?, 
-        rate = ?
+      UPDATE user
+      SET
+        name = ?,
+        email = ?,
+        mobile = ?,
+        subcategory = ?,
+        employment_type = ?,
+        rate = ?,
+        created_at = COALESCE(?, created_at)
       WHERE id = ?
       `,
-      [name, email, mobile, subcategory, employment_type, rate, id]
+      [name, email, mobile, subcategory, employment_type, rate, hiring_date || null, id]
     );
 
     // âœ… Refresh employee leaves
