@@ -1691,6 +1691,15 @@ router.get('/employee-leave/:empId', auth.authenticateToken, async (req, res) =>
   try {
     connection = await pool.getConnection();
     await ensureEmployeeLeaveDaysColumn(connection);
+    // One-time: rename legacy "Casual Leaves" → "Unplanned Days Off" (keeps id/history).
+    const [[hasUnplanned]] = await connection.query(
+      "SELECT id FROM employees_leaves WHERE LOWER(TRIM(leave_type)) = 'unplanned days off' LIMIT 1"
+    );
+    if (!hasUnplanned) {
+      await connection.query(
+        "UPDATE employees_leaves SET leave_type = 'Unplanned Days Off' WHERE LOWER(TRIM(leave_type)) = 'casual leaves'"
+      );
+    }
     const [rows] = await connection.query(
       `SELECT el.id AS leave_id, el.leave_type, COALESCE(elq.days, el.quota) AS days
        FROM employee_leaves_quota elq
@@ -1723,11 +1732,11 @@ router.post('/employee-leave', auth.authenticateToken, async (req, res) => {
     // One-time: keep the legacy "Casual Leaves" type but rename it to
     // "Unplanned Days Off" (preserves its id, so logged history carries over).
     const [[hasUnplanned]] = await connection.query(
-      "SELECT id FROM employees_leaves WHERE LOWER(leave_type) = 'unplanned days off' LIMIT 1"
+      "SELECT id FROM employees_leaves WHERE LOWER(TRIM(leave_type)) = 'unplanned days off' LIMIT 1"
     );
     if (!hasUnplanned) {
       await connection.query(
-        "UPDATE employees_leaves SET leave_type = 'Unplanned Days Off' WHERE LOWER(leave_type) = 'casual leaves'"
+        "UPDATE employees_leaves SET leave_type = 'Unplanned Days Off' WHERE LOWER(TRIM(leave_type)) = 'casual leaves'"
       );
     }
     for (const it of items) {
