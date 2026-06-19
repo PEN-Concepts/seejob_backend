@@ -1666,6 +1666,87 @@ router.get("/list", auth.authenticateToken, async (req, res) => {
   }
 });
 
+// ── Per-employee leave allowances (Vacation / Sick days set per person) ──
+async function ensureEmployeeLeaveDaysColumn(connection) {
+  try {
+    await connection.query('ALTER TABLE employee_leaves_quota ADD COLUMN days INT NULL');
+  } catch (e) { /* column already exists */ }
+}
+async function ensureLeaveType(connection, name, createdBy, defaultDays) {
+  const [[row]] = await connection.query(
+    'SELECT id FROM employees_leaves WHERE LOWER(leave_type) = LOWER(?) LIMIT 1',
+    [name]
+  );
+  if (row) return row.id;
+  const [ins] = await connection.query(
+    'INSERT INTO employees_leaves (leave_type, quota, created_at, created_by) VALUES (?, ?, NOW(), ?)',
+    [name, defaultDays || 0, createdBy]
+  );
+  return ins.insertId;
+}
+
+// Get an employee's leave categories with their per-person day allowance.
+router.get('/employee-leave/:empId', auth.authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureEmployeeLeaveDaysColumn(connection);
+    const [rows] = await connection.query(
+      `SELECT el.id AS leave_id, el.leave_type, COALESCE(elq.days, el.quota) AS days
+       FROM employee_leaves_quota elq
+       JOIN employees_leaves el ON el.id = elq.leave_id
+       WHERE elq.emp_id = ?
+       ORDER BY el.leave_type ASC`,
+      [req.params.empId]
+    );
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    logger.error('employee-leave GET error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Set an employee's leave days. body: { emp_id, items: [{ leave_type, days }] }
+// Ensures each type exists globally, then upserts the per-employee day count.
+router.post('/employee-leave', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const { emp_id, items } = req.body;
+  if (!emp_id || !Array.isArray(items)) {
+    return res.status(400).json({ success: false, message: 'emp_id and items are required' });
+  }
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureEmployeeLeaveDaysColumn(connection);
+    for (const it of items) {
+      const name = String((it && it.leave_type) || '').trim();
+      if (!name) continue;
+      const days = it.days == null || it.days === '' ? null : Number(it.days);
+      const leaveId = await ensureLeaveType(connection, name, userId, days || 0);
+      const [[existing]] = await connection.query(
+        'SELECT id FROM employee_leaves_quota WHERE emp_id = ? AND leave_id = ? LIMIT 1',
+        [emp_id, leaveId]
+      );
+      if (existing) {
+        await connection.query('UPDATE employee_leaves_quota SET days = ? WHERE id = ?', [days, existing.id]);
+      } else {
+        await connection.query(
+          'INSERT INTO employee_leaves_quota (emp_id, leave_id, days, created_at, created_by) VALUES (?, ?, ?, NOW(), ?)',
+          [emp_id, leaveId, days, userId]
+        );
+      }
+    }
+    res.json({ success: true });
+  } catch (err) {
+    logger.error('employee-leave POST error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // ✅ Update Leave Type
 router.put("/update/:id", auth.authenticateToken, async (req, res) => {
   let connection;
