@@ -8,6 +8,7 @@ const multer = require('multer');
 const path = require('path');
 const admin = require('../config/firebase-admin');
 const logger = require('../common/logger');
+const { getAccessMode } = require('../utils/access');
 
 async function resolveBillingUserId(connection, userId) {
   let billingUserId = userId;
@@ -45,39 +46,19 @@ async function getChecklistAccess(connection, userId) {
   );
   const role = userRows.length ? Number(userRows[0].role) : 0;
 
-  const billingUserId = role === 12 ? userId : await resolveBillingUserId(connection, userId);
-
-  const [subRows] = await connection.query(
-    `SELECT plan_id
-     FROM subscriptions
-     WHERE user_id = ? AND status = 'active'
-     ORDER BY created_at DESC
-     LIMIT 1`,
-    [billingUserId],
-  );
-
-  const hasActiveSubscription = subRows.length > 0;
-  if (!hasActiveSubscription) {
-    return { role, allowed: role === 12, canWrite: false };
+  // Align Clipboard with the app-wide access model (utils/access.js): owner-
+  // exempt accounts, internal roles, paid subscribers and trial users get full
+  // read+write; only expired-free users are limited to view-only. This is the
+  // single source of truth — it correctly grants the owner (who has no
+  // subscription row) instead of blocking them.
+  let mode = 'paid';
+  try {
+    mode = await getAccessMode(userId);
+  } catch (e) {
+    mode = 'paid'; // fail open, like the rest of the app
   }
 
-  const planId = subRows[0].plan_id;
-  const [featureRows] = await connection.query(
-    'SELECT feature_key FROM plan_features WHERE plan_id = ?',
-    [planId],
-  );
-  const features = (Array.isArray(featureRows) ? featureRows : []).map((r) =>
-    String(r.feature_key || '').toLowerCase(),
-  );
-  const hasChecklist = features.includes('checklist');
-
-  // Role 12 can always view, but can write only with subscription+feature.
-  if (role === 12) {
-    return { role, allowed: true, canWrite: hasChecklist };
-  }
-
-  // Everyone else must have subscription+feature to access at all.
-  return { role, allowed: hasChecklist, canWrite: hasChecklist };
+  return { role, allowed: true, canWrite: mode !== 'expired_free' };
 }
 
  const VALID_CHECKLIST_TYPES = new Set(['task', 'shopping']);

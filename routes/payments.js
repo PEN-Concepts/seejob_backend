@@ -5,6 +5,7 @@ const router = express.Router();
 const { authenticateToken } = require("../services/authentication");
 const pool = require("../config/connection");
 const logger = require("../common/logger");
+const { getAccessMode } = require("../utils/access");
 
 // Authorize.Net SDK
 const { APIControllers, APIContracts } = require("authorizenet");
@@ -1514,6 +1515,23 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
       );
 
       features = featureRows.map((row) => row.feature_key);
+    } else {
+      // No subscription: owner-exempt / internal / trial accounts behave as a
+      // full (top-tier) paying customer so the GC's own account works on the
+      // web too. Expired-free gets none. Mirrors utils/access.js + the jobs and
+      // checklist gates.
+      let mode = "paid";
+      try {
+        mode = await getAccessMode(userId);
+      } catch (e) {
+        mode = "paid";
+      }
+      if (mode === "paid" || mode === "trial_active") {
+        const [allRows] = await connection.query(
+          "SELECT DISTINCT feature_key FROM plan_features"
+        );
+        features = allRows.map((row) => row.feature_key);
+      }
     }
 
     return res.json({

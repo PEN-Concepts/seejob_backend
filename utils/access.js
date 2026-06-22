@@ -3,11 +3,11 @@
 /**
  * Access-tier helpers — the server-side source of truth for the free-trial model.
  *
- * Tiers (per user; each user, including invited ones, has their own 30-day
+ * Tiers (per user; each user, including invited ones, has their own 60-day
  * clock from their own signup):
  *   paid          = the user has their OWN active subscription
- *   trial_active  = no own subscription, still within 30 days of signup
- *   expired_free  = no own subscription, past the 30-day window
+ *   trial_active  = no own subscription, still within 60 days of signup
+ *   expired_free  = no own subscription, past the 60-day window
  *
  * Everything FAILS OPEN ('paid') on missing data or error, so a bug in tier
  * calculation can never lock a legitimate user out of their account.
@@ -16,7 +16,7 @@
 const pool = require("../config/connection");
 const logger = require("../common/logger");
 
-const TRIAL_DAYS = 30;
+const TRIAL_DAYS = 60;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Roles that are internal/admin and must never be trial-gated.

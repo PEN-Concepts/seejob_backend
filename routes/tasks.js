@@ -11,6 +11,90 @@ const { getTimeStamp } = require("../common/timdate");
 const admin = require("../config/firebase-admin");
 const logger = require("../common/logger");
 
+// Ensure the dedupe ledger for subcontractor seed-jobs exists (idempotent).
+async function ensureSeedJobTable(connection) {
+  try {
+    await connection.query(
+      `CREATE TABLE IF NOT EXISTS subcontractor_seed_jobs (
+         id INT AUTO_INCREMENT PRIMARY KEY,
+         source_job_id INT NOT NULL,
+         sub_user_id INT NOT NULL,
+         new_job_id INT NOT NULL,
+         created_at DATETIME NOT NULL,
+         UNIQUE KEY uq_seed (source_job_id, sub_user_id)
+       )`
+    );
+  } catch (e) {
+    logger.error("ensureSeedJobTable: " + e.message);
+  }
+}
+
+/**
+ * When a GC assigns a task to a subcontractor, give that sub their OWN
+ * independent job to run — seeded with just the job name, address and
+ * homeowner name. It is NOT linked to the GC's job (no sharing/sync); it's
+ * only to "get the ball rolling". Deduped so re-assigning never makes copies.
+ * The sub's job is owned by them (created_by = sub), so the existing access
+ * rules keep it hidden until they're on a paid plan (Basic+).
+ */
+async function maybeCreateSeedJob(connection, sourceJobId, subUserId, gcUserId) {
+  const src = Number(sourceJobId);
+  const sub = Number(subUserId);
+  if (!src || !sub || sub === Number(gcUserId)) return; // need a real job + a real (other) sub
+
+  await ensureSeedJobTable(connection);
+
+  const [exist] = await connection.query(
+    "SELECT id FROM subcontractor_seed_jobs WHERE source_job_id = ? AND sub_user_id = ? LIMIT 1",
+    [src, sub]
+  );
+  if (exist.length) return; // already seeded for this sub + job
+
+  const [jobRows] = await connection.query(
+    `SELECT j.type, j.name, j.address, j.city, j.state, j.zipcode,
+            COALESCE(u.name, j.additional_client_name) AS homeowner
+       FROM job j LEFT JOIN user u ON u.id = j.client_id
+      WHERE j.id = ? LIMIT 1`,
+    [src]
+  );
+  if (!jobRows.length) return;
+  const j = jobRows[0];
+
+  // Mirror the columns the normal job-create uses so no NOT-NULL column is
+  // missed; everything except name/address/homeowner is left empty/default.
+  const [ins] = await connection.query(
+    `INSERT INTO job (
+       type, name, permit_no, permit_type, gate_no, lock_box_code,
+       inspector_id, client_id, additional_client_email, additional_client_mobile, additional_client_name,
+       address, city, state, zipcode,
+       job_address, job_city, job_state, job_zipcode,
+       sameAsAddress, contract_status, status, created_by, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+    [
+      j.type || "Residential",
+      j.name || "Job",
+      null, null, null, null,        // permit_no, permit_type, gate_no, lock_box_code
+      null, null,                    // inspector_id, client_id (no link to GC's client)
+      null, null,                    // additional_client_email, additional_client_mobile
+      j.homeowner || null,           // additional_client_name = homeowner
+      j.address || null,
+      j.city || null,
+      j.state || null,
+      j.zipcode || null,
+      null, null, null, null,        // job_address/city/state/zipcode
+      0,                             // sameAsAddress
+      "",                            // contract_status
+      1,                             // status (active)
+      sub,                           // created_by = the subcontractor owns it
+    ]
+  );
+
+  await connection.query(
+    "INSERT INTO subcontractor_seed_jobs (source_job_id, sub_user_id, new_job_id, created_at) VALUES (?, ?, ?, NOW())",
+    [src, sub, ins.insertId]
+  );
+}
+
 async function attachTaskImages(connectionOrPool, tasks) {
   if (!tasks || tasks.length === 0) return tasks;
 
@@ -360,6 +444,19 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
     }
 
     await connection.commit();
+
+    // Give each newly-assigned subcontractor their own seed job (independent,
+    // name/address/homeowner only). Runs after commit so a hiccup here never
+    // affects task creation; deduped per (job, sub).
+    for (const t of insertedTasks) {
+      if (t.user_id && t.job_id) {
+        try {
+          await maybeCreateSeedJob(connection, t.job_id, t.user_id, signedin_user);
+        } catch (e) {
+          logger.error("maybeCreateSeedJob: " + e.message);
+        }
+      }
+    }
 
     // If a single task was created, return just its ID to match frontend expectations
     const responseData = insertedTasks.length === 1 ? insertedTasks[0].id : insertedTasks;
@@ -1082,6 +1179,48 @@ router.post('/upload-photos/:taskId', auth.authenticateToken, denyExpiredFreeWri
     res.status(200).json({ message: 'Photos uploaded', images: inserted });
   } catch (err) {
     logger.error("Error uploading photos:", err);
+    res.status(500).json({ message: 'Upload failed', error: err.message });
+  }
+});
+
+// Assignee completion photo — a narrow endpoint (no expired-write guard) that
+// lets the person a task is ASSIGNED to add photos to it, even on the free
+// plan, to show the work is done. Scoped: only the task's assignee may use it.
+router.post('/assignee-photo/:taskId', auth.authenticateToken, upload.array('photos', 20), async (req, res) => {
+  try {
+    if (req.fileValidationError) {
+      return res.status(400).json({ message: req.fileValidationError });
+    }
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ message: 'No files uploaded' });
+    }
+    const taskId = req.params.taskId;
+
+    const [rows] = await pool.query("SELECT user_id FROM tasks WHERE id = ? LIMIT 1", [taskId]);
+    if (!rows.length) return res.status(404).json({ message: 'Task not found' });
+    if (Number(rows[0].user_id) !== Number(req.user.id)) {
+      return res.status(403).json({ code: 'NOT_ASSIGNEE', message: 'You can only add photos to tasks assigned to you.' });
+    }
+
+    const inserted = [];
+    for (const file of req.files) {
+      const filePath = path.posix.join('tasks', String(taskId)) + '/';
+      const fileName = file.filename;
+      const [result] = await pool.query(
+        `INSERT INTO tasks_images (task_id, file_path, file_name) VALUES (?, ?, ?)`,
+        [taskId, filePath, fileName]
+      );
+      inserted.push({ id: result.insertId, filename: `${filePath}${fileName}` });
+    }
+    if (inserted.length > 0) {
+      await pool.query(
+        `UPDATE tasks SET image = ? WHERE id = ? AND (image IS NULL OR image = '')`,
+        [inserted[0].filename, taskId]
+      );
+    }
+    res.status(200).json({ message: 'Photos uploaded', images: inserted });
+  } catch (err) {
+    logger.error("assignee-photo upload:", err);
     res.status(500).json({ message: 'Upload failed', error: err.message });
   }
 });

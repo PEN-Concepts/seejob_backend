@@ -1654,6 +1654,19 @@ router.get("/jobs_general/:id", auth.authenticateToken, async (req, res) => {
       return res.status(404).json({ message: "Job not found" });
     }
 
+    // Flag jobs that were auto-created from a subcontractor assignment (seed
+    // jobs) so the mobile app can open them on the Tasks tab. Guarded — the
+    // ledger table may not exist yet.
+    try {
+      const [seed] = await connection.query(
+        "SELECT 1 FROM subcontractor_seed_jobs WHERE new_job_id = ? LIMIT 1",
+        [jobId]
+      );
+      rows[0].is_seed = seed.length ? 1 : 0;
+    } catch (e) {
+      rows[0].is_seed = 0;
+    }
+
     res
       .status(200)
       .json({ message: "Job fetched successfully", data: rows[0] });
@@ -2031,45 +2044,121 @@ router.post(
   }
 );
 
+// Make sure the "shared with subs" flag column exists (idempotent).
+async function ensureDocShareColumn(connection) {
+  try {
+    await connection.query(
+      "ALTER TABLE job_documents ADD COLUMN is_shared TINYINT(1) NOT NULL DEFAULT 0"
+    );
+  } catch (e) {
+    // Already exists — ignore.
+  }
+}
+
 router.get("/get-files", auth.authenticateToken, async (req, res) => {
   const { job_id } = req.query;
   let connection;
 
   try {
     connection = await pool.getConnection();
+    await ensureDocShareColumn(connection);
 
     const userId = req.user && req.user.id ? req.user.id : res.locals.id;
     const features = await getActivePlanFeatures(connection, userId);
 
-    if (!features.length) {
-      return res.json([]);
-    }
-
     const allowDocs = isAllowedFeature(features, ["job_documents", "documents"]);
     const allowPhotos = isAllowedFeature(features, ["job_photos", "photos", "pictures"]);
 
-    if (!allowDocs && !allowPhotos) {
-      return res.json([]);
-    }
-
     const [rows] = await connection.execute(
-      "SELECT id, path, name, job_id,type FROM job_documents WHERE job_id = ?",
+      "SELECT id, path, name, job_id, type, is_shared FROM job_documents WHERE job_id = ?",
       [job_id]
     );
 
+    const isImg = (t) => ["image", "photo", "photos", "picture", "pictures"].includes(t);
     const filtered = (rows || []).filter((r) => {
       const t = String(r.type || "").toLowerCase();
-      if (t === "document" || t === "documents") return allowDocs;
-      if (t === "image" || t === "photo" || t === "photos" || t === "picture" || t === "pictures") {
-        return allowPhotos;
-      }
-      // Unknown type -> only include if user has either permission
-      return allowDocs || allowPhotos;
+      if (isImg(t)) return allowPhotos; // photos stay plan-gated
+      // Documents (and unknown types): visible if the plan allows docs OR the
+      // GC has explicitly shared this doc (so free/sub users see shared docs).
+      return allowDocs || Number(r.is_shared) === 1;
     });
 
     res.json(filtered);
   } catch (err) {
     logger.error("Error fetching documents:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Toggle a document's "shared with subs" flag (owner-only).
+router.patch("/job-file/:id/share", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+  const fileId = req.params.id;
+  const shared = req.body?.shared ? 1 : 0;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureDocShareColumn(connection);
+
+    const [rows] = await connection.query(
+      "SELECT d.id, j.created_by FROM job_documents d JOIN job j ON j.id = d.job_id WHERE d.id = ? LIMIT 1",
+      [fileId]
+    );
+    if (!rows.length) return res.status(404).json({ message: "File not found" });
+    if (!(await isSameAccount(req.user.id, rows[0].created_by, connection))) {
+      return res.status(403).json({ code: "OWNERSHIP_DENIED", message: "You can only share files on your own jobs." });
+    }
+
+    await connection.execute("UPDATE job_documents SET is_shared = ? WHERE id = ?", [shared, fileId]);
+    res.json({ success: true, is_shared: shared });
+  } catch (err) {
+    logger.error("Share job file error:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Delete a single job file (photo or document) by its row id. Deleting by id
+// (not by name) avoids wiping duplicate-named files. Only the owning account
+// may delete, and the file is removed from disk too.
+router.delete("/job-file/:id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+  const fileId = req.params.id;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    const [rows] = await connection.query(
+      "SELECT d.id, d.path, j.created_by FROM job_documents d JOIN job j ON j.id = d.job_id WHERE d.id = ? LIMIT 1",
+      [fileId]
+    );
+    if (!rows.length) {
+      return res.status(404).json({ message: "File not found" });
+    }
+    if (!(await isSameAccount(req.user.id, rows[0].created_by, connection))) {
+      return res.status(403).json({
+        code: "OWNERSHIP_DENIED",
+        message: "You can only delete files on jobs that belong to your account.",
+      });
+    }
+
+    // Remove the file from disk (path is stored as "/uploads/<filename>").
+    try {
+      const base = path.basename(String(rows[0].path || ""));
+      if (base) {
+        const diskPath = path.join(__dirname, "..", "uploads", base);
+        if (fs.existsSync(diskPath)) fs.unlinkSync(diskPath);
+      }
+    } catch (e) {
+      logger.error("Could not unlink job file from disk:", e);
+      // Continue — still remove the DB row so it disappears from the app.
+    }
+
+    await connection.execute("DELETE FROM job_documents WHERE id = ?", [fileId]);
+    res.json({ success: true });
+  } catch (err) {
+    logger.error("Delete job file error:", err);
     res.status(500).json({ message: "Server error", error: err.message });
   } finally {
     if (connection) connection.release();
@@ -2293,6 +2382,52 @@ router.post("/materials", auth.authenticateToken, denyExpiredFreeWrites, enforce
   }
 });
 
+router.put("/materials/:id", auth.authenticateToken, denyExpiredFreeWrites, enforcePlanFeatureForMaterials, async (req, res) => {
+  const { id } = req.params;
+  const { error, value } = materialSchema.validate(req.body);
+  if (error) {
+    return res.status(400).json({
+      code: "VALIDATION_ERROR",
+      message: error.details[0].message,
+    });
+  }
+
+  const { item_type, room, material, manufacturer, size, color } = value;
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    const [existing] = await connection.execute(
+      "SELECT id FROM materials WHERE id = ?",
+      [id]
+    );
+    if (existing.length === 0) {
+      return res.status(404).json({ code: "NOT_FOUND", message: "Material not found" });
+    }
+
+    await connection.execute(
+      `UPDATE materials SET item_type = ?, room = ?, material = ?, manufacturer = ?, size = ?, color = ?
+       WHERE id = ?`,
+      [item_type ?? null, room ?? null, material ?? null, manufacturer ?? null, size ?? null, color ?? null, id]
+    );
+
+    res.status(200).json({
+      code: "MATERIAL_UPDATED",
+      message: "Material updated successfully",
+    });
+  } catch (err) {
+    logger.error("Error updating material:", err);
+    res.status(500).json({
+      code: "DB_ERROR",
+      message: "Database error",
+      error: err.message,
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 router.delete("/materials/:id", auth.authenticateToken, denyExpiredFreeWrites, enforcePlanFeatureForMaterials, async (req, res) => {
   let connection;
   const { id } = req.params;
@@ -2370,15 +2505,32 @@ async function getActivePlanFeatures(connection, userId) {
     [billingUserId]
   );
 
-  if (!subRows.length) return [];
+  if (subRows.length) {
+    const planId = subRows[0].plan_id;
+    const [featureRows] = await connection.query(
+      "SELECT feature_key FROM plan_features WHERE plan_id = ?",
+      [planId]
+    );
+    return featureRows.map((r) => String(r.feature_key).toLowerCase());
+  }
 
-  const planId = subRows[0].plan_id;
-  const [featureRows] = await connection.query(
-    "SELECT feature_key FROM plan_features WHERE plan_id = ?",
-    [planId]
-  );
-
-  return featureRows.map((r) => String(r.feature_key).toLowerCase());
+  // No subscription row: owner-exempt accounts, internal roles and trial users
+  // are treated as a top-tier paying customer (full feature set), so the GC's
+  // own account works everywhere. Expired-free gets nothing. Mirrors the
+  // app-wide access model in utils/access.js.
+  let mode = "paid";
+  try {
+    mode = await getAccessMode(userId);
+  } catch (e) {
+    mode = "paid"; // fail open
+  }
+  if (mode === "paid" || mode === "trial_active") {
+    const [allRows] = await connection.query(
+      "SELECT DISTINCT feature_key FROM plan_features"
+    );
+    return allRows.map((r) => String(r.feature_key).toLowerCase());
+  }
+  return [];
 }
 
 function isAllowedFeature(features, allowedKeys) {

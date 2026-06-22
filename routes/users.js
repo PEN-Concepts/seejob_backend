@@ -155,7 +155,7 @@ router.get("/my-rights", auth.authenticateToken, async (req, res) => {
         rightsRows = roleDefaults;
       }
     }
-    // ---- Access tier (30-day trial derived from signup date) ----
+    // ---- Access tier (60-day trial derived from signup date) ----
     // Single source of truth lives in utils/access.js so the client signal
     // here and the server-side write/read guards never drift apart.
     const { mode, trialEndsAt, daysLeft, hasActiveSubscription } =
@@ -1474,6 +1474,7 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
         MAX(p.role_name) AS role_name,
         MAX(p.image) AS image,
         MAX(p.mobile) AS mobile,
+        MAX(p.business_name) AS business_name,
         NULL AS team_id,
         NULL AS team_name,
         NULL AS team_color
@@ -1490,7 +1491,8 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
             u.email,
             r.name AS role_name,
             u.image,
-            u.mobile
+            u.mobile,
+            u.business AS business_name
         FROM contact c
         INNER JOIN user u ON u.id = c.request_user2
         LEFT JOIN role r ON r.id = u.role
@@ -1512,7 +1514,8 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
             u.email,
             r.name AS role_name,
             u.image,
-            u.mobile
+            u.mobile,
+            u.business AS business_name
         FROM contact c
         INNER JOIN user u ON u.id = c.request_user1
         LEFT JOIN role r ON r.id = u.role
@@ -1534,7 +1537,8 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
             u.email,
             r.name AS role_name,
             u.image,
-            u.mobile
+            u.mobile,
+            u.business AS business_name
         FROM user u
         LEFT JOIN role r ON r.id = u.role
         LEFT JOIN subcategory sc ON sc.id = u.subcategory
@@ -1561,7 +1565,8 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
             u.email,
             r.name AS role_name,
             u.image,
-            u.mobile
+            u.mobile,
+            u.business AS business_name
         FROM user u
         LEFT JOIN role r ON r.id = u.role
         LEFT JOIN subcategory sc ON sc.id = u.subcategory
@@ -1588,6 +1593,7 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
           NULL AS role_name,
           NULL AS image,
           NULL AS mobile,
+          NULL AS business_name,
           t.id AS team_id,
           t.team_name,
           t.team_color

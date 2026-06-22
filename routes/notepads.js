@@ -361,8 +361,7 @@ router.post(
     { name: 'audio_note', maxCount: 1 }
   ]),
   async (req, res) => {
-    const { job_id, nudge, notepad_id, startDate, endDate } = req.body;
-console.log(req.body);
+    const { job_id, nudge, notepad_id, startDate, endDate, description } = req.body;
     if (!notepad_id) {
       return res.status(400).json({ message: 'Missing notepad_id (primary key)' });
     }
@@ -372,6 +371,11 @@ console.log(req.body);
 
     let updateFields = [];
     let values = [];
+
+    if (typeof description !== 'undefined' && description !== null) {
+      updateFields.push('description = ?');
+      values.push(description);
+    }
 
     if (job_id) {
       updateFields.push('job_id = ?');

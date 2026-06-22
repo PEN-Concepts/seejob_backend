@@ -49,6 +49,9 @@ const ALLOWED_RECURRENCE = new Set([
 // GET / — all of the user's goals, each with today's complete/skip status.
 router.get("/goals", auth.authenticateToken, async (req, res) => {
   const userId = req.user.id;
+  // Optional ?date=YYYY-MM-DD to get the completed/skipped status for that day
+  // (used by the mobile day-scroll). Defaults to today.
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || "") ? req.query.date : null;
   let connection;
   try {
     connection = await pool.getConnection();
@@ -57,10 +60,10 @@ router.get("/goals", auth.authenticateToken, async (req, res) => {
       `SELECT g.*, l.status AS today_status
          FROM spartan_goals g
          LEFT JOIN spartan_goal_log l
-           ON l.goal_id = g.id AND l.log_date = CURDATE()
+           ON l.goal_id = g.id AND l.log_date = ${date ? "?" : "CURDATE()"}
         WHERE g.user_id = ?
         ORDER BY (g.start_time IS NULL), g.start_time ASC, g.sort_order ASC, g.id ASC`,
-      [userId]
+      date ? [date, userId] : [userId]
     );
     return res.json({ success: true, goals: rows });
   } catch (err) {
