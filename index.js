@@ -34,6 +34,7 @@ const cookieParser = require("cookie-parser");
 const calendar = require("./routes/calendar");
 const spartan = require("./routes/spartan");
 const translate = require("./routes/translate");
+const bids = require("./routes/bids");
 const app = express();
 const api = process.env.API_URL;
 
@@ -108,6 +109,7 @@ app.use(`${api}/admin_contactRequest`, adminContact);
 app.use(`${api}/calendar`, calendar);
 app.use(`${api}/spartan`, spartan);
 app.use(`${api}/translate`, translate);
+app.use(`${api}/bids`, bids);
 
 
 // Global error handler to log unexpected exceptions
