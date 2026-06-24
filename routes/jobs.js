@@ -926,12 +926,28 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
     // on — never the inviter's other jobs. (resolveOwnerId is category-aware.)
     const managerId = await resolveOwnerId(userId, connection);
 
+    // Employees share the owner's account, so EVERY job they can see is a
+    // company job — never a "shared/added-by" job. resolveOwnerId returns a
+    // DIFFERENT id than the user only for employees (it returns the user
+    // themselves for owners, subcontractors, and clients), so that's our
+    // employee signal. Only non-employees get the added-by marker that drives
+    // the separate "Jobs added by others" list + orange styling.
+    const isEmployee = Number(managerId) !== Number(userId);
+
     // Access tier decides WHAT a user can see:
     //  - expired_free: ONLY jobs assigned to them (a task is assigned to them);
     //    their own created jobs are hidden (preserved, visible again on upgrade).
     //  - paid / trial_active: their account's jobs + any job they're a contact
     //    on + any job they have a task on (unchanged behavior).
     const mode = await getAccessMode(userId, connection);
+
+    const addedBySelect = isEmployee
+      ? "NULL AS added_by_user_id, NULL AS added_by_user_name"
+      : "jc.user_id AS added_by_user_id, u3.name AS added_by_user_name";
+    const addedByJoin = isEmployee
+      ? ""
+      : `LEFT JOIN job_contacts jc ON jc.job_id = j.id AND jc.contact_id IN (?, ?)
+         LEFT JOIN user u3 ON u3.id = jc.user_id`;
 
     const baseQuery = `
         SELECT
@@ -951,13 +967,11 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
           u2.email AS inspector_email,
           u2.city  AS inspector_city,
           u2.website_link AS inspector_website,
-          jc.user_id AS added_by_user_id,
-          u3.name   AS added_by_user_name
+          ${addedBySelect}
         FROM job j
         LEFT JOIN user u  ON u.id = j.client_id
         LEFT JOIN user u2 ON u2.id = j.inspector_id
-        LEFT JOIN job_contacts jc ON jc.job_id = j.id AND jc.contact_id IN (?, ?)
-        LEFT JOIN user u3 ON u3.id = jc.user_id
+        ${addedByJoin}
       `;
 
     let whereClause;
@@ -988,9 +1002,10 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
       whereParams = [managerId, userId, managerId, userId, managerId];
     }
 
+    const joinParams = isEmployee ? [] : [userId, managerId];
     const [rows] = await connection.execute(
       `${baseQuery} ${whereClause} ORDER BY j.id ASC;`,
-      [userId, managerId, ...whereParams],
+      [...joinParams, ...whereParams],
     );
 
     res.json(rows);

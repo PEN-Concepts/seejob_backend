@@ -89,9 +89,16 @@ async function getAccessInfo(userId, connection) {
       hasActiveSubscription: false,
     };
     try {
+      // Employees (category 1) share their account OWNER's access tier — an
+      // employee never holds their own subscription (the paid plan lives on the
+      // owner's account), so evaluate the owner here, not the employee.
+      // resolveOwnerId returns the user themselves for owners/contractors/clients,
+      // so this is a no-op for everyone except employees.
+      const effectiveId = await resolveOwnerId(userId, conn);
+
       const [userRows] = await conn.query(
         "SELECT id, role, created_at, email FROM user WHERE id = ? LIMIT 1",
-        [userId]
+        [effectiveId]
       );
       if (!userRows.length) return fallback;
 
@@ -99,7 +106,7 @@ async function getAccessInfo(userId, connection) {
       const email = String(userRows[0].email || "").trim().toLowerCase();
       const [subRows] = await conn.query(
         "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
-        [userId]
+        [effectiveId]
       );
       const hasActiveSubscription = subRows.length > 0;
 
