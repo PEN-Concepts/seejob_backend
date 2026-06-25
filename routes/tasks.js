@@ -503,6 +503,10 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
     const includeNoJob =
       String(req.query?.includeNoJob ?? '').trim() === '1' ||
       String(req.query?.includeNoJob ?? '').trim().toLowerCase() === 'true';
+    const includeArchived =
+      String(req.query?.includeArchived ?? '').trim() === '1' ||
+      String(req.query?.includeArchived ?? '').trim().toLowerCase() === 'true';
+    const archivedClause = includeArchived ? '' : 'AND jt.archived_at IS NULL';
 
     let whereJob;
     let params;
@@ -535,7 +539,7 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
        LEFT JOIN user uc ON uc.id = jt.created_by
        WHERE ${whereJob}
          AND jt.task_type = 'job'
-         AND jt.archived_at IS NULL
+         ${archivedClause}
          AND (
            jt.user_id = ?
            OR jt.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
