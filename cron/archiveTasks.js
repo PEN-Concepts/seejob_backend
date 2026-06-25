@@ -16,6 +16,14 @@ async function ensureArchivedColumn(connection) {
     );
     logger.info('[ArchiveTasks] added tasks.archived_at column');
   }
+  // status_note = a short "why / status" note per task (e.g. "waiting on concrete").
+  const [noteCols] = await connection.query("SHOW COLUMNS FROM tasks LIKE 'status_note'");
+  if (!noteCols.length) {
+    await connection.query(
+      "ALTER TABLE tasks ADD COLUMN status_note TEXT NULL DEFAULT NULL"
+    );
+    logger.info('[ArchiveTasks] added tasks.status_note column');
+  }
 }
 
 /** Flag every completed (status = 1) task as archived so the next day starts clean. */

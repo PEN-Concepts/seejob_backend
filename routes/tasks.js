@@ -716,6 +716,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       job_id,
       nudge,
       status,
+      status_note,
       task_type,
       is_calendar_task,
       is_appointment_task,
@@ -904,6 +905,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       'audio_note = ?',
       'assignee_completed = COALESCE(?, assignee_completed)',
       'status = COALESCE(?, status)',
+      'status_note = COALESCE(?, status_note)',
       'task_type = COALESCE(?, task_type)',
       'is_calendar_task = COALESCE(?, is_calendar_task)',
       'is_appointment_task = COALESCE(?, is_appointment_task)'
@@ -924,6 +926,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       audio_note || null,
       typeof assignee_completed !== 'undefined' ? requestedAssigneeCompleted : null,
       typeof status !== 'undefined' ? requestedStatus : null,
+      typeof status_note !== 'undefined' ? status_note : null,
       task_type,
       is_calendar_task,
       is_appointment_task,
