@@ -1780,6 +1780,11 @@ router.post(
 // Bulk fetch for Task Manager: jobs, leads, and their tasks for the authenticated user
 router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
   const loggedInUserId = req.user.id;
+  // "Show Archived" toggle — by default, archived (end-of-day) tasks are hidden.
+  const includeArchived =
+    String(req.query?.includeArchived ?? '').trim() === '1' ||
+    String(req.query?.includeArchived ?? '').trim().toLowerCase() === 'true';
+  const archivedClause = includeArchived ? '' : 'AND t.archived_at IS NULL';
   let connection;
 
   try {
@@ -1868,16 +1873,17 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
          LEFT JOIN user u ON u.id = t.created_by
          WHERE LOWER(t.task_type) = 'job'
            AND t.job_id IN (?)
+           ${archivedClause}
            AND (
              t.user_id = ?
-             OR t.created_by = ?
+             OR t.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
              OR (t.team_id IS NOT NULL AND EXISTS (
                    SELECT 1 FROM team_user tu
                    WHERE tu.team_id = t.team_id AND tu.user_id = ?
                  ))
            )
          ORDER BY t.status ASC, t.created_at DESC`,
-        [jobIds, loggedInUserId, managerId, loggedInUserId]
+        [jobIds, loggedInUserId, managerId, managerId, loggedInUserId]
       );
 
       for (const t of jobTasks) {
@@ -1893,16 +1899,17 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
          LEFT JOIN user u ON u.id = t.created_by
          WHERE LOWER(t.task_type) = 'lead'
            AND t.job_id IN (?)
+           ${archivedClause}
            AND (
              t.user_id = ?
-             OR t.created_by = ?
+             OR t.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
              OR (t.team_id IS NOT NULL AND EXISTS (
                    SELECT 1 FROM team_user tu
                    WHERE tu.team_id = t.team_id AND tu.user_id = ?
                  ))
            )
          ORDER BY t.status ASC, t.created_at DESC`,
-        [leadIds, loggedInUserId, managerId, loggedInUserId]
+        [leadIds, loggedInUserId, managerId, managerId, loggedInUserId]
       );
 
       for (const t of leadTasks) {

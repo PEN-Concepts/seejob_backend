@@ -1,6 +1,7 @@
 require('./cron/nudgeReminder');
 require('./cron/autoClockOut');
 require('./cron/licenseCheck');
+require('./cron/archiveTasks');
 require('dotenv').config();
 const express = require("express");
 const cors = require("cors");

@@ -535,6 +535,7 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
        LEFT JOIN user uc ON uc.id = jt.created_by
        WHERE ${whereJob}
          AND jt.task_type = 'job'
+         AND jt.archived_at IS NULL
          AND (
            jt.user_id = ?
            OR jt.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
@@ -588,6 +589,7 @@ router.get("/all_lead_task/:id", auth.authenticateToken, async (req, res) => {
        LEFT JOIN user uc ON uc.id = jt.created_by
        WHERE jt.job_id IN (?)
          AND LOWER(jt.task_type) = 'lead'
+         AND jt.archived_at IS NULL
          AND (
            jt.user_id = ?
            OR jt.created_by = ?
