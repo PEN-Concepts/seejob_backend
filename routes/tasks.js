@@ -510,12 +510,12 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
       whereJob = includeNoJob
         ? `(jt.job_id IN (?) OR (jt.job_id IS NULL OR jt.job_id = 0))`
         : `jt.job_id IN (?)`;
-      params = [jobIds, loggedInUserId, effectiveCreatorId, loggedInUserId];
+      params = [jobIds, loggedInUserId, effectiveCreatorId, effectiveCreatorId, loggedInUserId];
     } else {
       whereJob = includeNoJob
         ? `(jt.job_id IS NULL OR jt.job_id = 0)`
         : `(jt.job_id IS NOT NULL AND jt.job_id <> 0)`;
-      params = [loggedInUserId, effectiveCreatorId, loggedInUserId];
+      params = [loggedInUserId, effectiveCreatorId, effectiveCreatorId, loggedInUserId];
     }
 
     const baseSql = `SELECT jt.*,
@@ -537,7 +537,7 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
          AND jt.task_type = 'job'
          AND (
            jt.user_id = ?
-           OR jt.created_by = ?
+           OR jt.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
            OR (jt.team_id IS NOT NULL AND EXISTS (
                  SELECT 1 FROM team_user tu
                  WHERE tu.team_id = jt.team_id AND tu.user_id = ?
