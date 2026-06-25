@@ -814,7 +814,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
         (
           !!managerId &&
           managerIsGC &&
-          Number(oldTask.created_by || 0) === Number(managerId)
+          ownsTask
         );
 
       if (canActAsGC) {
@@ -846,7 +846,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       const canCompleteAsGC =
         !!managerId &&
         managerIsGC &&
-        Number(oldTask.created_by || 0) === Number(managerId);
+        ownsTask;
 
       if (!canCompleteAsGC) {
         await connection.rollback();

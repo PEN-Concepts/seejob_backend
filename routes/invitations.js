@@ -656,6 +656,20 @@ router.get('/rights', async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
+    // Ensure the "Project Manager" permission exists (idempotent). Wrapped so a
+    // seed hiccup can never break the rights grid load.
+    try {
+      const [pm] = await connection.query(
+        "SELECT id FROM `right` WHERE name = 'project_manager' LIMIT 1"
+      );
+      if (!pm.length) {
+        await connection.query(
+          "INSERT INTO `right` (name, display_name, sub_heading, admin_module) VALUES ('project_manager', 'Project Manager', 0, 0)"
+        );
+      }
+    } catch (seedErr) {
+      console.error('Project Manager right seed skipped:', seedErr.message);
+    }
     const [rows] = await connection.query("SELECT * FROM `right` where admin_module = 0 ORDER BY id ASC");
     res.json(rows);
   } catch (err) {
