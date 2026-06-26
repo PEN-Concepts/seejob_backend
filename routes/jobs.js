@@ -1002,8 +1002,14 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
           (
             j.created_by IN ${ACCOUNT}
             OR j.client_id IN ${ACCOUNT}
-            OR j.id IN (
-              SELECT DISTINCT job_id FROM tasks WHERE user_id IN ${ACCOUNT}
+            OR (
+              -- A job assigned to me by another contractor (via a task) only
+              -- shows while it is ACTIVE (status = 1). When they complete/archive
+              -- it, it disappears from my side.
+              j.status = 1
+              AND j.id IN (
+                SELECT DISTINCT job_id FROM tasks WHERE user_id IN ${ACCOUNT}
+              )
             )
           )
       `;
