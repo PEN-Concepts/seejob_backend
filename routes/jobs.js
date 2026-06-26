@@ -986,7 +986,9 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
       whereClause = `
         WHERE
           (
-            j.created_by = ?
+            j.created_by IN (
+              SELECT id FROM \`user\` WHERE id = ? OR created_by = ?
+            )
             OR j.id IN (
               SELECT job_id
               FROM job_contacts
@@ -999,7 +1001,9 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
             )
           )
       `;
-      whereParams = [managerId, userId, managerId, userId, managerId];
+      // Account-wide: everyone on the account (owner + employees) sees every
+      // job anyone on the account created, not just the owner's own jobs.
+      whereParams = [managerId, managerId, userId, managerId, userId, managerId];
     }
 
     const joinParams = isEmployee ? [] : [userId, managerId];
@@ -2265,21 +2269,28 @@ router.post(
 );
 
 router.get("/jobs/all/:id", auth.authenticateToken, async (req, res) => {
-  const user_id = req.params.id;
   let connection;
   try {
-    
     connection = await pool.getConnection();
+
+    // Account-wide: resolve the actor's account owner, then return every active
+    // job created by anyone on that account (owner + employees). The :id param
+    // is ignored in favor of the authenticated user's account, so the dashboard
+    // and checklist job pickers show all company jobs, not just one person's.
+    const ownerId = await resolveOwnerId(req.user.id, connection);
 
     const [rows] = await connection.execute(
       `
-      SELECT 
+      SELECT
         j.*
       FROM job j
-      WHERE j.created_by = ? AND j.status = 1
+      WHERE j.created_by IN (
+              SELECT id FROM \`user\` WHERE id = ? OR created_by = ?
+            )
+        AND j.status = 1
       ORDER BY j.created_at DESC
     `,
-      [user_id]
+      [ownerId, ownerId]
     );
 
     res.status(200).json(rows);
