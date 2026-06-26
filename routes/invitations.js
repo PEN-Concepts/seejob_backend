@@ -146,7 +146,11 @@ router.post("/send-invite", auth.authenticateToken, async (req, res) => {
     if (role === 12) {
       return res.status(403).json({ message: "You are not allowed to create invitations." });
     }
-    const request_by = (req.user && req.user.id);
+    // Contacts belong to the COMPANY, not the individual. For employees,
+    // working_id resolves to the account owner, so a contact an employee adds
+    // is owned by the owner's account (and visible to the whole team) — same
+    // as the /contacts/create flow. Falls back to the user's own id (owners).
+    const request_by = res.locals.working_id || (req.user && req.user.id);
     const { client_id: request_to } = req.body;
 
     if (!request_by || !request_to) {
@@ -556,13 +560,18 @@ router.post('/sync-invites', auth.authenticateToken, async (req, res) => {
 });
 
 router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
-  const userId = req.user.id;
+  // Account-wide: contacts belong to the company. Resolve the account owner
+  // (working_id) and include every contact added by anyone on the account
+  // (owner + employees), so the whole team sees the same contact list.
+  const ownerId = res.locals.working_id || req.user.id;
   let connection;
 
   try {
     connection = await pool.getConnection();
     await ensureCslbColumns(connection);
 
+    // The displayed person is the party that is NOT an account member.
+    const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
     const sql = `
       SELECT
         u.id,
@@ -592,15 +601,21 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
         c.updated_at AS connected_at,
         c.status AS connection_status
       FROM contact c
-      JOIN user u ON (u.id = IF(c.request_by = ?, c.request_to, c.request_by))
+      JOIN user u ON (u.id = IF(c.request_by IN ${ACCOUNT}, c.request_to, c.request_by))
       LEFT JOIN subcategory sub ON u.subcategory = sub.id
       LEFT JOIN category cat ON cat.id = u.category
-      WHERE (c.status = 'Accept' AND (c.request_by = ? OR c.request_to = ?))
-         OR (c.status IN ('Pending','Saved') AND c.request_by = ?)
+      WHERE (c.status = 'Accept' AND (c.request_by IN ${ACCOUNT} OR c.request_to IN ${ACCOUNT}))
+         OR (c.status IN ('Pending','Saved') AND c.request_by IN ${ACCOUNT})
       ORDER BY c.updated_at DESC
     `;
 
-    const [rows] = await connection.query(sql, [userId, userId, userId, userId]);
+    // 4 ACCOUNT subqueries, each takes (ownerId, ownerId).
+    const [rows] = await connection.query(sql, [
+      ownerId, ownerId,  // IF(...)
+      ownerId, ownerId,  // Accept request_by
+      ownerId, ownerId,  // Accept request_to
+      ownerId, ownerId,  // Pending/Saved request_by
+    ]);
 
     res.json(rows);
   } catch (err) {
@@ -1968,7 +1983,10 @@ async function sendContactInviteEmail(toEmail, inviterName) {
 }
 
 router.post('/save-contact', auth.authenticateToken, async (req, res) => {
-  const userId = req.user.id;
+  // Contacts belong to the COMPANY. For employees, working_id is the account
+  // owner, so the new contact (and its link) is owned by the owner's account
+  // and visible to the whole team — employees never get private contacts.
+  const userId = res.locals.working_id || req.user.id;
   const role = Number(req.user && req.user.role);
   if (role === 12) {
     return res.status(403).json({ message: 'You are not allowed to create contacts.' });
