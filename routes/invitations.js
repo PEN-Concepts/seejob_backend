@@ -2311,11 +2311,15 @@ router.post('/check-license/:contactUserId', auth.authenticateToken, async (req,
            cslb_classification = ?,
            cslb_address = ?,
            cslb_phone = ?,
+           -- Pull the CSLB business name in as the contact's company name.
+           business = COALESCE(NULLIF(?, ''), business),
+           organization_name = COALESCE(NULLIF(?, ''), organization_name),
            mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
            address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
        WHERE id = ?`,
       [result.status, now, result.classification || null, result.address || null,
-       result.phone || null, result.phone || null, result.address || null, contactUserId]
+       result.phone || null, result.name || null, result.name || null,
+       result.phone || null, result.address || null, contactUserId]
     );
 
     const [[updated]] = await connection.query(
