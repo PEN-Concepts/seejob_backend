@@ -989,27 +989,25 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
       `;
       whereParams = [userId, userId];
     } else {
+      // A job is visible when:
+      //  1. it belongs to my account (owner + employees created it), OR
+      //  2. an account member is the CLIENT on it (so clients see their jobs), OR
+      //  3. a task on it is assigned to an account member (real work assigned).
+      // Being merely a passive contact does NOT surface a foreign job — per the
+      // rule "a job isn't assigned to me unless a task (or bid) came to me".
+      // (Bid-request surfacing will be added when the bid system is live.)
+      const ACCOUNT = "(SELECT id FROM `user` WHERE id = ? OR (created_by = ? AND category = 1))";
       whereClause = `
         WHERE
           (
-            j.created_by IN (
-              SELECT id FROM \`user\` WHERE id = ? OR created_by = ?
-            )
+            j.created_by IN ${ACCOUNT}
+            OR j.client_id IN ${ACCOUNT}
             OR j.id IN (
-              SELECT job_id
-              FROM job_contacts
-              WHERE contact_id IN (?, ?)
-            )
-            OR j.id IN (
-              SELECT DISTINCT job_id
-              FROM tasks
-              WHERE user_id = ? OR created_by = ?
+              SELECT DISTINCT job_id FROM tasks WHERE user_id IN ${ACCOUNT}
             )
           )
       `;
-      // Account-wide: everyone on the account (owner + employees) sees every
-      // job anyone on the account created, not just the owner's own jobs.
-      whereParams = [managerId, managerId, userId, managerId, userId, managerId];
+      whereParams = [managerId, managerId, managerId, managerId, managerId, managerId];
     }
 
     // 4 params for the two CASE "account" subqueries in addedBySelect.
