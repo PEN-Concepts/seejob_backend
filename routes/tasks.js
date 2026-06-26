@@ -1298,37 +1298,54 @@ router.patch("/:id/complete", auth.authenticateToken, async (req, res) => {
       ? 0
       : 1;
 
+  const actorRole = Number(req.user.role);
   let connection;
   try {
     connection = await pool.getConnection();
     const [[task]] = await connection.query(
-      "SELECT id, user_id, team_id FROM tasks WHERE id = ? LIMIT 1",
+      "SELECT id, user_id, team_id, created_by FROM tasks WHERE id = ? LIMIT 1",
       [taskId]
     );
     if (!task) {
       return res.status(404).json({ success: false, message: "Task not found" });
     }
 
-    // Authorize: the individual assignee, or the leader of the assigned team.
-    let allowed = Number(task.user_id || 0) === actorId;
-    if (!allowed && task.team_id) {
+    // The individual assignee, or the leader of the assigned team.
+    const isAssignee = Number(task.user_id || 0) === actorId;
+    let isTeamLeader = false;
+    if (!isAssignee && task.team_id) {
       const [[teamRow]] = await connection.query(
         "SELECT team_leader FROM teams WHERE id = ? LIMIT 1",
         [task.team_id]
       );
-      allowed = !!teamRow && Number(teamRow.team_leader || 0) === actorId;
+      isTeamLeader = !!teamRow && Number(teamRow.team_leader || 0) === actorId;
     }
-    if (!allowed) {
+    // The account owner / GC / an employee acting for their GC may check off any
+    // task in their account. When THEY check it (and they're not the assignee),
+    // it completes the whole task (status) and cascades to the assignee's box —
+    // mirroring the web boss/PM checkbox. Assignees still only set their own box.
+    const ownsTask = await isSameAccount(actorId, task.created_by, connection);
+    const canActAsGC =
+      actorRole === 14 || ([2, 3, 4, 5].includes(actorRole) && ownsTask);
+
+    if (!isAssignee && !isTeamLeader && !canActAsGC) {
       return res.status(403).json({
         success: false,
-        message: "Only the assignee can check off this task.",
+        message: "You can't check off this task.",
       });
     }
 
-    await connection.query(
-      "UPDATE tasks SET assignee_completed = ? WHERE id = ?",
-      [completed, taskId]
-    );
+    if (canActAsGC && !isAssignee && !isTeamLeader) {
+      await connection.query(
+        "UPDATE tasks SET status = ?, assignee_completed = ? WHERE id = ?",
+        [completed, completed, taskId]
+      );
+    } else {
+      await connection.query(
+        "UPDATE tasks SET assignee_completed = ? WHERE id = ?",
+        [completed, taskId]
+      );
+    }
     return res.json({ success: true, assignee_completed: completed });
   } catch (err) {
     logger.error("task check-off error: " + err.message);

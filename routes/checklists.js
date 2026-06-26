@@ -432,7 +432,11 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
 
       sectionsSql += ' ORDER BY s.type ASC, s.sort_order ASC, s.id ASC';
 
-      const itemParams = [signedin_user, signedin_user, signedin_user, signedin_user, signedin_user, signedin_user];
+      // 5 params for the 5 placeholders in the WHERE below (owner, shared,
+      // created_by, assign_to, team-user). A 6th param here would be wrongly
+      // consumed by the appended "AND c.type = ?" clause, making it compare
+      // c.type to a user id and return zero items.
+      const itemParams = [signedin_user, signedin_user, signedin_user, signedin_user, signedin_user];
       // tm.* is populated only when assign_to matches a teams.id, giving the
       // frontend a way to render the team chip without a dedicated column.
       let itemsSql = `
