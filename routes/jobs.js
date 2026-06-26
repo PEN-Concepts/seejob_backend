@@ -945,10 +945,13 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
     // were assigned/shared to us. It is based on OWNERSHIP, not on contact rows
     // (so our own jobs never fall into it), and it names the contractor who
     // owns/assigned the job. created_by IN (our account) => null (it's ours).
+    // Account = the owner + their EMPLOYEES (category 1) only — matches
+    // resolveOwnerId. Jobs created by anyone else (a different contractor, or a
+    // sub/client) are "added by others" and show that creator's name.
     const addedBySelect = `
-        CASE WHEN j.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+        CASE WHEN j.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR (created_by = ? AND category = 1))
              THEN NULL ELSE j.created_by END AS added_by_user_id,
-        CASE WHEN j.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+        CASE WHEN j.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR (created_by = ? AND category = 1))
              THEN NULL ELSE creator.name END AS added_by_user_name`;
     const addedByJoin = `LEFT JOIN \`user\` creator ON creator.id = j.created_by`;
 
