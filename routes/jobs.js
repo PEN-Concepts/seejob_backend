@@ -941,13 +941,16 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
     //    on + any job they have a task on (unchanged behavior).
     const mode = await getAccessMode(userId, connection);
 
-    const addedBySelect = isEmployee
-      ? "NULL AS added_by_user_id, NULL AS added_by_user_name"
-      : "jc.user_id AS added_by_user_id, u3.name AS added_by_user_name";
-    const addedByJoin = isEmployee
-      ? ""
-      : `LEFT JOIN job_contacts jc ON jc.job_id = j.id AND jc.contact_id IN (?, ?)
-         LEFT JOIN user u3 ON u3.id = jc.user_id`;
+    // "Jobs Added By Others" = jobs OWNED BY ANOTHER contractor's account that
+    // were assigned/shared to us. It is based on OWNERSHIP, not on contact rows
+    // (so our own jobs never fall into it), and it names the contractor who
+    // owns/assigned the job. created_by IN (our account) => null (it's ours).
+    const addedBySelect = `
+        CASE WHEN j.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+             THEN NULL ELSE j.created_by END AS added_by_user_id,
+        CASE WHEN j.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+             THEN NULL ELSE creator.name END AS added_by_user_name`;
+    const addedByJoin = `LEFT JOIN \`user\` creator ON creator.id = j.created_by`;
 
     const baseQuery = `
         SELECT
@@ -1006,7 +1009,8 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
       whereParams = [managerId, managerId, userId, managerId, userId, managerId];
     }
 
-    const joinParams = isEmployee ? [] : [userId, managerId];
+    // 4 params for the two CASE "account" subqueries in addedBySelect.
+    const joinParams = [managerId, managerId, managerId, managerId];
     const [rows] = await connection.execute(
       `${baseQuery} ${whereClause} ORDER BY j.id ASC;`,
       [...joinParams, ...whereParams],
