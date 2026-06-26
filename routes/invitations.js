@@ -1870,17 +1870,20 @@ router.get("/get_job_contacts/:job_id", auth.authenticateToken, async (req, res)
 
 // ── Remove an accepted contact connection ──────────────────────────────
 router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async (req, res) => {
-  const userId = req.user.id;
+  // Account-wide: any account member can remove a company contact.
+  const ownerId = res.locals.working_id || req.user.id;
   const contactUserId = Number(req.params.contactUserId);
   if (!contactUserId) return res.status(400).json({ message: 'Invalid contact ID' });
 
   let connection;
   try {
     connection = await pool.getConnection();
+    const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
     const [result] = await connection.query(
       `DELETE FROM contact
-       WHERE (request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)`,
-      [userId, contactUserId, contactUserId, userId]
+       WHERE (request_by IN ${ACCOUNT} AND request_to = ?)
+          OR (request_to IN ${ACCOUNT} AND request_by = ?)`,
+      [ownerId, ownerId, contactUserId, ownerId, ownerId, contactUserId]
     );
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: 'Connection not found' });
@@ -1896,7 +1899,9 @@ router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async
 
 // ── Update a contact's profile info (business_name, license, address) ──
 router.post('/update-contact-info', auth.authenticateToken, async (req, res) => {
-  const userId = req.user.id;
+  // Account-wide: any member of the account (owner or employee) can edit a
+  // company contact, regardless of which teammate originally added it.
+  const ownerId = res.locals.working_id || req.user.id;
   const { contact_user_id, name, mobile, email, business_name, license_number, license_state, manual_status, address, spouse_name, spouse_email, spouse_phone } = req.body;
   if (!contact_user_id) return res.status(400).json({ message: 'contact_user_id required' });
 
@@ -1904,13 +1909,15 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
   try {
     connection = await pool.getConnection();
 
-    // Verify a connection exists (accepted, or one we created/invited)
+    // The contact is editable if it links an account member (owner/employee) to
+    // this person, on either side of the relationship.
+    const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
     const [[conn]] = await connection.query(
       `SELECT id FROM contact
-       WHERE (status = 'Accept' AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)))
-          OR (status IN ('Pending','Saved') AND request_by = ? AND request_to = ?)
+       WHERE (request_by IN ${ACCOUNT} AND request_to = ?)
+          OR (request_to IN ${ACCOUNT} AND request_by = ?)
        LIMIT 1`,
-      [userId, contact_user_id, contact_user_id, userId, userId, contact_user_id]
+      [ownerId, ownerId, contact_user_id, ownerId, ownerId, contact_user_id]
     );
     if (!conn) return res.status(403).json({ message: 'No connection with this user' });
 
@@ -2206,16 +2213,18 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
 
 // ── Resend (or first-send) an invitation for a Pending/Saved contact ───
 router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req, res) => {
-  const userId = req.user.id;
+  // Account-wide: any account member can resend a company contact's invite.
+  const ownerId = res.locals.working_id || req.user.id;
   const contactUserId = Number(req.params.contactUserId);
   let connection;
   try {
     connection = await pool.getConnection();
     const [[link]] = await connection.query(
       `SELECT id, status FROM contact
-       WHERE request_by = ? AND request_to = ? AND status IN ('Pending','Saved')
+       WHERE request_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+         AND request_to = ? AND status IN ('Pending','Saved')
        LIMIT 1`,
-      [userId, contactUserId]
+      [ownerId, ownerId, contactUserId]
     );
     if (!link) return res.status(404).json({ message: 'No pending contact found' });
 
@@ -2255,19 +2264,21 @@ router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req,
 // Only California licenses can be auto-verified; other states are stored
 // without a status until per-state checkers are added.
 router.post('/check-license/:contactUserId', auth.authenticateToken, async (req, res) => {
-  const userId = req.user.id;
+  // Account-wide: any account member can run a CSLB check on a company contact.
+  const ownerId = res.locals.working_id || req.user.id;
   const contactUserId = req.params.contactUserId;
   let connection;
   try {
     connection = await pool.getConnection();
 
-    // Verify a connection exists (accepted, or one we created/invited)
+    // The contact is valid if it links an account member to this person.
+    const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
     const [[conn]] = await connection.query(
       `SELECT id FROM contact
-       WHERE (status = 'Accept' AND ((request_by = ? AND request_to = ?) OR (request_by = ? AND request_to = ?)))
-          OR (status IN ('Pending','Saved') AND request_by = ? AND request_to = ?)
+       WHERE (request_by IN ${ACCOUNT} AND request_to = ?)
+          OR (request_to IN ${ACCOUNT} AND request_by = ?)
        LIMIT 1`,
-      [userId, contactUserId, contactUserId, userId, userId, contactUserId]
+      [ownerId, ownerId, contactUserId, ownerId, ownerId, contactUserId]
     );
     if (!conn) return res.status(403).json({ message: 'No connection with this user' });
 
