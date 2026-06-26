@@ -1732,9 +1732,25 @@ router.post(
     let connection;
     try {
       connection = await pool.getConnection();
+
+      // Ownership: you may only edit a job that belongs to your account.
+      const [ownRows] = await connection.query(
+        "SELECT created_by FROM job WHERE id = ? LIMIT 1",
+        [jobId]
+      );
+      if (!ownRows.length) {
+        return res.status(404).json({ message: "Job not found" });
+      }
+      if (!(await isSameAccount(req.user.id, ownRows[0].created_by, connection))) {
+        return res.status(403).json({
+          code: "OWNERSHIP_DENIED",
+          message: "You can only edit jobs that belong to your account.",
+        });
+      }
+
       const query = `
             UPDATE job
-            SET client_id = ?, 
+            SET client_id = ?,
                 address = ?, city = ?, state = ?, zipcode = ?,
                 job_address = ?, job_city = ?, job_state = ?, job_zipcode = ?,
                 gate_no = ?,lock_box_code =?, contract_status = ?,
