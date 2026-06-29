@@ -63,6 +63,37 @@ async function getChecklistAccess(connection, userId) {
 
  const VALID_CHECKLIST_TYPES = new Set(['task', 'shopping']);
 
+// Notepad "command center" auto-clear columns:
+//   filed_at = when the item got a home elsewhere (delegated / calendar /
+//              appointment / completed). 7 min later it drops off the Notepad.
+//   kept     = user tapped "Keep" to pause the auto-clear.
+let notepadFlowEnsured = false;
+async function ensureNotepadFlowColumns(connection) {
+  if (notepadFlowEnsured) return;
+  const [f] = await connection.query("SHOW COLUMNS FROM check_list LIKE 'filed_at'");
+  if (!f.length) {
+    await connection.query("ALTER TABLE check_list ADD COLUMN filed_at DATETIME NULL DEFAULT NULL");
+  }
+  const [k] = await connection.query("SHOW COLUMNS FROM check_list LIKE 'kept'");
+  if (!k.length) {
+    await connection.query("ALTER TABLE check_list ADD COLUMN kept TINYINT(1) NOT NULL DEFAULT 0");
+  }
+  notepadFlowEnsured = true;
+}
+
+// Minutes an item lingers on the Notepad after it's filed (grace to edit/Keep).
+const NOTEPAD_FILE_GRACE_MIN = 7;
+
+// An item is "filed-eligible" (has a home elsewhere) when it's completed,
+// on the calendar, an appointment, delegated to someone else, or delegated to
+// self WITH a date. Expressed as SQL against check_list columns.
+const FILED_ELIGIBLE_SQL = `(
+  status = 'completed'
+  OR is_calendar = 1
+  OR is_appointment = 1
+  OR (assign_to IS NOT NULL AND (assign_to <> created_by OR due_date IS NOT NULL))
+)`;
+
  function normalizeChecklistType(type) {
    return String(type || '').toLowerCase() === 'shopping' ? 'shopping' : 'task';
  }
@@ -458,6 +489,8 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
           c.is_appointment,
           c.calendar_task_id,
           c.appointment_id,
+          c.filed_at,
+          c.kept,
           c.created_by,
           u.name AS created_by_name,
           c.type,
@@ -481,6 +514,16 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
       if (requestedType && VALID_CHECKLIST_TYPES.has(String(requestedType))) {
         itemsSql += ' AND c.type = ?';
         itemParams.push(String(requestedType));
+      }
+
+      // Auto-clear: hide items filed > grace minutes ago (unless Kept). The
+      // "Recently filed" peek (?filed=1) shows ONLY those cleared items.
+      await ensureNotepadFlowColumns(connection);
+      const filedView = String(req.query.filed || '') === '1';
+      if (filedView) {
+        itemsSql += ` AND c.kept = 0 AND c.filed_at IS NOT NULL AND c.filed_at <= (NOW() - INTERVAL ${NOTEPAD_FILE_GRACE_MIN} MINUTE)`;
+      } else {
+        itemsSql += ` AND (c.kept = 1 OR c.filed_at IS NULL OR c.filed_at > (NOW() - INTERVAL ${NOTEPAD_FILE_GRACE_MIN} MINUTE))`;
       }
 
       itemsSql += ' ORDER BY c.id DESC';
@@ -1003,12 +1046,52 @@ router.put('/update/:id', auth.authenticateToken, async (req, res) => {
         return res.status(404).json({ success: false, message: 'Checklist item not found' });
       }
 
+      // Once the item has a home elsewhere (delegated / calendar / appointment /
+      // completed), stamp filed_at so it auto-clears from the Notepad after the
+      // grace period — unless the user tapped "Keep" (kept = 1).
+      await ensureNotepadFlowColumns(connection);
+      await connection.query(
+        `UPDATE check_list SET filed_at = NOW()
+         WHERE id = ? AND filed_at IS NULL AND kept = 0 AND ${FILED_ELIGIBLE_SQL}`,
+        [id]
+      );
+
       res.status(200).json({ success: true, message: 'Checklist item updated successfully' });
     } finally {
       connection.release();
     }
   } catch (err) {
     logger.error('Error updating checklist item:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// "Keep" pauses the Notepad auto-clear (kept=1, clears filed_at). Sending
+// keep=0 un-keeps and restarts the grace countdown (filed_at=NOW()).
+router.post('/:id/keep', auth.authenticateToken, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).json({ success: false, message: 'Invalid checklist id' });
+  const keep = String((req.body && req.body.keep) ?? '1') !== '0';
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    try {
+      const access = await getChecklistAccess(connection, res.locals.id);
+      if (!access.allowed) return res.status(403).json({ success: false, message: 'Clipboard requires an active plan.' });
+      if (!access.canWrite) return res.status(403).json({ success: false, message: 'Your plan does not allow modifying Clipboard.' });
+      await ensureNotepadFlowColumns(connection);
+      await connection.query(
+        keep
+          ? 'UPDATE check_list SET kept = 1, filed_at = NULL WHERE id = ?'
+          : 'UPDATE check_list SET kept = 0, filed_at = NOW() WHERE id = ?',
+        [id]
+      );
+      res.status(200).json({ success: true });
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    logger.error('Error keep/unkeep checklist item:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
