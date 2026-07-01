@@ -1950,6 +1950,26 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
       }
     }
 
+    // Standalone tasks with no job — surfaced under a "No Job" group so they can
+    // be viewed/edited/deleted in Task Manager (dashboard View Details focuses them).
+    const [noJobTasks] = await connection.query(
+      `SELECT t.*, u.name AS created_by_name FROM tasks t
+       LEFT JOIN user u ON u.id = t.created_by
+       WHERE t.job_id IS NULL
+         AND LOWER(t.task_type) IN ('job', 'task')
+         ${archivedClause}
+         AND (
+           t.user_id = ?
+           OR t.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+           OR (t.team_id IS NOT NULL AND EXISTS (
+                 SELECT 1 FROM team_user tu
+                 WHERE tu.team_id = t.team_id AND tu.user_id = ?
+               ))
+         )
+       ORDER BY t.status ASC, t.created_at DESC`,
+      [loggedInUserId, managerId, managerId, loggedInUserId]
+    );
+
     if (jobIds.length) {
       const [checklistTasks] = await connection.query(
         `SELECT
@@ -2001,6 +2021,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
       jobTasksByJobId,
       leadTasksByLeadId,
       checklistTasksByJobId,
+      noJobTasks,
     });
   } catch (err) {
     logger.error("Error in /jobs/with-tasks:", err);
