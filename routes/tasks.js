@@ -656,6 +656,8 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
         )
         -- Not checked off yet
         AND (t.status IS NULL OR t.status <> 1)
+        -- Not archived (e.g. its parent job was deleted)
+        AND t.archived_at IS NULL
         -- Effective date (due date, or created date if undated) today or earlier;
         -- keep every unchecked task carried forward (no age cap).
         AND COALESCE(t.start_date, t.created_at) < DATE_ADD(COALESCE(?, CURDATE()), INTERVAL 1 DAY)

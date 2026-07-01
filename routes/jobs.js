@@ -2377,7 +2377,25 @@ router.delete("/delete/:id", auth.authenticateToken, denyExpiredFreeWrites, asyn
       });
     }
 
-    await connection.execute("DELETE FROM job WHERE id = ?", [id]);
+    // Atomic: archive the job's tasks (don't orphan them) then delete the job.
+    // Archived tasks drop off the live Task Manager / Daily Tasks / Spartan lists
+    // (all filter archived_at IS NULL) but remain recoverable via "Show Archived".
+    // status_note is only set when empty so we never clobber a user's own note.
+    await connection.beginTransaction();
+    try {
+      await connection.execute(
+        `UPDATE tasks
+           SET archived_at = NOW(),
+               status_note = COALESCE(NULLIF(status_note, ''), 'Archived: parent job deleted')
+         WHERE job_id = ? AND archived_at IS NULL`,
+        [id]
+      );
+      await connection.execute("DELETE FROM job WHERE id = ?", [id]);
+      await connection.commit();
+    } catch (txErr) {
+      await connection.rollback();
+      throw txErr;
+    }
 
     res.status(200).json({ message: "Job deleted successfully" });
   } catch (err) {
