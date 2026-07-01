@@ -1950,13 +1950,17 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
       }
     }
 
-    // Standalone tasks with no job — surfaced under a "No Job" group so they can
-    // be viewed/edited/deleted in Task Manager (dashboard View Details focuses them).
+    // Standalone tasks with NO resolvable job — surfaced under a "No Job" group so
+    // they can be viewed/edited/deleted in Task Manager (dashboard View Details
+    // focuses them). Mirrors the dashboard's "No Job" logic: LEFT JOIN job and
+    // keep rows where no job row matches (job_id NULL *or* orphaned/deleted job).
+    // Excludes lead tasks; task_type NULL is treated as a normal task.
     const [noJobTasks] = await connection.query(
       `SELECT t.*, u.name AS created_by_name FROM tasks t
        LEFT JOIN user u ON u.id = t.created_by
-       WHERE t.job_id IS NULL
-         AND LOWER(t.task_type) IN ('job', 'task')
+       LEFT JOIN job j ON j.id = t.job_id
+       WHERE j.id IS NULL
+         AND COALESCE(LOWER(t.task_type), 'task') <> 'lead'
          ${archivedClause}
          AND (
            t.user_id = ?
