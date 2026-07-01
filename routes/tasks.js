@@ -633,37 +633,38 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
         t.start_date, 
         t.time,
         t.priority,
-        u.name AS createdBy, 
+        u.name AS createdBy,
         t.status,
         t.job_id,
         COALESCE(j.name, 'No Job') AS jobName,
-        t.user_id AS assignedTo
+        t.user_id AS assignedTo,
+        au.name AS assignedToName,
+        tm.team_name AS assignedTeamName
       FROM tasks t
       INNER JOIN user u ON u.id = t.created_by
       LEFT JOIN job j ON j.id = t.job_id
-      WHERE 
+      LEFT JOIN user au ON au.id = t.user_id
+      LEFT JOIN teams tm ON tm.id = t.team_id
+      WHERE
         (
-          (
-            (
-              t.user_id = ?
-              OR t.created_by = ?
-              OR (t.team_id IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM team_user tu
-                    WHERE tu.team_id = t.team_id AND tu.user_id = ?
-                  ))
-            )
-            AND t.start_date >= COALESCE(?, CURDATE())
-            AND t.start_date < DATE_ADD(COALESCE(?, CURDATE()), INTERVAL 1 DAY)
-          )
-          OR (
-            t.created_by = ?
-            AND DATE(t.created_at) = COALESCE(?, CURDATE())
-          )
+          t.user_id = ?
+          OR t.created_by = ?
+          OR (t.team_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM team_user tu
+                WHERE tu.team_id = t.team_id AND tu.user_id = ?
+              ))
         )
-      ORDER BY COALESCE(t.end_date, t.start_date, t.created_at) DESC
+        -- Not checked off yet
+        AND (t.status IS NULL OR t.status <> 1)
+        -- Due today or in the past (carry overdue forward); undated to-dos too
+        AND (
+          t.start_date IS NULL
+          OR t.start_date < DATE_ADD(COALESCE(?, CURDATE()), INTERVAL 1 DAY)
+        )
+      ORDER BY (t.start_date IS NULL), COALESCE(t.start_date, t.created_at) ASC
     `;
 
-    const params = [managerId, managerId, managerId, targetDate, targetDate, managerId, targetDate];
+    const params = [managerId, managerId, managerId, targetDate];
     const [rows] = await connection.query(sql, params);
     await attachTaskImages(connection, rows);
 
