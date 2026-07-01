@@ -656,15 +656,15 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
         )
         -- Not checked off yet
         AND (t.status IS NULL OR t.status <> 1)
-        -- Due today or in the past (carry overdue forward); undated to-dos too
-        AND (
-          t.start_date IS NULL
-          OR t.start_date < DATE_ADD(COALESCE(?, CURDATE()), INTERVAL 1 DAY)
-        )
+        -- Effective date (due date, or created date if undated) today or earlier,
+        -- carried forward — but only within the last 35 days so stale/test tasks
+        -- drop off the dashboard on their own.
+        AND COALESCE(t.start_date, t.created_at) < DATE_ADD(COALESCE(?, CURDATE()), INTERVAL 1 DAY)
+        AND COALESCE(t.start_date, t.created_at) >= DATE_SUB(COALESCE(?, CURDATE()), INTERVAL 35 DAY)
       ORDER BY (t.start_date IS NULL), COALESCE(t.start_date, t.created_at) ASC
     `;
 
-    const params = [managerId, managerId, managerId, targetDate];
+    const params = [managerId, managerId, managerId, targetDate, targetDate];
     const [rows] = await connection.query(sql, params);
     await attachTaskImages(connection, rows);
 
