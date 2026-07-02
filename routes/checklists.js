@@ -238,6 +238,9 @@ const updateChecklistSchema = Joi.object({
   appointment_id: Joi.number().integer().positive().allow(null).optional(),
   section_id: Joi.number().integer().positive().allow(null).optional(),
   type: Joi.string().valid('task', 'shopping').optional(),
+  // Reference an existing photo (e.g. a linked See Job Run job photo) without
+  // a file upload. Stored as a single reference string; handled at PUT /update/:id.
+  photo: Joi.string().allow('', null).max(255).optional(),
 });
 
 const createChecklistSectionSchema = Joi.object({
