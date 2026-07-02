@@ -191,6 +191,11 @@ const transporter = nodemailer.createTransport({
   tls: {
     rejectUnauthorized: false, // allow self-signed certs if needed
   },
+  // Fail fast instead of hanging forever when the SMTP server is unreachable
+  // (protects awaited sendOTPEmail callers from blocking their request).
+  connectionTimeout: 10000, // ms to establish the TCP connection
+  greetingTimeout: 10000,   // ms to wait for the SMTP greeting
+  socketTimeout: 15000,     // ms of socket inactivity before aborting
 });
 
 // Optional: verify transporter
