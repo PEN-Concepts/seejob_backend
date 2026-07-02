@@ -1014,6 +1014,12 @@ router.put('/update/:id', auth.authenticateToken, async (req, res) => {
         fields.push('appointment_id = ?');
         values.push(payload.appointment_id);
       }
+      // Allow setting the photo reference here (e.g. linking an existing See Job
+      // Run job photo) without a file upload. Stored as a single reference string.
+      if (payload.photo !== undefined) {
+        fields.push('photo = ?');
+        values.push(payload.photo);
+      }
       if (payload.section_id !== undefined) {
         if (payload.section_id === null) {
           return res.status(400).json({ success: false, message: 'section_id cannot be null' });
