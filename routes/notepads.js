@@ -405,18 +405,21 @@ router.post(
     if (updateFields.length > 0) {
       const query = `UPDATE notepad SET ${updateFields.join(', ')} WHERE id = ?`;
       values.push(notepad_id);
+      let connection;
       try {
-        const connection = await pool.getConnection();
+        connection = await pool.getConnection();
         await connection.execute(query, values);
-        connection.release();
       } catch (error) {
         return res.status(500).json({ message: 'Database error', error: error.message });
+      } finally {
+        if (connection) connection.release();
       }
     }
 
     if (imageFiles.length > 0) {
+      let connection;
       try {
-        const connection = await pool.getConnection();
+        connection = await pool.getConnection();
         const insertGalleryQuery = `
           INSERT INTO notepad_gallery (notepad_id, image, created_at)
           VALUES (?, ?, NOW())
@@ -424,9 +427,10 @@ router.post(
         for (const file of imageFiles) {
           await connection.execute(insertGalleryQuery, [notepad_id, file.filename]);
         }
-        connection.release();
       } catch (error) {
         return res.status(500).json({ message: 'Gallery insert error', error: error.message });
+      } finally {
+        if (connection) connection.release();
       }
     }
 
@@ -676,22 +680,23 @@ router.post('/notepad/mark-removed', auth.authenticateToken, async (req, res) =>
   const placeholders = ids.map(() => '?').join(',');
   const values = [...ids, user_id];
 
+  let connection;
   try {
-    const connection = await pool.getConnection();
+    connection = await pool.getConnection();
 
     const query = `
-      UPDATE notepad 
+      UPDATE notepad
       SET remove_by = ?
       WHERE id IN (${placeholders})
     `;
 
     await connection.execute(query, [user_id, ...ids]);
     res.json({ message: 'Records marked as removed' });
-
-    connection.release();
   } catch (err) {
     console.error('Error updating notepad:', err);
     res.status(500).json({ message: 'Database error', error: err.message });
+  } finally {
+    if (connection) connection.release();
   }
 });
 

@@ -44,6 +44,8 @@ let connection;
   } catch (err) {
     logger.error("Error fetching jobs:", err);
     res.status(500).json({ message: "Server error" });
+  } finally {
+    if (connection) connection.release();
   }
 });
 

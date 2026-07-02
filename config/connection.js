@@ -12,8 +12,10 @@ if (process.env.NODE_ENV === 'production') {
         port: process.env.DB_PORT_PROD,
         waitForConnections: true,
         connectionLimit: 100,
-        queueLimit: 0,
-        connectTimeout: 300000,// 5 minutes
+        // Bound the wait queue so a future pool exhaustion FAILS FAST with a
+        // clear "Queue limit reached" error instead of hanging requests forever.
+        queueLimit: 50,
+        connectTimeout: 10000, // 10s to establish a connection (was 5 min)
         enableKeepAlive: true,
         keepAliveInitialDelay: 0,
         timezone: 'local',
@@ -28,8 +30,10 @@ if (process.env.NODE_ENV === 'production') {
         port: process.env.DB_PORT_DEV,
         waitForConnections: true,
         connectionLimit: 100,
-        queueLimit: 0,
-        connectTimeout: 300000,// 5 minutes
+        // Bound the wait queue so a future pool exhaustion FAILS FAST with a
+        // clear "Queue limit reached" error instead of hanging requests forever.
+        queueLimit: 50,
+        connectTimeout: 10000, // 10s to establish a connection (was 5 min)
         enableKeepAlive: true,
         keepAliveInitialDelay: 0,
          timezone: 'local',

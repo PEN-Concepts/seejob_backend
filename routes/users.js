@@ -540,57 +540,65 @@ router.post("/login-pin", async (req, res) => {
     });
   }
 
-  const connection = await pool.getConnection();
+  let connection;
+  try {
+    connection = await pool.getConnection();
 
-  const [rows] = await connection.query(
-    `SELECT u.*
-     FROM user_devices ud
-     JOIN user u ON u.id = ud.user_id
-     WHERE ud.device_token = ? AND u.pin_enabled = 1`,
-    [deviceToken]
-  );
+    const [rows] = await connection.query(
+      `SELECT u.*
+       FROM user_devices ud
+       JOIN user u ON u.id = ud.user_id
+       WHERE ud.device_token = ? AND u.pin_enabled = 1`,
+      [deviceToken]
+    );
 
-  if (!rows.length) {
-    return res.status(200).json({
-      code: "401",
-      message: "Invalid device or PIN",
+    if (!rows.length) {
+      return res.status(200).json({
+        code: "401",
+        message: "Invalid device or PIN",
+      });
+    }
+
+    const user = rows[0];
+    const isValidPin = await bcrypt.compare(pin, user.pin_hash);
+
+    if (!isValidPin) {
+      return res.status(200).json({
+        code: "401",
+        message: "Invalid PIN",
+      });
+    }
+
+    const payload = {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      working_id:
+        [2,3,4,5].includes(user.role) ? user.created_by : user.id,
+      otp_status: user.otp_status,
+      must_change_password: user.must_change_password,
+    };
+
+    const token = jwt.sign(payload, process.env.ACCESS_TOKEN, {
+      expiresIn: "7d",
     });
-  }
 
-  const user = rows[0];
-  const isValidPin = await bcrypt.compare(pin, user.pin_hash);
-
-  if (!isValidPin) {
-    return res.status(200).json({
-      code: "401",
-      message: "Invalid PIN",
+    res.status(200).json({
+      code: "200",
+      message: "Login successful",
+      data: {
+        token,
+        basicData: payload,
+        photoName: user.image || "user.png",
+      },
     });
+  } catch (err) {
+    logger.error("PIN login error:", err);
+    res.status(500).json({ code: "500", message: "Server error", data: {} });
+  } finally {
+    if (connection) connection.release();
   }
-
-  const payload = {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    role: user.role,
-    working_id:
-      [2,3,4,5].includes(user.role) ? user.created_by : user.id,
-    otp_status: user.otp_status,
-    must_change_password: user.must_change_password,
-  };
-
-  const token = jwt.sign(payload, process.env.ACCESS_TOKEN, {
-    expiresIn: "7d",
-  });
-
-  res.status(200).json({
-    code: "200",
-    message: "Login successful",
-    data: {
-      token,
-      basicData: payload,
-      photoName: user.image || "user.png",
-    },
-  });
 });
 
 
