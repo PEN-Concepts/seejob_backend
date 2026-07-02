@@ -26,6 +26,14 @@ const transporter = nodemailer.createTransport({
   tls: {
     rejectUnauthorized: false, // allow self-signed certs if needed
   },
+  // Fail fast instead of hanging forever when the SMTP server is unreachable.
+  // Without these, an unreachable/dead SMTP host blocks routes that await
+  // sendMail (e.g. login-otp-request) indefinitely, leaving the login screen
+  // stuck on "Sending...". These bound the connect/greeting/idle waits so the
+  // request rejects (and the UI shows an error) within ~10-15s.
+  connectionTimeout: 10000, // ms to establish the TCP connection
+  greetingTimeout: 10000,   // ms to wait for the SMTP greeting
+  socketTimeout: 15000,     // ms of socket inactivity before aborting
 });
 
 // Optional: verify transporter
