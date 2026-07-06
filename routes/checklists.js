@@ -78,6 +78,12 @@ async function ensureNotepadFlowColumns(connection) {
   if (!k.length) {
     await connection.query("ALTER TABLE check_list ADD COLUMN kept TINYINT(1) NOT NULL DEFAULT 0");
   }
+  // Distinct lead association (mutually exclusive with job_id — a lead id must
+  // NEVER be stored in job_id, which the rest of the system treats as a job).
+  const [ld] = await connection.query("SHOW COLUMNS FROM check_list LIKE 'lead_id'");
+  if (!ld.length) {
+    await connection.query("ALTER TABLE check_list ADD COLUMN lead_id INT NULL DEFAULT NULL");
+  }
   notepadFlowEnsured = true;
 }
 
@@ -227,6 +233,7 @@ const updateChecklistSchema = Joi.object({
   name: Joi.string().allow('', null).max(255).optional(),
   assign_to: Joi.number().allow(null).optional(),
   job_id: Joi.number().allow(null).optional(),
+  lead_id: Joi.number().allow(null).optional(),
   complete_percentage: Joi.number().min(0).max(100).allow(null).optional(),
   priority: Joi.string().valid('low', 'medium', 'high').optional(),
   due_date: Joi.date().allow(null).optional(),
@@ -483,6 +490,7 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
           tm.team_name,
           tm.team_color,
           c.job_id,
+          c.lead_id,
           c.complete_percentage,
           c.priority,
           c.due_date,
@@ -884,6 +892,7 @@ router.get('/list', auth.authenticateToken, async (req, res) => {
         tm.team_name,
         tm.team_color,
         c.job_id,
+        c.lead_id,
         c.complete_percentage,
         c.priority,
         c.due_date,
@@ -981,9 +990,24 @@ router.put('/update/:id', auth.authenticateToken, async (req, res) => {
         fields.push('priority = ?');
         values.push(payload.priority);
       }
+      // job_id and lead_id are mutually exclusive. Enforce it server-side too:
+      // setting one to a real value clears the other, so a lead id can never
+      // coexist with (or leak into) job_id.
       if (payload.job_id !== undefined) {
         fields.push('job_id = ?');
         values.push(payload.job_id);
+        if (payload.job_id != null && payload.lead_id === undefined) {
+          fields.push('lead_id = ?');
+          values.push(null);
+        }
+      }
+      if (payload.lead_id !== undefined) {
+        fields.push('lead_id = ?');
+        values.push(payload.lead_id);
+        if (payload.lead_id != null && payload.job_id === undefined) {
+          fields.push('job_id = ?');
+          values.push(null);
+        }
       }
       if (payload.complete_percentage !== undefined) {
         fields.push('complete_percentage = ?');
