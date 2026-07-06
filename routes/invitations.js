@@ -617,7 +617,24 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
       ownerId, ownerId,  // Pending/Saved request_by
     ]);
 
-    res.json(rows);
+    // A single person can have more than one `contact` row linking them to the
+    // account — e.g. a mutual/bidirectional connection (one row each direction)
+    // or an old Saved/Pending row alongside the Accept row. This JOIN emits one
+    // output row per contact row, which surfaced as DUPLICATE contact cards.
+    // (Deleting one then removed both, because the DELETE clears every contact
+    // row for that user id.) Collapse to one row per person here, preferring an
+    // accepted connection and otherwise the most recently updated link.
+    const statusRank = (s) => (s === 'Accept' ? 2 : 1);
+    const byId = new Map();
+    for (const row of rows) {
+      const prev = byId.get(row.id);
+      if (!prev) { byId.set(row.id, row); continue; }
+      const betterStatus = statusRank(row.connection_status) - statusRank(prev.connection_status);
+      const newer = new Date(row.connected_at || 0) > new Date(prev.connected_at || 0);
+      if (betterStatus > 0 || (betterStatus === 0 && newer)) byId.set(row.id, row);
+    }
+
+    res.json([...byId.values()]);
   } catch (err) {
     console.error('Error fetching accepted contacts:', err);
     res.status(500).json({ message: 'Failed to fetch accepted contacts' });
@@ -1892,6 +1909,93 @@ router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async
   } catch (err) {
     logger.error('Remove contact error:', err);
     res.status(500).json({ message: 'Failed to remove contact', error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ── One-time maintenance: purge duplicate contact rows for this account ──
+// A person can end up with several `contact` rows linking them to the account
+// (a mutual/bidirectional connection, or an old Saved/Pending row plus the
+// Accept row). The contact list JOIN then draws one card per row → duplicates.
+// This collapses each person to a single link, keeping an accepted connection
+// (else the most recently updated one) and deleting only the redundant rows —
+// never the last link to anyone. Account-scoped; safe to run more than once
+// (a second run finds nothing). Pass ?dryRun=1 to preview without deleting.
+router.post('/purge-duplicate-contacts', auth.authenticateToken, async (req, res) => {
+  const ownerId = res.locals.working_id || req.user.id;
+  const dryRun = req.query.dryRun === '1' || req.query.dryRun === 'true';
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    // Account = owner + everyone the owner created (employees).
+    const [accountRows] = await connection.query(
+      'SELECT id FROM `user` WHERE id = ? OR created_by = ?',
+      [ownerId, ownerId]
+    );
+    const accountIds = new Set(accountRows.map((r) => Number(r.id)));
+
+    // Every contact row that this account's contact list can surface — mirrors
+    // the WHERE in GET /accepted-contacts so we only touch displayed rows.
+    const [rows] = await connection.query(
+      `SELECT id, request_by, request_to, status, updated_at
+         FROM contact
+        WHERE (status = 'Accept'
+               AND (request_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+                 OR request_to IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)))
+           OR (status IN ('Pending','Saved')
+               AND request_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?))`,
+      [ownerId, ownerId, ownerId, ownerId, ownerId, ownerId]
+    );
+
+    // Group by the "other" party (the non-account side = the displayed person).
+    const statusRank = (s) => (s === 'Accept' ? 2 : 1);
+    const groups = new Map(); // otherPartyId -> rows[]
+    for (const r of rows) {
+      const by = Number(r.request_by);
+      const to = Number(r.request_to);
+      // The displayed person is whichever side is NOT an account member.
+      const other = accountIds.has(by) ? to : by;
+      // Skip intra-account rows (owner↔employee) — those aren't contact cards.
+      if (accountIds.has(other)) continue;
+      if (!groups.has(other)) groups.set(other, []);
+      groups.get(other).push(r);
+    }
+
+    const toDelete = [];
+    const summary = [];
+    for (const [other, grp] of groups) {
+      if (grp.length <= 1) continue;
+      // Keep the best row: Accept beats Pending/Saved, then most recently updated.
+      grp.sort((a, b) => {
+        const s = statusRank(b.status) - statusRank(a.status);
+        if (s !== 0) return s;
+        return new Date(b.updated_at || 0) - new Date(a.updated_at || 0);
+      });
+      const keep = grp[0];
+      const drop = grp.slice(1);
+      drop.forEach((d) => toDelete.push(d.id));
+      summary.push({ contactUserId: other, kept: keep.id, deleted: drop.map((d) => d.id) });
+    }
+
+    if (!dryRun && toDelete.length) {
+      await connection.query(
+        `DELETE FROM contact WHERE id IN (${toDelete.map(() => '?').join(',')})`,
+        toDelete
+      );
+    }
+
+    res.json({
+      dryRun,
+      duplicatePeople: summary.length,
+      rowsDeleted: dryRun ? 0 : toDelete.length,
+      rowsWouldDelete: toDelete.length,
+      details: summary,
+    });
+  } catch (err) {
+    logger.error('Purge duplicate contacts error:', err);
+    res.status(500).json({ message: 'Failed to purge duplicate contacts', error: err.message });
   } finally {
     if (connection) connection.release();
   }
