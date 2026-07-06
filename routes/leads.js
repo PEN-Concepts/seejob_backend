@@ -545,6 +545,15 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) 
   try {
     connection = await pool.getConnection();
 
+    // Ensure the is_shared column on BOTH tables BEFORE the transaction — ALTER
+    // is DDL and auto-commits in MySQL, so it must not run inside a transaction.
+    await ensureLeadDocShareColumn(connection);
+    try {
+      await connection.query(
+        "ALTER TABLE job_documents ADD COLUMN is_shared TINYINT(1) NOT NULL DEFAULT 0"
+      );
+    } catch (e) { /* already exists */ }
+
     // Fetch lead info
     const [leadRows] = await connection.query(
       `SELECT * FROM leads WHERE id = ?`,
@@ -554,6 +563,10 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) 
       return res.status(404).json({ message: "Lead not found" });
     }
     const lead = leadRows[0];
+
+    // Atomic: create the job, carry the lead's documents/photos over, and close
+    // the lead — so a converted lead KEEPS ALL ITS DATA (or nothing changes).
+    await connection.beginTransaction();
 
     // Insert into Job table (mapping fields + from_leads = 1)
     const [result] = await connection.query(
@@ -581,14 +594,26 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) 
 
     const newJobId = result.insertId;
 
-    // Update lead status = 3
+    // Carry the lead's documents/photos over to the new job (same file paths,
+    // preserving type + the shared-with-subs flag) so plans/photos aren't
+    // stranded on the closed lead.
+    await connection.query(
+      `INSERT INTO job_documents (path, name, job_id, mime_type, created_by, created_at, type, is_shared)
+       SELECT path, name, ?, mime_type, created_by, NOW(), type, is_shared
+       FROM lead_documents WHERE lead_id = ?`,
+      [newJobId, leadId]
+    );
+
+    // Update lead status = 3 (closed/converted)
     await connection.query(
       `UPDATE leads SET status = '3', user_id = ? WHERE id = ?`,
       [userId, leadId]
     );
 
+    await connection.commit();
     res.json({ message: "Lead converted to Job successfully", jobId: newJobId });
   } catch (error) {
+    if (connection) { try { await connection.rollback(); } catch (e) {} }
     logger.error("Error converting lead to job:", error);
     res.status(500).json({ message: "Error converting lead to job", error });
   } finally {
@@ -768,17 +793,28 @@ router.post(
   }
 );
 
+// Idempotent: add the "shared with subs" flag to lead_documents if missing
+// (mirrors ensureDocShareColumn on job_documents). Safe to call per request.
+async function ensureLeadDocShareColumn(connection) {
+  try {
+    await connection.query(
+      "ALTER TABLE lead_documents ADD COLUMN is_shared TINYINT(1) NOT NULL DEFAULT 0"
+    );
+  } catch (e) {
+    // Already exists — ignore.
+  }
+}
+
 router.get("/get-files", auth.authenticateToken, async (req, res) => {
   const { job_id } = req.query;
   let connection;
 
   try {
     connection = await pool.getConnection();
-
-    // ðŸ”´ Feature checks TEMPORARILY REMOVED
+    await ensureLeadDocShareColumn(connection);
 
     const [rows] = await connection.execute(
-      "SELECT id, path, name, lead_id, type FROM lead_documents WHERE lead_id = ?",
+      "SELECT id, path, name, lead_id, type, is_shared FROM lead_documents WHERE lead_id = ?",
       [job_id]
     );
 
@@ -792,6 +828,32 @@ router.get("/get-files", auth.authenticateToken, async (req, res) => {
       message: "Server error",
       error: err.message,
     });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Toggle a lead document's "shared with subs" flag (mirrors the job-file share
+// endpoint). Gated by id only, matching the existing lead file endpoints.
+router.patch("/lead-file/:id/share", auth.authenticateToken, async (req, res) => {
+  const fileId = req.params.id;
+  const shared = req.body?.shared ? 1 : 0;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureLeadDocShareColumn(connection);
+
+    const [rows] = await connection.query(
+      "SELECT id FROM lead_documents WHERE id = ? LIMIT 1",
+      [fileId]
+    );
+    if (!rows.length) return res.status(404).json({ message: "File not found" });
+
+    await connection.execute("UPDATE lead_documents SET is_shared = ? WHERE id = ?", [shared, fileId]);
+    res.json({ success: true, is_shared: shared });
+  } catch (err) {
+    logger.error("Share lead file error:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
   } finally {
     if (connection) connection.release();
   }
