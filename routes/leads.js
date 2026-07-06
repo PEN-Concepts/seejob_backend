@@ -316,8 +316,18 @@ router.post('/leads/:id/comments', auth.authenticateToken, async (req, res) => {
 });
 
 // leads_notes create
+// Idempotent: add a meeting_date column to lead_notes if missing.
+let leadNoteDateEnsured = false;
+async function ensureLeadNoteDateColumn() {
+  if (leadNoteDateEnsured) return;
+  try {
+    await pool.query('ALTER TABLE lead_notes ADD COLUMN meeting_date DATE NULL DEFAULT NULL');
+  } catch (e) { /* already exists */ }
+  leadNoteDateEnsured = true;
+}
+
 router.post('/leads/:id/notes/create', async (req, res) => {
-  const { title, description } = req.body;
+  const { title, description, meeting_date } = req.body;
   const lead_id = req.params.id;
 
   if (!title) {
@@ -325,11 +335,12 @@ router.post('/leads/:id/notes/create', async (req, res) => {
   }
 
   try {
+    await ensureLeadNoteDateColumn();
     const sql = `
-      INSERT INTO lead_notes (lead_id, title, description)
-      VALUES (?, ?, ?)
+      INSERT INTO lead_notes (lead_id, title, description, meeting_date)
+      VALUES (?, ?, ?, ?)
     `;
-    await pool.query(sql, [lead_id, title, description]);
+    await pool.query(sql, [lead_id, title, description, meeting_date || null]);
     res.status(201).json({ message: 'Note added successfully' });
   } catch (err) {
     logger.error('Error adding note:', err);
@@ -342,11 +353,12 @@ router.get('/leads/:id/notes',  async (req, res) => {
   const lead_id = req.params.id;
 
   try {
+    await ensureLeadNoteDateColumn();
     const sql = `
-      SELECT id, lead_id, title, description, created_at
+      SELECT id, lead_id, title, description, meeting_date, created_at
       FROM lead_notes
       WHERE lead_id = ?
-      ORDER BY created_at DESC
+      ORDER BY COALESCE(meeting_date, created_at) DESC
     `;
     const [rows] = await pool.query(sql, [lead_id]);
     res.status(200).json(rows);
