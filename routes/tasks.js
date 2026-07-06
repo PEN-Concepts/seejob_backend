@@ -658,6 +658,19 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
         AND (t.status IS NULL OR t.status <> 1)
         -- Not archived (e.g. its parent job was deleted)
         AND t.archived_at IS NULL
+        -- Don't surface ORPHANED LEAD TASKS: a task_type='lead' row whose parent
+        -- lead was deleted or closed (status=3). Task Manager/Spartan only list
+        -- ACTIVE leads (status<>3), so such a task can't be opened there and
+        -- clicking "View Details" dead-ends on the "not in Task Manager" toast.
+        -- (Its job_id points at a LEAD id, so the job LEFT JOIN misses and it
+        -- also gets mislabeled "No Job".) Keep it consistent with those views.
+        AND NOT (
+          LOWER(t.task_type) = 'lead'
+          AND NOT EXISTS (
+            SELECT 1 FROM leads l2
+            WHERE l2.id = t.job_id AND (l2.status IS NULL OR l2.status <> 3)
+          )
+        )
         -- Effective date (due date, or created date if undated) today or earlier;
         -- keep every unchecked task carried forward (no age cap).
         AND COALESCE(t.start_date, t.created_at) < DATE_ADD(COALESCE(?, CURDATE()), INTERVAL 1 DAY)
