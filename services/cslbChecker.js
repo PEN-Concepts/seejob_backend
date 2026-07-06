@@ -71,11 +71,25 @@ function parseDetailPage(html) {
     return result;
   }
 
-  // The status cell, e.g. "This license is current and active."
-  const statusMatch = html.match(/id="MainContent_Status"[^>]*>([\s\S]*?)<\/td>/i);
+  // The status cell, e.g. "This license is current and active." The element is
+  // usually a <td>, but CSLB has shipped <span>/<div> variants — accept any
+  // close tag so a markup tweak doesn't silently drop us to Unknown.
+  const statusMatch = html.match(/id="MainContent_Status"[^>]*>([\s\S]*?)<\/(?:td|span|div)>/i);
   if (statusMatch) {
     const norm = normalizeStatus(stripTags(statusMatch[1]));
     if (norm !== 'Unknown') result.status = norm;
+  }
+  // Fallback: if the status cell couldn't be read, scan the page body for the
+  // standard CSLB status sentence ("This license is current and active.") so a
+  // valid license isn't left as Unknown (which the UI would show as unverified).
+  if (result.status === 'Unknown') {
+    const sentence = stripTags(html).match(
+      /this license[^.]*?(inactive|active|expir|suspend|revok|cancel|delinqu|probat|pending)[^.]*\./i,
+    );
+    if (sentence) {
+      const norm = normalizeStatus(sentence[0]);
+      if (norm !== 'Unknown') result.status = norm;
+    }
   }
 
   // Business info cell: name<br>address line(s)<br>City, ST ZIP<br>Business Phone Number:(xxx) xxx-xxxx
