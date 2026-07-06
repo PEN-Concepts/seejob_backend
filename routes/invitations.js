@@ -576,6 +576,9 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
       SELECT
         u.id,
         u.name,
+        u.first_name,
+        u.last_name,
+        u.spouse_last_name,
         u.email,
         u.image,
         u.mobile,
@@ -2006,8 +2009,17 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
   // Account-wide: any member of the account (owner or employee) can edit a
   // company contact, regardless of which teammate originally added it.
   const ownerId = res.locals.working_id || req.user.id;
-  const { contact_user_id, name, mobile, email, business_name, license_number, license_state, manual_status, address, spouse_name, spouse_email, spouse_phone } = req.body;
+  const { contact_user_id, mobile, email, business_name, license_number, license_state, manual_status, address, spouse_name, spouse_email, spouse_phone, first_name, last_name, spouse_last_name } = req.body;
   if (!contact_user_id) return res.status(400).json({ message: 'contact_user_id required' });
+
+  // `name` is the canonical full display name used across the app. When the
+  // Contacts form sends split first/last parts, rebuild it from them so the two
+  // never drift; otherwise fall back to any `name` the caller supplied.
+  const combinedName =
+    (first_name != null || last_name != null)
+      ? [first_name, last_name].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      : null;
+  const name = combinedName || req.body.name || null;
 
   let connection;
   try {
@@ -2031,6 +2043,8 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
     const stateUpper = (license_state || 'CA').toUpperCase();
     let sql = `UPDATE \`user\`
        SET name = COALESCE(?, name),
+           first_name = COALESCE(?, first_name),
+           last_name = COALESCE(?, last_name),
            mobile = COALESCE(?, mobile),
            email = COALESCE(?, email),
            business = COALESCE(?, business),
@@ -2039,10 +2053,13 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
            license_state = ?,
            address = ?,
            spouse_name = ?,
+           spouse_last_name = ?,
            spouse_email = ?,
            spouse_phone = ?`;
     const params = [
       name || null,
+      first_name != null ? (first_name || '') : null,
+      last_name != null ? (last_name || '') : null,
       mobile || null,
       email || null,
       business_name || null,
@@ -2051,6 +2068,7 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
       license_state || null,
       address || null,
       spouse_name || null,
+      spouse_last_name || null,
       spouse_email || null,
       spouse_phone || null,
     ];
@@ -2103,9 +2121,17 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
     return res.status(403).json({ message: 'You are not allowed to create contacts.' });
   }
   const {
-    name, email, mobile, business_name, user_type, subcategory,
+    email, mobile, business_name, user_type, subcategory,
     license_number, license_state, address, send_invite,
+    first_name, last_name,
   } = req.body;
+  // `name` is the canonical full display name; build it from the split parts
+  // when provided (the Contacts form now sends first/last), else accept a plain
+  // `name` for backward compatibility.
+  const name =
+    (first_name != null || last_name != null)
+      ? [first_name, last_name].map((s) => (s || '').trim()).filter(Boolean).join(' ')
+      : (req.body.name || '');
   if (!name || !email) return res.status(400).json({ message: 'Name and email are required' });
 
   let connection;
@@ -2127,9 +2153,10 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       const newUserSubcategory = user_type === 'client' ? 11 : 12;
       const [insertResult] = await connection.query(
         `INSERT INTO user
-         (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
-         VALUES (?, ?, '', ?, ?, ?, ?, ?, '', '', 1, ?, '', 0, '', ?, 0)`,
-        [name, email, newUserRole, mobile || null, newUserCategory, newUserSubcategory,
+         (name, first_name, last_name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
+         VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, '', '', 1, ?, '', 0, '', ?, 0)`,
+        [name, (first_name || '').trim() || null, (last_name || '').trim() || null,
+         email, newUserRole, mobile || null, newUserCategory, newUserSubcategory,
          business_name || '', now, userId]
       );
       contactUserId = insertResult.insertId;
@@ -2141,12 +2168,15 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       `UPDATE \`user\`
        SET mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
            business = IF(business IS NULL OR business = '', COALESCE(?, business), business),
+           first_name = IF(first_name IS NULL OR first_name = '', COALESCE(?, first_name), first_name),
+           last_name = IF(last_name IS NULL OR last_name = '', COALESCE(?, last_name), last_name),
            license_number = COALESCE(license_number, ?),
            license_state = COALESCE(license_state, ?),
            address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
        WHERE id = ?`,
-      [mobile || null, business_name || null, license_number || null,
-       license_state || null, address || null, contactUserId]
+      [mobile || null, business_name || null,
+       (first_name || '').trim() || null, (last_name || '').trim() || null,
+       license_number || null, license_state || null, address || null, contactUserId]
     );
 
     // Link the contact (unless one already exists)

@@ -188,6 +188,11 @@ async function ensureCslbColumns(connection) {
     ['spouse_name', 'VARCHAR(150) DEFAULT NULL'],
     ['spouse_email', 'VARCHAR(150) DEFAULT NULL'],
     ['spouse_phone', 'VARCHAR(50) DEFAULT NULL'],
+    // Structured name parts. `name` remains the canonical full display name used
+    // everywhere else in the app; these let the Contacts page sort by surname.
+    ['first_name', 'VARCHAR(150) DEFAULT NULL'],
+    ['last_name', 'VARCHAR(150) DEFAULT NULL'],
+    ['spouse_last_name', 'VARCHAR(150) DEFAULT NULL'],
   ]) {
     const [[row]] = await connection.query(
       `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
