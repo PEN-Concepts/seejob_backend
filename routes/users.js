@@ -1586,6 +1586,30 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
         LEFT JOIN subcategory sc ON sc.id = u.subcategory
         LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
         WHERE u.id = ?
+
+        UNION
+
+        -- The account owner (working_id): included so non-owner members
+        -- (employees/PAs) can assign appointments/tasks to the GC. When the
+        -- caller IS the owner this dedupes with the "self" branch via GROUP BY.
+        SELECT
+            u.id,
+            u.name,
+            u.category,
+            u.subcategory,
+            sc.name AS subcategory_name,
+            cat.id AS effective_category_id,
+            cat.name AS effective_category_name,
+            u.email,
+            r.name AS role_name,
+            u.image,
+            u.mobile,
+            u.business AS business_name
+        FROM user u
+        LEFT JOIN role r ON r.id = u.role
+        LEFT JOIN subcategory sc ON sc.id = u.subcategory
+        LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
+        WHERE u.id = ?
       ) p
       GROUP BY p.id
     )
@@ -1626,7 +1650,8 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
       user_id,
       working_user_id,
       user_id,
-      user_id,
+      user_id,          // "self" branch
+      working_user_id,  // "account owner" branch
       working_user_id,
       user_id,
     ]);
