@@ -1349,7 +1349,19 @@ router.patch("/:id/complete", auth.authenticateToken, async (req, res) => {
       });
     }
 
-    if (canActAsGC && !isAssignee && !isTeamLeader) {
+    // A user completing their OWN task (assignee == creator, i.e. self-assigned)
+    // has no separate assigner to report up to, so their check-off finalizes the
+    // whole task (status) — otherwise it only sets assignee_completed and, since
+    // Daily Tasks / Task Manager / Job views filter on status, the task reappears
+    // on the next refresh. Genuinely DELEGATED tasks (assignee != creator) and
+    // TEAM tasks still set only assignee_completed here, preserving the boss/team
+    // review step: the assigner/GC finalizes status via PUT /update (or via the
+    // GC branch below when they check off someone else's task).
+    const isSelfAssigned = isAssignee && Number(task.created_by || 0) === actorId;
+    const finalizesStatus =
+      (canActAsGC && !isAssignee && !isTeamLeader) || isSelfAssigned;
+
+    if (finalizesStatus) {
       await connection.query(
         "UPDATE tasks SET status = ?, assignee_completed = ? WHERE id = ?",
         [completed, completed, taskId]
@@ -1360,7 +1372,11 @@ router.patch("/:id/complete", auth.authenticateToken, async (req, res) => {
         [completed, taskId]
       );
     }
-    return res.json({ success: true, assignee_completed: completed });
+    return res.json({
+      success: true,
+      assignee_completed: completed,
+      ...(finalizesStatus ? { status: completed } : {}),
+    });
   } catch (err) {
     logger.error("task check-off error: " + err.message);
     return res
