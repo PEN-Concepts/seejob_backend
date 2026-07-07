@@ -8,7 +8,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { getAccessInfo } = require("../utils/access");
+const { getAccessInfo, isSameAccount } = require("../utils/access");
 const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
 const path = require("path");
 const multer = require("multer");
@@ -1084,6 +1084,35 @@ router.post("/saveDeviceToken", auth.authenticateToken, async (req, res) => {
   } catch (error) {
     logger.error("Error saving FCM token:", error);
     res.status(500).json({ code: "500", message: "Internal Server Error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Read-only diagnostic: does a user in the caller's account have an FCM device
+// token, and when was it last saved? Never returns the full token (tail + length
+// only). Account-scoped. Used to diagnose closed-app push (token registration).
+router.get("/device-token-status", auth.authenticateToken, async (req, res) => {
+  const targetId = Number(req.query.user_id || req.user.id) || Number(req.user.id);
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    if (Number(targetId) !== Number(req.user.id)) {
+      const ok = await isSameAccount(req.user.id, targetId, connection);
+      if (!ok) return res.status(403).json({ message: "Not in your account" });
+    }
+    const [rows] = await connection.query(
+      `SELECT id, RIGHT(fcm_token, 12) AS token_tail, LENGTH(fcm_token) AS token_len,
+              created_at, updated_at
+       FROM user_device_tokens
+       WHERE user_id = ?
+       ORDER BY COALESCE(updated_at, created_at) DESC`,
+      [targetId]
+    );
+    res.json({ user_id: targetId, count: rows.length, tokens: rows });
+  } catch (error) {
+    logger.error("device-token-status error: " + error.message);
+    res.status(500).json({ message: "error", error: error.message });
   } finally {
     if (connection) connection.release();
   }
