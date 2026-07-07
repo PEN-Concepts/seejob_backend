@@ -1118,6 +1118,49 @@ router.get("/device-token-status", auth.authenticateToken, async (req, res) => {
   }
 });
 
+// Diagnostic: send a real push to a user's token(s) and RETURN the raw FCM
+// result/error (unlike the normal senders, which swallow it). Distinguishes:
+// admin-not-initialized vs invalid/stale token vs success. Account-scoped.
+router.post("/test-push", auth.authenticateToken, async (req, res) => {
+  const targetId = Number(req.query.user_id || req.user.id) || Number(req.user.id);
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    if (Number(targetId) !== Number(req.user.id)) {
+      const ok = await isSameAccount(req.user.id, targetId, connection);
+      if (!ok) return res.status(403).json({ message: "Not in your account" });
+    }
+    const [rows] = await connection.query(
+      `SELECT fcm_token FROM user_device_tokens WHERE user_id = ?
+       ORDER BY COALESCE(updated_at, created_at) DESC`,
+      [targetId]
+    );
+    const tokens = rows.map((r) => r.fcm_token).filter(Boolean);
+    const adminInitialized = !!(admin.apps && admin.apps.length);
+    if (!tokens.length) return res.json({ ok: false, reason: "no_token", adminInitialized, count: 0 });
+    const results = [];
+    for (const tok of tokens) {
+      try {
+        const messageId = await admin.messaging().send({
+          token: tok,
+          notification: { title: "SeeJobRun test", body: "Closed-app push diagnostic" },
+          data: { type: "test_push" },
+          webpush: { headers: { Urgency: "high" } },
+        });
+        results.push({ ok: true, messageId, tail: tok.slice(-12) });
+      } catch (e) {
+        results.push({ ok: false, code: e.code || null, message: String(e.message || "").slice(0, 180), tail: tok.slice(-12) });
+      }
+    }
+    res.json({ ok: results.some((r) => r.ok), adminInitialized, count: tokens.length, results });
+  } catch (error) {
+    logger.error("test-push error: " + error.message);
+    res.status(500).json({ message: "error", error: error.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 router.get("/images/:imageName", auth.authenticateToken, async (req, res) => {
   const imageName = req.params.imageName;
   viewImage(imageName, (result) => {
