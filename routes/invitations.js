@@ -2349,6 +2349,7 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
 router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req, res) => {
   // Account-wide: any account member can resend a company contact's invite.
   const ownerId = res.locals.working_id || req.user.id;
+  const userId = req.user.id; // the acting sender (used for invited_contacts.created_by + the "from" name)
   const contactUserId = Number(req.params.contactUserId);
   let connection;
   try {
