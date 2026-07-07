@@ -7,6 +7,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
+const { ensureOwnerTypeColumns } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
 const userRoute = require("./routes/users");
 const contactRoute = require("./routes/contacts");
@@ -156,6 +157,20 @@ const startServer = async (retries = 5, delay = 5000) => {
     while (retries > 0) {
         const dbConnected = await checkDatabaseConnection();
         if (dbConnected) {
+            // Ensure the lead/job owner_type discriminator exists before serving,
+            // so job_contacts readers in change_order/quote/invitations (which
+            // filter owner_type but don't own the migration) can't hit a missing
+            // column on a fresh restart. Best-effort: the per-request ensures in
+            // budget/jobs/users remain a fallback if this fails.
+            let migrationConn;
+            try {
+                migrationConn = await pool.getConnection();
+                await ensureOwnerTypeColumns(migrationConn);
+            } catch (err) {
+                logger.error('ensureOwnerTypeColumns (boot) failed:', err);
+            } finally {
+                if (migrationConn) migrationConn.release();
+            }
             const port = process.env.PORT || 3000;
             app.listen(port, () => logger.info(`Listening on port ${port}`));
             return;

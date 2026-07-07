@@ -12,7 +12,14 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { ensureContactStatusColumn } = require("../services/dbMigrations");
+const { ensureContactStatusColumn, ensureOwnerTypeColumns } = require("../services/dbMigrations");
+
+// Normalize an owner_type/job_type param: anything but 'lead' is a job. Lets the
+// stages/materials tables distinguish lead-owned rows from job-owned ones even
+// when a lead id and a job id happen to match.
+function ownerTypeOf(v) {
+  return String(v || "").toLowerCase() === "lead" ? "lead" : "job";
+}
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
 const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId } = require("../utils/access");
@@ -50,6 +57,7 @@ const stageSchema = Joi.object({
   status: Joi.number().valid(0, 1).default(1),
   progress_status: Joi.number().min(0).default(0),
   job_id: Joi.number().integer().required(),
+  owner_type: Joi.string().valid("job", "lead").default("job"),
 });
 
 const inviteSchema = Joi.object({
@@ -82,6 +90,7 @@ function generateOTP() {
 
 const materialSchema = Joi.object({
   job_id: Joi.number().integer().required(),
+  owner_type: Joi.string().valid("job", "lead").default("job"),
   item_type: Joi.string().max(45).allow(null, ""),
   room: Joi.string().max(45).allow(null, ""),
   material: Joi.string().max(45).allow(null, ""),
@@ -1419,16 +1428,18 @@ router.post("/stages", auth.authenticateToken, denyExpiredFreeWrites, async (req
   }
 
   const { name, csi_code, status, progress_status, job_id } = value;
+  const ownerType = ownerTypeOf(value.owner_type);
 
   let connection;
 
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
 
     const [result] = await connection.execute(
-      `INSERT INTO stages (user_id, name, csi_code, job_id, status, progress_status, created_at)
-       VALUES (?, ?, ?,?, ?, ?, ?)`,
-      [signedin_user, name || null, csi_code || null, job_id, status, 0, currentTimestamp]
+      `INSERT INTO stages (user_id, name, csi_code, job_id, owner_type, status, progress_status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [signedin_user, name || null, csi_code || null, job_id, ownerType, status, 0, currentTimestamp]
     );
 
     res.json({
@@ -1443,13 +1454,15 @@ router.post("/stages", auth.authenticateToken, denyExpiredFreeWrites, async (req
 });
 router.get("/stages/:job_id", auth.authenticateToken, async (req, res) => {
   const job_id = req.params.job_id;
+  const ownerType = ownerTypeOf(req.query.owner_type);
 
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
     const [rows] = await connection.execute(
-      "SELECT * FROM stages WHERE status = 1 AND job_id In (?)",
-      [job_id]
+      "SELECT * FROM stages WHERE status = 1 AND owner_type = ? AND job_id In (?)",
+      [ownerType, job_id]
     );
 
     res.json(rows);
@@ -2409,8 +2422,10 @@ router.delete("/delete/:id", auth.authenticateToken, denyExpiredFreeWrites, asyn
 router.get("/materials", auth.authenticateToken, async (req, res) => {
   let connection;
   const { job_id } = req.query;
+  const ownerType = ownerTypeOf(req.query.owner_type);
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
 
     const userId = req.user && req.user.id ? req.user.id : res.locals.id;
     const features = await getActivePlanFeatures(connection, userId);
@@ -2425,8 +2440,8 @@ router.get("/materials", auth.authenticateToken, async (req, res) => {
     const params = [];
 
     if (job_id) {
-      query += " WHERE job_id = ?";
-      params.push(job_id);
+      query += " WHERE job_id = ? AND owner_type = ?";
+      params.push(job_id, ownerType);
     }
 
     query += " ORDER BY id DESC";
@@ -2457,15 +2472,17 @@ router.post("/materials", auth.authenticateToken, denyExpiredFreeWrites, enforce
   }
 
   const { job_id, item_type, room, material, manufacturer, size, color } = value;
+  const ownerType = ownerTypeOf(value.owner_type);
 
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
 
     const [result] = await connection.execute(
-      `INSERT INTO materials (job_id, item_type, room, material, manufacturer, size, color)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [job_id, item_type ?? null, room ?? null, material ?? null, manufacturer ?? null, size ?? null, color ?? null]
+      `INSERT INTO materials (job_id, owner_type, item_type, room, material, manufacturer, size, color)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [job_id, ownerType, item_type ?? null, room ?? null, material ?? null, manufacturer ?? null, size ?? null, color ?? null]
     );
 
     res.status(201).json({

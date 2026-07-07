@@ -1120,7 +1120,7 @@ router.get('/job-contacts/:job_id',auth.authenticateToken, async (req, res) => {
       `SELECT u.id as user_id, u.name
        FROM job_contacts jc
        JOIN user u ON jc.contact_id  = u.id
-       WHERE jc.job_id = ?`,
+       WHERE jc.job_id = ? AND jc.owner_type = 'job'`,
       [job_id]
     );
 
@@ -1873,7 +1873,7 @@ router.get("/get_job_contacts/:job_id", auth.authenticateToken, async (req, res)
         u.mobile
       FROM job_contacts jc
       JOIN user u ON jc.contact_id = u.id
-      WHERE jc.job_id = ?
+      WHERE jc.job_id = ? AND jc.owner_type = 'job'
       ORDER BY u.name ASC
       `,
       [job_id]

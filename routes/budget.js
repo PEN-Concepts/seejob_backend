@@ -3,6 +3,13 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
+const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
+
+// Normalize the job_type/owner_type param to the discriminator stored on
+// division_lineitems. Anything that isn't an explicit 'lead' is a job.
+function ownerTypeOf(v) {
+  return String(v || "").toLowerCase() === "lead" ? "lead" : "job";
+}
 
 async function resolveBillingUserId(connection, userId) {
   let billingUserId = userId;
@@ -240,16 +247,18 @@ router.get("/lineitems", auth.authenticateToken, requireJobBudgetFeature, async 
     return res.status(400).json({ message: "job_id is required" });
   }
 
+  const ownerType = ownerTypeOf(job_type);
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
     const [rows] = await connection.query(
       `SELECT id, division_id, lineitem_description, amount, csi_number, job_id,
               subcontractor_id, foreman_percent, paid_amount
        FROM division_lineitems
-       WHERE job_id = ?
+       WHERE job_id = ? AND owner_type = ?
        ORDER BY division_id ASC, id ASC`,
-      [Number(job_id)]
+      [Number(job_id), ownerType]
     );
     return res.json(rows);
   } catch (err) {
@@ -273,12 +282,14 @@ router.post("/contingency", auth.authenticateToken, requireJobBudgetFeature, asy
     value = 0;
   }
 
+  const ownerType = ownerTypeOf(job_type);
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
     const [result] = await connection.query(
-      `UPDATE division_lineitems SET contingency = ? WHERE job_id = ?`,
-      [value, job_id]
+      `UPDATE division_lineitems SET contingency = ? WHERE job_id = ? AND owner_type = ?`,
+      [value, job_id, ownerType]
     );
 
     return res.json({
@@ -301,6 +312,7 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJo
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
     const params = [];
     let sql = `SELECT id, division_id, lineitem_description, amount, csi_number, job_id, contingency,
                      subcontractor_id, foreman_percent, paid_amount
@@ -308,8 +320,8 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJo
                WHERE division_id = ?`;
     params.push(divisionId);
     if (job_id) {
-      sql += ` AND job_id = ?`;
-      params.push(job_id);
+      sql += ` AND job_id = ? AND owner_type = ?`;
+      params.push(job_id, ownerTypeOf(job_type));
     }
     sql += ` ORDER BY id ASC`;
     const [rows] = await connection.query(sql, params);
@@ -350,8 +362,10 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJ
       }
     }
 
+    const ownerType = ownerTypeOf(job_type);
     const connection = await pool.getConnection();
     try {
+      await ensureOwnerTypeColumns(connection);
       await connection.beginTransaction();
 
       const insertedItems = [];
@@ -372,9 +386,9 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJ
         if (normalized.id) {
           const [prevRows] = await connection.query(
             `SELECT foreman_percent, amount, paid_amount FROM division_lineitems
-             WHERE id = ? AND division_id = ? AND job_id = ?
+             WHERE id = ? AND division_id = ? AND job_id = ? AND owner_type = ?
              LIMIT 1`,
-            [normalized.id, Number(divisionId), Number(job_id)]
+            [normalized.id, Number(divisionId), Number(job_id), ownerType]
           );
           const prevForeman = prevRows && prevRows.length ? Number(prevRows[0].foreman_percent) : null;
           const prevAmount = prevRows && prevRows.length ? Number(prevRows[0].amount) : null;
@@ -383,7 +397,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJ
           const updateSql = `UPDATE division_lineitems
             SET csi_number = ?, lineitem_description = ?, amount = ?, contingency = ?,
                 subcontractor_id = ?, foreman_percent = ?, paid_amount = ?
-            WHERE id = ? AND division_id = ? AND job_id = ?`;
+            WHERE id = ? AND division_id = ? AND job_id = ? AND owner_type = ?`;
 
           const updateValues = [
             normalized.csi_number,
@@ -396,6 +410,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJ
             normalized.id,
             Number(divisionId),
             Number(job_id),
+            ownerType,
           ];
 
           await connection.query(updateSql, updateValues);
@@ -505,14 +520,15 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, requireJ
           });
         } else {
           const insertSql = `INSERT INTO division_lineitems
-            (division_id, job_id, csi_number, lineitem_description, amount, contingency,
+            (division_id, job_id, owner_type, csi_number, lineitem_description, amount, contingency,
              subcontractor_id, foreman_percent, paid_amount,
              created_at, created_by)
-            VALUES (?,?,?,?,?,?,?,?,?,NOW(),?)`;
+            VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
 
           const insertValues = [
             Number(divisionId),
             Number(job_id),
+            ownerType,
             normalized.csi_number,
             normalized.lineitem_description,
             normalized.amount,
@@ -596,6 +612,7 @@ router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
 
     await connection.beginTransaction();
 
@@ -626,8 +643,8 @@ router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken
                WHERE division_id = ? AND id = ?`;
 
     if (job_id) {
-      sql += ` AND job_id = ?`;
-      params.push(Number(job_id));
+      sql += ` AND job_id = ? AND owner_type = ?`;
+      params.push(Number(job_id), ownerTypeOf(job_type));
     }
 
     const [result] = await connection.query(sql, params);

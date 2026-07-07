@@ -9,6 +9,7 @@ const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { getAccessInfo } = require("../utils/access");
+const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -1687,6 +1688,7 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
 
 router.post("/jobAddContact", auth.authenticateToken, async (req, res) => {
   const { job_id, contact_id } = req.body;
+  const owner_type = String(req.body.owner_type || "").toLowerCase() === "lead" ? "lead" : "job";
   const user_id = req.user.id;
 
   if (!job_id || !contact_id) {
@@ -1699,12 +1701,13 @@ router.post("/jobAddContact", auth.authenticateToken, async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureOwnerTypeColumns(connection);
 
     // --- Check if contact already added ---
     const [existing] = await connection.query(
-      `SELECT id FROM job_contacts 
-       WHERE job_id = ? AND contact_id = ?`,
-      [job_id, contact_id]
+      `SELECT id FROM job_contacts
+       WHERE job_id = ? AND contact_id = ? AND owner_type = ?`,
+      [job_id, contact_id, owner_type]
     );
 
     if (existing.length > 0) {
@@ -1716,10 +1719,10 @@ router.post("/jobAddContact", auth.authenticateToken, async (req, res) => {
 
     // --- Insert record ---
     const insertQuery = `
-      INSERT INTO job_contacts (user_id, job_id, contact_id)
-      VALUES (?, ?, ?)
+      INSERT INTO job_contacts (user_id, job_id, contact_id, owner_type)
+      VALUES (?, ?, ?, ?)
     `;
-    await connection.query(insertQuery, [user_id, job_id, contact_id]);
+    await connection.query(insertQuery, [user_id, job_id, contact_id, owner_type]);
 
     // --- Fetch actor (adder) name ---
     const [[actorRow]] = await connection.query(
@@ -1809,19 +1812,21 @@ router.get(
   auth.authenticateToken,
   async (req, res) => {
     const { job_id } = req.params;
+    const owner_type = String(req.query.owner_type || "").toLowerCase() === "lead" ? "lead" : "job";
     //console.log("job id ", job_id);
     let connection;
 
     try {
       connection = await pool.getConnection();
+      await ensureOwnerTypeColumns(connection);
       const query = `
       SELECT u.id, u.name, u.email, u.image, sc.name AS subcategory, jc.id as 'jcid'
       FROM job_contacts jc
       JOIN user u ON u.id = jc.contact_id
       LEFT JOIN subcategory sc ON u.subcategory = sc.id
-      WHERE jc.job_id = ?
+      WHERE jc.job_id = ? AND jc.owner_type = ?
     `;
-      const [rows] = await connection.query(query, [job_id]);
+      const [rows] = await connection.query(query, [job_id, owner_type]);
 
       res
         .status(200)

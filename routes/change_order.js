@@ -323,12 +323,12 @@ router.get(
       connection = await pool.getConnection();
 
       const [rows] = await connection.execute(
-        `Select u.name, u.id,u.email, s.name as 'designation', c.name as 'role' from job_contacts jc 
+        `Select u.name, u.id,u.email, s.name as 'designation', c.name as 'role' from job_contacts jc
             join job j ON jc.job_id = j.id
             join user u ON jc.contact_id = u.id
             join subcategory s  ON  u.subcategory = s.id
             join category c ON u.category = c.id
-            where jc.job_id = ?`,
+            where jc.job_id = ? AND jc.owner_type = 'job'`,
         [jid],
       );
       res.status(200).json(rows);

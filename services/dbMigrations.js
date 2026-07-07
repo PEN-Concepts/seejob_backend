@@ -20,4 +20,35 @@ async function ensureContactStatusColumn(connection) {
   contactStatusEnsured = true;
 }
 
-module.exports = { ensureContactStatusColumn };
+// The lead detail view reuses the job Budget/Stage/Materials/Contacts panels,
+// passing the LEAD id in the job_id column. Those four tables historically keyed
+// rows purely by job_id with no type discriminator, so a lead and a job with the
+// same id would read/write each other's rows once their id ranges overlap.
+// owner_type disambiguates every row: 'job' (default) or 'lead'.
+let ownerTypeEnsured = false;
+async function ensureOwnerTypeColumns(connection) {
+  if (ownerTypeEnsured) return;
+  const tables = ['division_lineitems', 'stages', 'materials', 'job_contacts'];
+  for (const t of tables) {
+    const [cols] = await connection.query(
+      `SHOW COLUMNS FROM ${t} LIKE 'owner_type'`
+    );
+    if (!cols.length) {
+      await connection.query(
+        `ALTER TABLE ${t} ADD COLUMN owner_type VARCHAR(8) NOT NULL DEFAULT 'job'`
+      );
+      // One-time backfill, run once right after the column is added: any existing
+      // row whose job_id is unambiguously a LEAD id (present in leads, absent from
+      // job) belongs to a lead. This is only safe because at migration time the
+      // job/lead id ranges do not overlap, so no row can be both.
+      await connection.query(
+        `UPDATE ${t} SET owner_type = 'lead'
+         WHERE job_id IN (SELECT id FROM leads)
+           AND job_id NOT IN (SELECT id FROM job)`
+      );
+    }
+  }
+  ownerTypeEnsured = true;
+}
+
+module.exports = { ensureContactStatusColumn, ensureOwnerTypeColumns };
