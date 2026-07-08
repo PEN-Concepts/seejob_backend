@@ -1141,10 +1141,17 @@ router.post("/test-push", auth.authenticateToken, async (req, res) => {
     const results = [];
     for (const tok of tokens) {
       try {
+        // Data-only (no `notification` block) so the service worker's
+        // onBackgroundMessage runs and renders the branded/persistent/action
+        // notification, instead of Chrome auto-displaying a default one.
         const messageId = await admin.messaging().send({
           token: tok,
-          notification: { title: "SeeJobRun test", body: "Closed-app push diagnostic" },
-          data: { type: "test_push" },
+          data: {
+            title: "SeeJobRun test",
+            body: "Closed-app push diagnostic — tap View to open the app.",
+            type: "test_push",
+            url: "dashboard",
+          },
           webpush: { headers: { Urgency: "high" } },
         });
         results.push({ ok: true, messageId, tail: tok.slice(-12) });
