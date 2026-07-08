@@ -51,4 +51,33 @@ async function ensureOwnerTypeColumns(connection) {
   ownerTypeEnsured = true;
 }
 
-module.exports = { ensureContactStatusColumn, ensureOwnerTypeColumns };
+// Backend-scheduled reminders: rows the sendReminders cron scans each minute and
+// delivers via FCM, so alerts fire even when the app is closed. fire_at is stored
+// in UTC (compared against UTC_TIMESTAMP()) to be timezone-safe.
+let remindersTableEnsured = false;
+async function ensureRemindersTable(connection) {
+  if (remindersTableEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS reminders (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      source_type VARCHAR(20) NOT NULL,
+      source_id INT NULL,
+      title VARCHAR(255) NOT NULL,
+      body VARCHAR(255) NULL,
+      job_name VARCHAR(255) NULL,
+      appt_time VARCHAR(40) NULL,
+      appt_address VARCHAR(255) NULL,
+      url VARCHAR(80) NULL,
+      fire_at DATETIME NOT NULL,
+      sent_at DATETIME NULL,
+      created_by INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_reminders_due (sent_at, fire_at),
+      INDEX idx_reminders_source (user_id, source_type, source_id)
+    )
+  `);
+  remindersTableEnsured = true;
+}
+
+module.exports = { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureRemindersTable };
