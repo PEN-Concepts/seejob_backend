@@ -23,7 +23,7 @@ router.post("/", auth.authenticateToken, async (req, res) => {
     return res.status(400).json({ message: "title and a valid fire_at_ms are required" });
   }
   const type = String(b.source_type || "task").slice(0, 20);
-  const srcId = b.source_id != null ? Number(b.source_id) : null;
+  const srcId = b.source_id != null ? String(b.source_id).slice(0, 64) : null;
   const clip = (v, n) => (v == null || v === "" ? null : String(v).slice(0, n));
 
   let connection;
@@ -76,7 +76,7 @@ router.delete("/", auth.authenticateToken, async (req, res) => {
     await connection.query(
       `DELETE FROM reminders
        WHERE user_id = ? AND source_type = ? AND source_id = ? AND sent_at IS NULL`,
-      [userId, String(source_type), Number(source_id)]
+      [userId, String(source_type), String(source_id)]
     );
     res.json({ success: true });
   } catch (err) {

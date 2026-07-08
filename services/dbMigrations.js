@@ -62,7 +62,7 @@ async function ensureRemindersTable(connection) {
       id INT AUTO_INCREMENT PRIMARY KEY,
       user_id INT NOT NULL,
       source_type VARCHAR(20) NOT NULL,
-      source_id INT NULL,
+      source_id VARCHAR(64) NULL,
       title VARCHAR(255) NOT NULL,
       body VARCHAR(255) NULL,
       job_name VARCHAR(255) NULL,
@@ -77,6 +77,12 @@ async function ensureRemindersTable(connection) {
       INDEX idx_reminders_source (user_id, source_type, source_id)
     )
   `);
+  // If the table pre-existed with an INT source_id (goals use string ids like
+  // 'l1720…'), widen it once.
+  const [[col]] = await connection.query("SHOW COLUMNS FROM reminders LIKE 'source_id'");
+  if (col && /int/i.test(col.Type)) {
+    await connection.query("ALTER TABLE reminders MODIFY source_id VARCHAR(64) NULL");
+  }
   remindersTableEnsured = true;
 }
 
