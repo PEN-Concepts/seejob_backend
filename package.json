@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test/scheduleEngine.test.js",
+    "test:integration": "node test/scheduleIntegration.test.js",
+    "test:all": "node test/scheduleEngine.test.js && node test/scheduleIntegration.test.js"
   },
   "keywords": [],
   "author": "",
@@ -36,5 +38,9 @@
     "uuid": "^14.0.0",
     "winston": "^3.13.0",
     "winston-daily-rotate-file": "^5.0.0"
+  },
+  "devDependencies": {
+    "mysql-memory-server": "^1.14.1",
+    "supertest": "^7.2.2"
   }
 }
