@@ -1144,14 +1144,26 @@ router.post("/test-push", auth.authenticateToken, async (req, res) => {
         // Data-only (no `notification` block) so the service worker's
         // onBackgroundMessage runs and renders the branded/persistent/action
         // notification, instead of Chrome auto-displaying a default one.
+        // Sample payload mirrors the real reminder shape (task or appointment).
+        const sample = String(req.query.sample || "").toLowerCase() === "appointment"
+          ? {
+              type: "appointment",
+              title: "Site walk with client",
+              apptTime: "2:00 PM",
+              apptAddress: "226 Solida Del Sol, Nipomo, CA 93444",
+              body: "2:00 PM — 226 Solida Del Sol",
+              url: "calendar",
+            }
+          : {
+              type: "task",
+              title: "Pour Flatwork",
+              jobName: "Sawyer - 226 Solida Del Sol",
+              body: "Job: Sawyer - 226 Solida Del Sol",
+              url: "dashboard",
+            };
         const messageId = await admin.messaging().send({
           token: tok,
-          data: {
-            title: "SeeJobRun test",
-            body: "Closed-app push diagnostic — tap View to open the app.",
-            type: "test_push",
-            url: "dashboard",
-          },
+          data: sample,
           webpush: { headers: { Urgency: "high" } },
         });
         results.push({ ok: true, messageId, tail: tok.slice(-12) });
