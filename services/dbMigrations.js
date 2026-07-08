@@ -75,7 +75,7 @@ async function ensureRemindersTable(connection) {
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_reminders_due (sent_at, fire_at),
       INDEX idx_reminders_source (user_id, source_type, source_id)
-    )
+    ) ENGINE=InnoDB
   `);
   // If the table pre-existed with an INT source_id (goals use string ids like
   // 'l1720…'), widen it once.
@@ -86,4 +86,224 @@ async function ensureRemindersTable(connection) {
   remindersTableEnsured = true;
 }
 
-module.exports = { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureRemindersTable };
+// Schedule Template feature: a reusable NAMED library of construction line items
+// with durations + item-to-item dependencies, applied to a job to auto-generate a
+// sequenced schedule (tasks + stages) that then stays live-synced. Two groups of
+// tables kept physically separate so master-template edits never retroactively
+// touch an already-applied job:
+//   MASTER LIBRARY  : schedule_templates / _items / _deps
+//   APPLIED INSTANCE: job_schedules / _items / _deps  (an independent copy per apply)
+// Dependencies reference a STABLE item PK, never a display number. FKs are declared
+// only AMONG these new tables (where we own the types); the applied-instance
+// task_id/stage_id are plain indexed columns (no hard FK to the legacy tasks/stages
+// tables) so the migration can't fail on engine/charset mismatch and a hard task
+// delete can't be blocked by a constraint.
+let scheduleTablesEnsured = false;
+async function ensureScheduleTemplateTables(connection) {
+  if (scheduleTablesEnsured) return;
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS schedule_templates (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      account_owner_id INT NULL,
+      created_by INT NULL,
+      is_seed TINYINT NOT NULL DEFAULT 0,
+      status VARCHAR(12) NOT NULL DEFAULT 'active',
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_sched_tpl_owner (account_owner_id, status)
+    ) ENGINE=InnoDB
+  `);
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS schedule_template_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      template_id INT NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      default_duration_days INT NULL,
+      depends_on_all TINYINT NOT NULL DEFAULT 0,
+      sort_order INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_sti_tpl (template_id, sort_order),
+      CONSTRAINT fk_sti_tpl FOREIGN KEY (template_id)
+        REFERENCES schedule_templates(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB
+  `);
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS schedule_template_deps (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      item_id INT NOT NULL,
+      depends_on_item_id INT NOT NULL,
+      UNIQUE KEY uq_std (item_id, depends_on_item_id),
+      INDEX idx_std_item (item_id),
+      CONSTRAINT fk_std_item FOREIGN KEY (item_id)
+        REFERENCES schedule_template_items(id) ON DELETE CASCADE,
+      CONSTRAINT fk_std_dep FOREIGN KEY (depends_on_item_id)
+        REFERENCES schedule_template_items(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB
+  `);
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS job_schedules (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      job_id INT NOT NULL,
+      owner_type VARCHAR(8) NOT NULL DEFAULT 'job',
+      source_template_id INT NULL,
+      name VARCHAR(255) NULL,
+      start_date DATE NULL,
+      skip_saturday TINYINT NOT NULL DEFAULT 0,
+      skip_sunday TINYINT NOT NULL DEFAULT 0,
+      status VARCHAR(12) NOT NULL DEFAULT 'active',
+      created_by INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_js_job (job_id, owner_type, status),
+      CONSTRAINT fk_js_tpl FOREIGN KEY (source_template_id)
+        REFERENCES schedule_templates(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB
+  `);
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS job_schedule_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      schedule_id INT NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      duration_days INT NOT NULL DEFAULT 1,
+      sort_order INT NOT NULL DEFAULT 0,
+      computed_start_date DATE NULL,
+      computed_end_date DATE NULL,
+      pinned_start_date DATE NULL,
+      assignee_user_id INT NULL,
+      task_id INT NULL,
+      stage_id INT NULL,
+      template_item_id INT NULL,
+      depends_on_all TINYINT NOT NULL DEFAULT 0,
+      has_conflict TINYINT NOT NULL DEFAULT 0,
+      conflict_reason VARCHAR(255) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      INDEX idx_jsi_sched (schedule_id, sort_order),
+      INDEX idx_jsi_task (task_id),
+      CONSTRAINT fk_jsi_sched FOREIGN KEY (schedule_id)
+        REFERENCES job_schedules(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB
+  `);
+
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS job_schedule_deps (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      schedule_id INT NOT NULL,
+      item_id INT NOT NULL,
+      depends_on_item_id INT NOT NULL,
+      UNIQUE KEY uq_jsd (item_id, depends_on_item_id),
+      INDEX idx_jsd_sched (schedule_id),
+      CONSTRAINT fk_jsd_sched FOREIGN KEY (schedule_id)
+        REFERENCES job_schedules(id) ON DELETE CASCADE,
+      CONSTRAINT fk_jsd_item FOREIGN KEY (item_id)
+        REFERENCES job_schedule_items(id) ON DELETE CASCADE,
+      CONSTRAINT fk_jsd_dep FOREIGN KEY (depends_on_item_id)
+        REFERENCES job_schedule_items(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB
+  `);
+
+  await seedStandardNewHomeBuild(connection);
+  scheduleTablesEnsured = true;
+}
+
+// The default/example template. Idempotent: only inserts if no is_seed row exists.
+// account_owner_id is NULL so the seed is a shared starter visible to every account
+// (accounts customize it by cloning, never by editing it in place). Durations stay
+// NULL on the master — the user fills them in per job at apply time. Item 42
+// ("Inspection Final") uses depends_on_all=1 instead of explicit deps, so it always
+// stays last even if items are added later.
+async function seedStandardNewHomeBuild(connection) {
+  const [[existing]] = await connection.query(
+    "SELECT id FROM schedule_templates WHERE is_seed = 1 LIMIT 1"
+  );
+  if (existing) return;
+
+  // display # → { name, deps: [display #s] , all?: true }
+  const ITEMS = [
+    { name: 'Temp. Toilet', deps: [] },
+    { name: 'Stake out building', deps: [1] },
+    { name: 'Rough Grading', deps: [2] },
+    { name: 'Foundation Set up', deps: [3] },
+    { name: 'Under Slab Plumbing', deps: [4] },
+    { name: 'Electrical Sweeps', deps: [4] },
+    { name: 'Inspection Slab, Plumbing, Ufa ground', deps: [4, 5, 6] },
+    { name: 'Foundation Pour', deps: [7] },
+    { name: 'Utilities', deps: [7] },
+    { name: 'Lumber Drop & Steel', deps: [7] },
+    { name: 'Framing', deps: [9] },
+    { name: 'Trusses & Sheeting', deps: [10] },
+    { name: 'Ext. Windows & Doors', deps: [12] },
+    { name: 'Roof Sheeting Inspection', deps: [12] },
+    { name: 'Load Roof', deps: [14] },
+    { name: 'Roofing', deps: [15] },
+    { name: 'Rough Electric', deps: [14] },
+    { name: 'Rough HVAC', deps: [14] },
+    { name: 'Rough Plumbing', deps: [14] },
+    { name: 'Inspection Rough Ins', deps: [17, 18, 19] },
+    { name: 'Siding / Stucco', deps: [20] },
+    { name: 'Insulation', deps: [21] },
+    { name: 'Inspection Insulation', deps: [22] },
+    { name: 'Drywall', deps: [23] },
+    { name: 'Tape & Texture', deps: [24] },
+    { name: 'Driveway / sidewalk poured', deps: [9, 20] },
+    { name: 'Garage Doors', deps: [25] },
+    { name: 'Interior doors & Closets', deps: [25] },
+    { name: 'Paint', deps: [27] },
+    { name: 'Cabinets', deps: [28] },
+    { name: 'Tile Showers/Tubs', deps: [25] },
+    { name: 'Template counters & Install', deps: [29] },
+    { name: 'Flooring', deps: [29] },
+    { name: 'Appliances Installed', deps: [33] },
+    { name: 'Baseboards', deps: [33] },
+    { name: 'Door hardware & stops', deps: [35] },
+    { name: 'Paint touch ups', deps: [34] },
+    { name: 'Bath Accessories', deps: [37] },
+    { name: 'Finish Plumbing', deps: [30, 31] },
+    { name: 'Finish Electrical', deps: [31] },
+    { name: 'Finish HVAC', deps: [28] },
+    { name: 'Inspection Final', deps: [], all: true },
+  ];
+
+  const [tpl] = await connection.query(
+    `INSERT INTO schedule_templates (name, account_owner_id, created_by, is_seed, status)
+     VALUES ('Standard New Home Build', NULL, NULL, 1, 'active')`
+  );
+  const templateId = tpl.insertId;
+
+  // Insert items in display order, capturing the STABLE auto-increment id for each.
+  const idByDisplay = {};
+  for (let i = 0; i < ITEMS.length; i++) {
+    const [r] = await connection.query(
+      `INSERT INTO schedule_template_items
+         (template_id, name, default_duration_days, depends_on_all, sort_order)
+       VALUES (?, ?, NULL, ?, ?)`,
+      [templateId, ITEMS[i].name, ITEMS[i].all ? 1 : 0, i + 1]
+    );
+    idByDisplay[i + 1] = r.insertId;
+  }
+
+  // Map each item's display-number deps to the newly-created stable ids.
+  for (let i = 0; i < ITEMS.length; i++) {
+    if (ITEMS[i].all) continue; // depends_on_all handles this one
+    for (const depDisplay of ITEMS[i].deps) {
+      await connection.query(
+        `INSERT INTO schedule_template_deps (item_id, depends_on_item_id) VALUES (?, ?)`,
+        [idByDisplay[i + 1], idByDisplay[depDisplay]]
+      );
+    }
+  }
+}
+
+module.exports = {
+  ensureContactStatusColumn,
+  ensureOwnerTypeColumns,
+  ensureRemindersTable,
+  ensureScheduleTemplateTables,
+};

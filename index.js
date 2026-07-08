@@ -8,7 +8,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
-const { ensureOwnerTypeColumns } = require("./services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureScheduleTemplateTables } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
 const userRoute = require("./routes/users");
 const contactRoute = require("./routes/contacts");
@@ -39,6 +39,8 @@ const spartan = require("./routes/spartan");
 const translate = require("./routes/translate");
 const bids = require("./routes/bids");
 const reminders = require("./routes/reminders");
+const scheduleTemplates = require("./routes/scheduleTemplates");
+const jobSchedules = require("./routes/jobSchedules");
 const app = express();
 const api = process.env.API_URL;
 
@@ -115,6 +117,8 @@ app.use(`${api}/spartan`, spartan);
 app.use(`${api}/translate`, translate);
 app.use(`${api}/bids`, bids);
 app.use(`${api}/reminders`, reminders);
+app.use(`${api}/schedule-templates`, scheduleTemplates);
+app.use(`${api}/job-schedules`, jobSchedules);
 
 
 // Global error handler to log unexpected exceptions
@@ -169,8 +173,9 @@ const startServer = async (retries = 5, delay = 5000) => {
             try {
                 migrationConn = await pool.getConnection();
                 await ensureOwnerTypeColumns(migrationConn);
+                await ensureScheduleTemplateTables(migrationConn);
             } catch (err) {
-                logger.error('ensureOwnerTypeColumns (boot) failed:', err);
+                logger.error('boot migrations failed:', err);
             } finally {
                 if (migrationConn) migrationConn.release();
             }

@@ -196,6 +196,77 @@ async function canViewJob(userId, jobId, connection) {
 }
 
 /**
+ * Resolve the NAME of a user's currently-active subscription plan (e.g. "Gold"),
+ * or null if they have no active subscription. Employees resolve to their account
+ * owner (the plan lives on the owner's account), matching getAccessInfo.
+ * This is a plan/tier lookup — it is deliberately NOT owner-exempt and does NOT
+ * consider trial status: plan-gated features are governed purely by the plan.
+ */
+async function getActivePlanName(userId, connection) {
+  return withConnection(connection, async (conn) => {
+    try {
+      const effectiveId = await resolveOwnerId(userId, conn);
+      const [rows] = await conn.query(
+        `SELECT p.name
+           FROM subscriptions s
+           JOIN plans p ON p.id = s.plan_id
+          WHERE s.user_id = ? AND s.status = 'active'
+          ORDER BY s.created_at DESC
+          LIMIT 1`,
+        [effectiveId]
+      );
+      return rows.length ? String(rows[0].name || "") : null;
+    } catch (err) {
+      logger.error("getActivePlanName error: " + err.message);
+      return null;
+    }
+  });
+}
+
+/**
+ * Express middleware: require the caller's account to be on a specific plan tier
+ * (default Gold) before allowing the request. Apply AFTER auth.authenticateToken.
+ *
+ * This is a genuine SERVER-SIDE plan-tier gate (a 403, not just a hidden UI
+ * button). It matches on the plan NAME containing one of the allowed tokens
+ * (case-insensitive), so "Gold", "Gold Monthly", "Gold Annual" all pass. Unlike
+ * the trial guard, it is NOT owner-exempt — the owner's own plan decides access,
+ * exactly as it would for any Gold-gated feature. FAILS CLOSED: if the plan can't
+ * be verified (no active sub, or a DB error), access is denied — a premium feature
+ * must never leak on error.
+ */
+function requirePlan(allowed = ["gold"]) {
+  const tokens = (Array.isArray(allowed) ? allowed : [allowed]).map((t) =>
+    String(t).trim().toLowerCase()
+  );
+  return async (req, res, next) => {
+    const userId = req.user && req.user.id ? req.user.id : (res.locals && res.locals.id);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+    try {
+      const planName = await getActivePlanName(userId);
+      const ok = !!planName && tokens.some((t) => planName.toLowerCase().includes(t));
+      if (!ok) {
+        return res.status(403).json({
+          success: false,
+          code: "PLAN_UPGRADE_REQUIRED",
+          message: "This feature requires the Gold plan. Please upgrade to use Schedule Templates.",
+        });
+      }
+      return next();
+    } catch (err) {
+      logger.error("requirePlan error: " + err.message);
+      return res.status(403).json({
+        success: false,
+        code: "PLAN_UPGRADE_REQUIRED",
+        message: "Unable to verify your plan for this feature.",
+      });
+    }
+  };
+}
+
+/**
  * Express middleware: block create/update/delete for expired free-trial users.
  * Apply AFTER auth.authenticateToken on write endpoints. Read routes are not
  * affected here. The one write expired_free users are allowed — checking off
@@ -233,4 +304,6 @@ module.exports = {
   isSameAccount,
   canViewJob,
   denyExpiredFreeWrites,
+  getActivePlanName,
+  requirePlan,
 };

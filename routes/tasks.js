@@ -10,6 +10,8 @@ const { denyExpiredFreeWrites, isSameAccount } = require("../utils/access");
 const { getTimeStamp } = require("../common/timdate");
 const admin = require("../config/firebase-admin");
 const logger = require("../common/logger");
+const { recomputeSchedule } = require("../services/scheduleCascade");
+const notify = require("../services/notify");
 
 // Ensure the dedupe ledger for subcontractor seed-jobs exists (idempotent).
 async function ensureSeedJobTable(connection) {
@@ -964,6 +966,53 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     await connection.query(updateSql, params);
 
     // -------------------------------------------------
+    // 📅 SCHEDULE CASCADE HOOK
+    // -------------------------------------------------
+    // If this task is part of an applied Schedule Template, a date/duration edit
+    // here (a Task Manager edit OR a Master Calendar drag/resize — both go through
+    // this endpoint) must cascade to every dependent item in the SAME job's
+    // schedule. We record the drag as a pinned start on the schedule item, then
+    // recompute. Wrapped in a SAVEPOINT so a schedule glitch can never break a
+    // normal task edit; notifications are collected and dispatched after commit.
+    let scheduleNotifPayloads = [];
+    try {
+      const [[schedItem]] = await connection.query(
+        "SELECT id, schedule_id FROM job_schedule_items WHERE task_id = ? LIMIT 1",
+        [req.params.id]
+      );
+      if (schedItem && (startDateInput || hasDurationDays)) {
+        await connection.query("SAVEPOINT sched_cascade");
+        try {
+          const itemSets = [];
+          const itemVals = [];
+          if (startDateInput && formattedStartDate) {
+            itemSets.push("pinned_start_date = ?");
+            itemVals.push(String(formattedStartDate).slice(0, 10));
+          }
+          if (hasDurationDays && parsedDurationDays != null) {
+            itemSets.push("duration_days = ?");
+            itemVals.push(parsedDurationDays);
+          }
+          if (itemSets.length) {
+            itemVals.push(schedItem.id);
+            await connection.query(
+              `UPDATE job_schedule_items SET ${itemSets.join(", ")} WHERE id = ?`,
+              itemVals
+            );
+          }
+          scheduleNotifPayloads =
+            (await recomputeSchedule(connection, schedItem.schedule_id, { changedItemId: schedItem.id })) || [];
+        } catch (cascadeErr) {
+          await connection.query("ROLLBACK TO SAVEPOINT sched_cascade");
+          scheduleNotifPayloads = [];
+          logger.error("[schedule] cascade hook: " + cascadeErr.message);
+        }
+      }
+    } catch (hookErr) {
+      logger.error("[schedule] cascade hook lookup: " + hookErr.message);
+    }
+
+    // -------------------------------------------------
     // 🚨 NOTIFICATION LOGIC (ONLY ADD OR REMOVE)
     // -------------------------------------------------
     // Get actor name
@@ -1052,6 +1101,13 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     // -------------------------------------------------
 
     await connection.commit();
+
+    // Fire-and-forget the batched schedule-cascade notifications after commit.
+    if (scheduleNotifPayloads.length) {
+      for (const p of scheduleNotifPayloads) {
+        notify.dispatchScheduleNotification(pool, p).catch(() => {});
+      }
+    }
 
     res.status(200).json({ message: "Task updated successfully" });
 
