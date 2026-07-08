@@ -43,7 +43,8 @@ async function loadScheduleGraph(conn, scheduleId) {
     [scheduleId]
   );
   const [deps] = await conn.query(
-    'SELECT item_id, depends_on_item_id FROM job_schedule_deps WHERE schedule_id = ?',
+    // include the row `id` so the client can DELETE a specific applied dependency
+    'SELECT id, item_id, depends_on_item_id FROM job_schedule_deps WHERE schedule_id = ?',
     [scheduleId]
   );
   return { schedule, items, deps };

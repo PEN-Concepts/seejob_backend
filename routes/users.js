@@ -8,7 +8,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { getAccessInfo, isSameAccount } = require("../utils/access");
+const { getAccessInfo, isSameAccount, getActivePlanLevel } = require("../utils/access");
 const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
 const path = require("path");
 const multer = require("multer");
@@ -162,6 +162,11 @@ router.get("/my-rights", auth.authenticateToken, async (req, res) => {
     const { mode, trialEndsAt, daysLeft, hasActiveSubscription } =
       await getAccessInfo(userId, connection);
 
+    // Numeric plan tier (Basic=1..Platinum=5; 0 = no active plan). Lets the client
+    // show/hide plan-gated entry points (e.g. Schedule Templates = Gold+, level 4)
+    // to match the server-side requirePlan gate. Enforcement stays server-side.
+    const planLevel = await getActivePlanLevel(userId, connection);
+
     return res.json({
       success: true,
       rights: rightsRows,
@@ -170,6 +175,7 @@ router.get("/my-rights", auth.authenticateToken, async (req, res) => {
       daysLeft,
       isTrialActive: mode === "trial_active",
       hasActiveSubscription,
+      planLevel,
     });
   } catch (error) {
     logger.error("Error fetching user rights: ", error);
@@ -1084,97 +1090,6 @@ router.post("/saveDeviceToken", auth.authenticateToken, async (req, res) => {
   } catch (error) {
     logger.error("Error saving FCM token:", error);
     res.status(500).json({ code: "500", message: "Internal Server Error" });
-  } finally {
-    if (connection) connection.release();
-  }
-});
-
-// Read-only diagnostic: does a user in the caller's account have an FCM device
-// token, and when was it last saved? Never returns the full token (tail + length
-// only). Account-scoped. Used to diagnose closed-app push (token registration).
-router.get("/device-token-status", auth.authenticateToken, async (req, res) => {
-  const targetId = Number(req.query.user_id || req.user.id) || Number(req.user.id);
-  let connection;
-  try {
-    connection = await pool.getConnection();
-    if (Number(targetId) !== Number(req.user.id)) {
-      const ok = await isSameAccount(req.user.id, targetId, connection);
-      if (!ok) return res.status(403).json({ message: "Not in your account" });
-    }
-    const [rows] = await connection.query(
-      `SELECT id, RIGHT(fcm_token, 12) AS token_tail, LENGTH(fcm_token) AS token_len,
-              created_at, updated_at
-       FROM user_device_tokens
-       WHERE user_id = ?
-       ORDER BY COALESCE(updated_at, created_at) DESC`,
-      [targetId]
-    );
-    res.json({ user_id: targetId, count: rows.length, tokens: rows });
-  } catch (error) {
-    logger.error("device-token-status error: " + error.message);
-    res.status(500).json({ message: "error", error: error.message });
-  } finally {
-    if (connection) connection.release();
-  }
-});
-
-// Diagnostic: send a real push to a user's token(s) and RETURN the raw FCM
-// result/error (unlike the normal senders, which swallow it). Distinguishes:
-// admin-not-initialized vs invalid/stale token vs success. Account-scoped.
-router.post("/test-push", auth.authenticateToken, async (req, res) => {
-  const targetId = Number(req.query.user_id || req.user.id) || Number(req.user.id);
-  let connection;
-  try {
-    connection = await pool.getConnection();
-    if (Number(targetId) !== Number(req.user.id)) {
-      const ok = await isSameAccount(req.user.id, targetId, connection);
-      if (!ok) return res.status(403).json({ message: "Not in your account" });
-    }
-    const [rows] = await connection.query(
-      `SELECT fcm_token FROM user_device_tokens WHERE user_id = ?
-       ORDER BY COALESCE(updated_at, created_at) DESC`,
-      [targetId]
-    );
-    const tokens = rows.map((r) => r.fcm_token).filter(Boolean);
-    const adminInitialized = !!(admin.apps && admin.apps.length);
-    if (!tokens.length) return res.json({ ok: false, reason: "no_token", adminInitialized, count: 0 });
-    const results = [];
-    for (const tok of tokens) {
-      try {
-        // Data-only (no `notification` block) so the service worker's
-        // onBackgroundMessage runs and renders the branded/persistent/action
-        // notification, instead of Chrome auto-displaying a default one.
-        // Sample payload mirrors the real reminder shape (task or appointment).
-        const sample = String(req.query.sample || "").toLowerCase() === "appointment"
-          ? {
-              type: "appointment",
-              title: "Site walk with client",
-              apptTime: "2:00 PM",
-              apptAddress: "226 Solida Del Sol, Nipomo, CA 93444",
-              body: "2:00 PM — 226 Solida Del Sol",
-              url: "calendar",
-            }
-          : {
-              type: "task",
-              title: "Pour Flatwork",
-              jobName: "Sawyer - 226 Solida Del Sol",
-              body: "Job: Sawyer - 226 Solida Del Sol",
-              url: "dashboard",
-            };
-        const messageId = await admin.messaging().send({
-          token: tok,
-          data: sample,
-          webpush: { headers: { Urgency: "high" } },
-        });
-        results.push({ ok: true, messageId, tail: tok.slice(-12) });
-      } catch (e) {
-        results.push({ ok: false, code: e.code || null, message: String(e.message || "").slice(0, 180), tail: tok.slice(-12) });
-      }
-    }
-    res.json({ ok: results.some((r) => r.ok), adminInitialized, count: tokens.length, results });
-  } catch (error) {
-    logger.error("test-push error: " + error.message);
-    res.status(500).json({ message: "error", error: error.message });
   } finally {
     if (connection) connection.release();
   }
