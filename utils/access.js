@@ -196,65 +196,112 @@ async function canViewJob(userId, jobId, connection) {
 }
 
 /**
- * Resolve the NAME of a user's currently-active subscription plan (e.g. "Gold"),
- * or null if they have no active subscription. Employees resolve to their account
- * owner (the plan lives on the owner's account), matching getAccessInfo.
- * This is a plan/tier lookup — it is deliberately NOT owner-exempt and does NOT
- * consider trial status: plan-gated features are governed purely by the plan.
+ * Cumulative plan-tier ladder (mirrors plans.level and the frontend RANK map in
+ * m-access.service.ts). Higher number = more inclusive tier. Bid Pro is a separate
+ * ADD-ON, not a rung here — it has no level and never satisfies a tier gate.
  */
-async function getActivePlanName(userId, connection) {
+const PLAN_LEVELS = {
+  free: 0,
+  trial: 0,
+  basic: 1,
+  bronze: 2,
+  silver: 3,
+  gold: 4,
+  platinum: 5,
+};
+
+// Fallback name→level used when a plan row has no level yet (pre-migration) or an
+// unknown name. Prefix-match so "Gold Monthly"/"Gold Annual" still rank as Gold.
+function planNameToLevel(name) {
+  const n = String(name || "").trim().toLowerCase();
+  for (const key of Object.keys(PLAN_LEVELS)) {
+    if (n.startsWith(key)) return PLAN_LEVELS[key];
+  }
+  return 0;
+}
+
+/**
+ * The HIGHEST tier level among a user's active subscriptions (0 if none).
+ * Employees resolve to their account owner (the plan lives on the owner's
+ * account), matching getAccessInfo. Uses the highest, not the latest, so an
+ * add-on like Bid Pro (no level) can never mask the base tier. Deliberately NOT
+ * owner-exempt and trial-agnostic — plan-gated features are governed purely by
+ * the plan. Reads plans.level; if that column isn't migrated yet, falls back to
+ * ranking by plan name so gating still works.
+ */
+async function getActivePlanLevel(userId, connection) {
   return withConnection(connection, async (conn) => {
     try {
       const effectiveId = await resolveOwnerId(userId, conn);
-      const [rows] = await conn.query(
-        `SELECT p.name
-           FROM subscriptions s
-           JOIN plans p ON p.id = s.plan_id
-          WHERE s.user_id = ? AND s.status = 'active'
-          ORDER BY s.created_at DESC
-          LIMIT 1`,
-        [effectiveId]
-      );
-      return rows.length ? String(rows[0].name || "") : null;
+      let rows;
+      try {
+        [rows] = await conn.query(
+          `SELECT p.name, p.level
+             FROM subscriptions s
+             JOIN plans p ON p.id = s.plan_id
+            WHERE s.user_id = ? AND s.status = 'active'`,
+          [effectiveId]
+        );
+      } catch (e) {
+        if (e && e.code === "ER_BAD_FIELD_ERROR") {
+          // plans.level not migrated yet — rank by name instead.
+          [rows] = await conn.query(
+            `SELECT p.name
+               FROM subscriptions s
+               JOIN plans p ON p.id = s.plan_id
+              WHERE s.user_id = ? AND s.status = 'active'`,
+            [effectiveId]
+          );
+        } else {
+          throw e;
+        }
+      }
+      let max = 0;
+      for (const r of rows) {
+        const lvl =
+          r.level !== undefined && r.level !== null
+            ? Number(r.level)
+            : planNameToLevel(r.name);
+        if (Number.isFinite(lvl) && lvl > max) max = lvl;
+      }
+      return max;
     } catch (err) {
-      logger.error("getActivePlanName error: " + err.message);
-      return null;
+      logger.error("getActivePlanLevel error: " + err.message);
+      return 0; // fail closed — callers deny when they can't confirm the tier
     }
   });
 }
 
 /**
- * Express middleware: require the caller's account to be on a specific plan tier
- * (default Gold) before allowing the request. Apply AFTER auth.authenticateToken.
+ * Express middleware: require the caller's account to be on AT LEAST a given plan
+ * tier before allowing the request. Apply AFTER auth.authenticateToken.
  *
- * This is a genuine SERVER-SIDE plan-tier gate (a 403, not just a hidden UI
- * button). It matches on the plan NAME containing one of the allowed tokens
- * (case-insensitive), so "Gold", "Gold Monthly", "Gold Annual" all pass. Unlike
- * the trial guard, it is NOT owner-exempt — the owner's own plan decides access,
- * exactly as it would for any Gold-gated feature. FAILS CLOSED: if the plan can't
- * be verified (no active sub, or a DB error), access is denied — a premium feature
- * must never leak on error.
+ * CUMULATIVE by design: `requirePlan('gold')` means "level >= Gold's level (4)",
+ * so any higher tier (Platinum = 5) passes automatically — no need to add new
+ * tiers to every call site as they launch. Accepts a plan name (resolved via
+ * PLAN_LEVELS) or a numeric level directly.
+ *
+ * This is a genuine SERVER-SIDE tier gate (a 403, not just a hidden UI button).
+ * Unlike the trial guard it is NOT owner-exempt — the owner's own plan decides
+ * access. FAILS CLOSED: if the tier can't be verified (no active sub, unknown
+ * minimum, or a DB error) access is denied — a premium feature must never leak.
  */
-function requirePlan(allowed = ["gold"]) {
-  const tokens = (Array.isArray(allowed) ? allowed : [allowed]).map((t) =>
-    String(t).trim().toLowerCase()
-  );
+function requirePlan(min = "gold") {
+  const minLevel =
+    typeof min === "number" ? min : (PLAN_LEVELS[String(min).trim().toLowerCase()] || 0);
   return async (req, res, next) => {
     const userId = req.user && req.user.id ? req.user.id : (res.locals && res.locals.id);
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
     try {
-      const planName = await getActivePlanName(userId);
-      const ok = !!planName && tokens.some((t) => planName.toLowerCase().includes(t));
-      if (!ok) {
-        return res.status(403).json({
-          success: false,
-          code: "PLAN_UPGRADE_REQUIRED",
-          message: "This feature requires the Gold plan. Please upgrade to use Schedule Templates.",
-        });
-      }
-      return next();
+      const level = await getActivePlanLevel(userId);
+      if (minLevel > 0 && level >= minLevel) return next();
+      return res.status(403).json({
+        success: false,
+        code: "PLAN_UPGRADE_REQUIRED",
+        message: "This feature requires the Gold plan. Please upgrade to use Schedule Templates.",
+      });
     } catch (err) {
       logger.error("requirePlan error: " + err.message);
       return res.status(403).json({
@@ -304,6 +351,7 @@ module.exports = {
   isSameAccount,
   canViewJob,
   denyExpiredFreeWrites,
-  getActivePlanName,
+  PLAN_LEVELS,
+  getActivePlanLevel,
   requirePlan,
 };

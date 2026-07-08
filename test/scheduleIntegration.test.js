@@ -21,7 +21,7 @@ let pass = 0, fail = 0;
 const ok = (c, m) => { c ? (pass++, console.log('  ✓ ' + m)) : (fail++, console.log('  ✗ FAIL: ' + m)); };
 const section = (t) => console.log('\n=== ' + t + ' ===');
 
-const OWNER = 100, A = 101, B = 102, NONGOLD = 103, JOB = 500;
+const OWNER = 100, A = 101, B = 102, NONGOLD = 103, PLATINUM = 104, BIDPRO = 105, JOB = 500;
 const SECRET = 'test_access_secret';
 const tokenFor = (id, role, workingId) => jwt.sign({ id, role, working_id: workingId || id }, SECRET);
 
@@ -41,7 +41,7 @@ const tokenFor = (id, role, workingId) => jwt.sign({ id, role, working_id: worki
   process.env.DB_NAME_DEV = db.dbName;
 
   const pool = require('../config/connection');
-  const { ensureScheduleTemplateTables } = require('../services/dbMigrations');
+  const { ensureScheduleTemplateTables, ensurePlanLevelColumn } = require('../services/dbMigrations');
   const cascade = require('../services/scheduleCascade');
   const engine = require('../services/scheduleEngine');
 
@@ -78,22 +78,29 @@ const tokenFor = (id, role, workingId) => jwt.sign({ id, role, working_id: worki
     ];
     for (const q of ddl) await pool.query(q);
 
-    await pool.query(`INSERT INTO plans (id,name) VALUES (4,'Gold'),(2,'Silver')`);
+    // Real prod ids/names: Gold=4, Silver=3; Platinum=5 (higher tier), Bid Pro is
+    // a separate add-on (no level). We seed with NO level column and let the real
+    // migration add + populate it, exercising ensurePlanLevelColumn.
+    await pool.query(`INSERT INTO plans (id,name) VALUES (1,'Basic'),(2,'Bronze'),(3,'Silver'),(4,'Gold'),(5,'Platinum'),(6,'Bid Pro')`);
     await pool.query(
       `INSERT INTO user (id,name,email,password,role,created_by,category) VALUES
-        (?,?,?,?,?,?,?),(?,?,?,?,?,?,?),(?,?,?,?,?,?,?),(?,?,?,?,?,?,?)`,
+        (?,?,?,?,?,?,?),(?,?,?,?,?,?,?),(?,?,?,?,?,?,?),(?,?,?,?,?,?,?),(?,?,?,?,?,?,?),(?,?,?,?,?,?,?)`,
       [
         OWNER, 'Owner GC', 'owner@test.com', 'hash', 14, null, null,
         A, 'Sub A', 'a@test.com', 'hash', 12, OWNER, 2,
         B, 'Sub B', 'b@test.com', 'hash', 12, OWNER, 2,
         NONGOLD, 'NonGold GC', 'nongold@test.com', 'hash', 14, null, null,
+        PLATINUM, 'Platinum GC', 'plat@test.com', 'hash', 14, null, null,
+        BIDPRO, 'BidPro-only GC', 'bidpro@test.com', 'hash', 14, null, null,
       ]
     );
-    await pool.query(`INSERT INTO subscriptions (user_id,plan_id,status) VALUES (?,?, 'active'),(?,?, 'active')`,
-      [OWNER, 4, NONGOLD, 2]);
+    await pool.query(
+      `INSERT INTO subscriptions (user_id,plan_id,status) VALUES (?,?, 'active'),(?,?, 'active'),(?,?, 'active'),(?,?, 'active')`,
+      [OWNER, 4, NONGOLD, 3, PLATINUM, 5, BIDPRO, 6]);
     await pool.query(`INSERT INTO job (id,name,created_by) VALUES (?,?,?)`, [JOB, 'Test Home Build', OWNER]);
 
     await ensureScheduleTemplateTables(pool);
+    await ensurePlanLevelColumn(pool); // adds + populates plans.level by name
 
     const app = express();
     app.use(express.json());
@@ -131,7 +138,22 @@ const tokenFor = (id, role, workingId) => jwt.sign({ id, role, working_id: worki
     ok(rNon.status === 403 && rNon.body.code === 'PLAN_UPGRADE_REQUIRED',
       `non-Gold apply → 403 PLAN_UPGRADE_REQUIRED (got ${rNon.status} ${rNon.body.code || ''})`);
     const rNonList = await request(app).get('/api/v1/schedule-templates').set(auth(nonGoldTok));
-    ok(rNonList.status === 403, `non-Gold browse templates → 403 (got ${rNonList.status})`);
+    ok(rNonList.status === 403, `non-Gold (Silver) browse templates → 403 (got ${rNonList.status})`);
+
+    // cumulative tier ladder — plans.level populated by the migration
+    const [lv] = await pool.query('SELECT name, level FROM plans ORDER BY id');
+    const lvl = Object.fromEntries(lv.map((p) => [p.name, p.level]));
+    ok(lvl.Basic === 1 && lvl.Bronze === 2 && lvl.Silver === 3 && lvl.Gold === 4 && lvl.Platinum === 5,
+      `plans.level ladder Basic1/Bronze2/Silver3/Gold4/Platinum5 (got ${JSON.stringify(lvl)})`);
+    ok(lvl['Bid Pro'] === null, `Bid Pro add-on has NO level (got ${lvl['Bid Pro']})`);
+    // Platinum (level 5) auto-passes the Gold (level 4) gate — the whole point.
+    const platTok = tokenFor(PLATINUM, 14);
+    const rPlat = await request(app).get('/api/v1/schedule-templates').set(auth(platTok));
+    ok(rPlat.status === 200, `Platinum (higher tier) passes the Gold gate with no code change → 200 (got ${rPlat.status})`);
+    // Bid-Pro-only (add-on, no tier level) does NOT pass.
+    const bidTok = tokenFor(BIDPRO, 14);
+    const rBid = await request(app).get('/api/v1/schedule-templates').set(auth(bidTok));
+    ok(rBid.status === 403, `Bid-Pro-only (no tier level) → 403 (got ${rBid.status})`);
 
     // ---------- T2: apply ----------
     section('T2 — Apply (Gold) creates 42 tasks + 42 stages, dates, batched notifications');

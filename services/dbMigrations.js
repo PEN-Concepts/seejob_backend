@@ -301,9 +301,41 @@ async function seedStandardNewHomeBuild(connection) {
   }
 }
 
+// Cumulative plan-tier ladder. `plans.level` gives every plan a numeric rank so
+// feature gates can say "level >= Gold" instead of matching plan names — the day
+// Platinum (a higher level) is subscribed to, it automatically clears every
+// Gold-gated check with no code change. Ladder (matches the frontend RANK map in
+// m-access.service.ts): Basic=1, Bronze=2, Silver=3, Gold=4, Platinum=5.
+// Bid Pro is a separate ADD-ON, not a rung on this ladder, so it deliberately
+// gets NO level (stays NULL) and never grants tier-gated access on its own.
+let planLevelEnsured = false;
+async function ensurePlanLevelColumn(connection) {
+  if (planLevelEnsured) return;
+  const [cols] = await connection.query("SHOW COLUMNS FROM plans LIKE 'level'");
+  if (!cols.length) {
+    await connection.query("ALTER TABLE plans ADD COLUMN level INT NULL");
+  }
+  // Populate by name for any plan not yet ranked. Only fills NULLs, so a manual
+  // override is never clobbered on rerun; unknown names (Free, Bid Pro, add-ons)
+  // keep NULL via the ELSE branch.
+  await connection.query(
+    `UPDATE plans SET level = CASE
+        WHEN name LIKE 'Basic%'    THEN 1
+        WHEN name LIKE 'Bronze%'   THEN 2
+        WHEN name LIKE 'Silver%'   THEN 3
+        WHEN name LIKE 'Gold%'     THEN 4
+        WHEN name LIKE 'Platinum%' THEN 5
+        ELSE level
+      END
+      WHERE level IS NULL`
+  );
+  planLevelEnsured = true;
+}
+
 module.exports = {
   ensureContactStatusColumn,
   ensureOwnerTypeColumns,
   ensureRemindersTable,
   ensureScheduleTemplateTables,
+  ensurePlanLevelColumn,
 };
