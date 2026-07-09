@@ -124,7 +124,7 @@ async function applyTemplateToJob(conn, opts) {
 
   // 2. Load the template.
   const [tItems] = await conn.query(
-    `SELECT id, name, default_duration_days, depends_on_all, sort_order
+    `SELECT id, name, default_duration_days, depends_on_all, is_inspection, sort_order
        FROM schedule_template_items WHERE template_id = ? ORDER BY sort_order ASC, id ASC`,
     [templateId]
   );
@@ -162,9 +162,9 @@ async function applyTemplateToJob(conn, opts) {
     const assignee = assignMap.has(ti.id) ? assignMap.get(ti.id) : null;
     const [r] = await conn.query(
       `INSERT INTO job_schedule_items
-         (schedule_id, name, duration_days, sort_order, assignee_user_id, template_item_id, depends_on_all)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [scheduleId, ti.name, dur, ti.sort_order, assignee, ti.id, ti.depends_on_all ? 1 : 0]
+         (schedule_id, name, duration_days, sort_order, assignee_user_id, template_item_id, depends_on_all, is_inspection)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [scheduleId, ti.name, dur, ti.sort_order, assignee, ti.id, ti.depends_on_all ? 1 : 0, ti.is_inspection ? 1 : 0]
     );
     newIdByTemplateItem.set(ti.id, r.insertId);
   }

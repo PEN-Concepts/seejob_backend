@@ -272,6 +272,36 @@ const tokenFor = (id, role, workingId) => jwt.sign({ id, role, working_id: worki
     const [[t2]] = await pool.query('SELECT start_date FROM tasks WHERE id=?', [it2.task_id]);
     ok(String(t2.start_date).slice(0, 10) !== '2026-08-03', `dragged task was NOT moved to the rejected date (got ${String(t2.start_date).slice(0, 10)})`);
 
+    // ---------- T7: is_inspection flags, provenance (adopt), reset ----------
+    section('T7 — inspection flags + provenance (adopt/clone) + reset-to-starter');
+    const [insp] = await pool.query('SELECT name, is_inspection FROM schedule_template_items WHERE template_id=? AND is_inspection=1 ORDER BY sort_order', [tpl.id]);
+    ok(insp.length === 5, `5 seed items flagged is_inspection (got ${insp.length})`);
+    const inspNames = insp.map((i) => i.name);
+    ok(!inspNames.some((n) => /Inspection/i.test(n)), `inspection base names have the word "Inspection" removed (${inspNames.join(' | ')})`);
+    const [[framing]] = await pool.query("SELECT is_inspection FROM schedule_template_items WHERE template_id=? AND name='Framing' LIMIT 1", [tpl.id]);
+    ok(Number(framing.is_inspection) === 0, 'a normal trade (Framing) is NOT flagged inspection');
+
+    const rAdopt1 = await request(app).post(`/api/v1/schedule-templates/${tpl.id}/adopt`).set(auth(goldTok)).send({});
+    ok(rAdopt1.status === 201 && rAdopt1.body.adopted === true, `first adopt auto-clones the seed → 201 adopted:true (got ${rAdopt1.status} adopted=${rAdopt1.body.adopted})`);
+    const personalId = rAdopt1.body.data.template.id;
+    ok(Number(rAdopt1.body.data.template.cloned_from_template_id) === tpl.id, `personal copy records provenance cloned_from=${tpl.id} (got ${rAdopt1.body.data.template.cloned_from_template_id})`);
+    ok(rAdopt1.body.data.items.length === 42 && rAdopt1.body.data.items.filter((i) => i.is_inspection === 1).length === 5, `adopted copy has 42 items incl. 5 inspection flags`);
+    const rAdopt2 = await request(app).post(`/api/v1/schedule-templates/${tpl.id}/adopt`).set(auth(goldTok)).send({});
+    ok(rAdopt2.status === 200 && rAdopt2.body.adopted === false && rAdopt2.body.data.template.id === personalId,
+      `second adopt REOPENS the same copy, no duplicate (got ${rAdopt2.status} adopted=${rAdopt2.body.adopted} id=${rAdopt2.body.data.template.id} vs ${personalId})`);
+
+    const delItem = rAdopt1.body.data.items[0].id;
+    await request(app).delete(`/api/v1/schedule-templates/${personalId}/items/${delItem}`).set(auth(goldTok));
+    const rAfterDel = await request(app).get(`/api/v1/schedule-templates/${personalId}`).set(auth(goldTok));
+    ok(rAfterDel.body.data.items.length === 41, `after deleting one item the copy has 41 (got ${rAfterDel.body.data.items.length})`);
+    const rReset = await request(app).post(`/api/v1/schedule-templates/${personalId}/reset`).set(auth(goldTok)).send({});
+    ok(rReset.status === 200 && rReset.body.data.items.length === 42, `reset-to-starter restores 42 items (got ${rReset.status}, ${rReset.body.data && rReset.body.data.items.length})`);
+    ok(rReset.body.data.items.filter((i) => i.is_inspection === 1).length === 5, 'reset restores the 5 inspection flags');
+
+    const [[jsInsp]] = await pool.query(
+      "SELECT COUNT(*) c FROM job_schedule_items i JOIN job_schedules s ON s.id=i.schedule_id WHERE s.job_id=? AND s.status='active' AND i.is_inspection=1", [JOB]);
+    ok(jsInsp.c === 5, `apply propagates inspection flags to the job schedule (got ${jsInsp.c})`);
+
     console.log(`\n================  ${pass} passed, ${fail} failed  ================`);
   } catch (e) {
     console.error('\nFATAL', e);

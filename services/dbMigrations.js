@@ -209,8 +209,49 @@ async function ensureScheduleTemplateTables(connection) {
     ) ENGINE=InnoDB
   `);
 
+  // ---- UX-overhaul column adds (idempotent) ----
+  //  is_inspection: a real data flag (not a naming convention) so inspection items
+  //    render with their own badge/border.
+  //  cloned_from_template_id: provenance so "Use See Job Run's template" reopens the
+  //    account's existing personal copy instead of duplicating, and powers the
+  //    "Based on …" caption + "Reset to starter".
+  await ensureScheduleColumn(connection, 'schedule_template_items', 'is_inspection', 'TINYINT NOT NULL DEFAULT 0');
+  await ensureScheduleColumn(connection, 'job_schedule_items', 'is_inspection', 'TINYINT NOT NULL DEFAULT 0');
+  await ensureScheduleColumn(connection, 'schedule_templates', 'cloned_from_template_id', 'INT NULL');
+
   await seedStandardNewHomeBuild(connection);
+  await markSeedInspections(connection);
   scheduleTablesEnsured = true;
+}
+
+async function ensureScheduleColumn(connection, table, column, definition) {
+  const [cols] = await connection.query(`SHOW COLUMNS FROM ${table} LIKE '${column}'`);
+  if (!cols.length) {
+    await connection.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+// Flag + rename the seed's inspection items on an ALREADY-seeded database (prod),
+// where the seed rows still carry the old "Inspection …" names. Idempotent: matches
+// on the OLD name, so it renames once and is a no-op forever after (and a no-op on a
+// fresh DB, which is seeded with the new names + flags directly). Base names have
+// "Inspection" removed since it's now shown as a badge.
+async function markSeedInspections(connection) {
+  const [[seed]] = await connection.query('SELECT id FROM schedule_templates WHERE is_seed = 1 LIMIT 1');
+  if (!seed) return;
+  const RENAMES = [
+    ['Inspection Slab, Plumbing, Ufa ground', 'Slab, Plumbing & UFER Ground'],
+    ['Roof Sheeting Inspection', 'Roof Sheeting'],
+    ['Inspection Rough Ins', 'Rough-Ins'],
+    ['Inspection Insulation', 'Insulation'],
+    ['Inspection Final', 'Final Walkthrough'],
+  ];
+  for (const [oldName, newName] of RENAMES) {
+    await connection.query(
+      'UPDATE schedule_template_items SET is_inspection = 1, name = ? WHERE template_id = ? AND name = ?',
+      [newName, seed.id, oldName]
+    );
+  }
 }
 
 // The default/example template. Idempotent: only inserts if no is_seed row exists.
@@ -233,23 +274,23 @@ async function seedStandardNewHomeBuild(connection) {
     { name: 'Foundation Set up', deps: [3] },
     { name: 'Under Slab Plumbing', deps: [4] },
     { name: 'Electrical Sweeps', deps: [4] },
-    { name: 'Inspection Slab, Plumbing, Ufa ground', deps: [4, 5, 6] },
+    { name: 'Slab, Plumbing & UFER Ground', deps: [4, 5, 6], insp: true },
     { name: 'Foundation Pour', deps: [7] },
     { name: 'Utilities', deps: [7] },
     { name: 'Lumber Drop & Steel', deps: [7] },
     { name: 'Framing', deps: [9] },
     { name: 'Trusses & Sheeting', deps: [10] },
     { name: 'Ext. Windows & Doors', deps: [12] },
-    { name: 'Roof Sheeting Inspection', deps: [12] },
+    { name: 'Roof Sheeting', deps: [12], insp: true },
     { name: 'Load Roof', deps: [14] },
     { name: 'Roofing', deps: [15] },
     { name: 'Rough Electric', deps: [14] },
     { name: 'Rough HVAC', deps: [14] },
     { name: 'Rough Plumbing', deps: [14] },
-    { name: 'Inspection Rough Ins', deps: [17, 18, 19] },
+    { name: 'Rough-Ins', deps: [17, 18, 19], insp: true },
     { name: 'Siding / Stucco', deps: [20] },
     { name: 'Insulation', deps: [21] },
-    { name: 'Inspection Insulation', deps: [22] },
+    { name: 'Insulation', deps: [22], insp: true },
     { name: 'Drywall', deps: [23] },
     { name: 'Tape & Texture', deps: [24] },
     { name: 'Driveway / sidewalk poured', deps: [9, 20] },
@@ -268,7 +309,7 @@ async function seedStandardNewHomeBuild(connection) {
     { name: 'Finish Plumbing', deps: [30, 31] },
     { name: 'Finish Electrical', deps: [31] },
     { name: 'Finish HVAC', deps: [28] },
-    { name: 'Inspection Final', deps: [], all: true },
+    { name: 'Final Walkthrough', deps: [], all: true, insp: true },
   ];
 
   const [tpl] = await connection.query(
@@ -282,9 +323,9 @@ async function seedStandardNewHomeBuild(connection) {
   for (let i = 0; i < ITEMS.length; i++) {
     const [r] = await connection.query(
       `INSERT INTO schedule_template_items
-         (template_id, name, default_duration_days, depends_on_all, sort_order)
-       VALUES (?, ?, NULL, ?, ?)`,
-      [templateId, ITEMS[i].name, ITEMS[i].all ? 1 : 0, i + 1]
+         (template_id, name, default_duration_days, depends_on_all, is_inspection, sort_order)
+       VALUES (?, ?, NULL, ?, ?, ?)`,
+      [templateId, ITEMS[i].name, ITEMS[i].all ? 1 : 0, ITEMS[i].insp ? 1 : 0, i + 1]
     );
     idByDisplay[i + 1] = r.insertId;
   }

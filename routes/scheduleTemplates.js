@@ -69,6 +69,43 @@ async function loadTemplateFull(connection, id) {
   return { template, items, deps };
 }
 
+// Deep-copy a source template's items + dependency edges into an existing
+// destination template (preserving durations, depends_on_all, is_inspection, order,
+// and remapping dep edges to the new stable ids). Used by clone / adopt / reset.
+async function copyItemsAndDeps(connection, srcTemplateId, destTemplateId) {
+  const [items] = await connection.query(
+    'SELECT * FROM schedule_template_items WHERE template_id = ? ORDER BY sort_order ASC, id ASC',
+    [srcTemplateId]
+  );
+  const idMap = new Map();
+  for (const it of items) {
+    const [ir] = await connection.query(
+      `INSERT INTO schedule_template_items
+         (template_id, name, default_duration_days, depends_on_all, is_inspection, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [destTemplateId, it.name, it.default_duration_days, it.depends_on_all ? 1 : 0, it.is_inspection ? 1 : 0, it.sort_order]
+    );
+    idMap.set(it.id, ir.insertId);
+  }
+  const itemIds = items.map((i) => i.id);
+  if (itemIds.length) {
+    const [deps] = await connection.query(
+      'SELECT item_id, depends_on_item_id FROM schedule_template_deps WHERE item_id IN (?)',
+      [itemIds]
+    );
+    for (const d of deps) {
+      const ni = idMap.get(d.item_id);
+      const nd = idMap.get(d.depends_on_item_id);
+      if (ni && nd) {
+        await connection.query(
+          'INSERT IGNORE INTO schedule_template_deps (item_id, depends_on_item_id) VALUES (?, ?)',
+          [ni, nd]
+        );
+      }
+    }
+  }
+}
+
 // GET /schedule-templates — list account's templates + the shared seed.
 router.get('/', async (req, res) => {
   const accountId = accountOf(req);
@@ -76,7 +113,8 @@ router.get('/', async (req, res) => {
   try {
     connection = await pool.getConnection();
     const [rows] = await connection.query(
-      `SELECT t.id, t.name, t.is_seed, t.status, t.account_owner_id, t.created_at, t.updated_at,
+      `SELECT t.id, t.name, t.is_seed, t.status, t.account_owner_id, t.cloned_from_template_id,
+              t.created_at, t.updated_at,
               (SELECT COUNT(*) FROM schedule_template_items i WHERE i.template_id = t.id) AS item_count
          FROM schedule_templates t
         WHERE t.status = 'active' AND (t.account_owner_id = ? OR t.account_owner_id IS NULL)
@@ -165,7 +203,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // POST /schedule-templates/:id/clone — deep-copy any VISIBLE template into a new
-// account-owned one ("Save as New" — also how you customize the shared seed).
+// account-owned one, recording provenance (cloned_from_template_id).
 router.post('/:id/clone', async (req, res) => {
   const accountId = accountOf(req);
   const id = Number(req.params.id);
@@ -174,52 +212,97 @@ router.post('/:id/clone', async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
-    await connection.beginTransaction();
-
-    const src = await loadTemplateFull(connection, id);
-    if (!src || src.template.status !== 'active') {
-      await connection.rollback();
-      return res.status(404).json({ success: false, message: 'Template not found' });
-    }
-    const owner = src.template.account_owner_id;
-    if (owner != null && Number(owner) !== Number(accountId)) {
-      await connection.rollback();
+    const [[src]] = await connection.query('SELECT id, account_owner_id, status FROM schedule_templates WHERE id = ? LIMIT 1', [id]);
+    if (!src || src.status !== 'active') return res.status(404).json({ success: false, message: 'Template not found' });
+    if (src.account_owner_id != null && Number(src.account_owner_id) !== Number(accountId)) {
       return res.status(403).json({ success: false, message: 'Not your template' });
     }
-
+    await connection.beginTransaction();
     const [r] = await connection.query(
-      `INSERT INTO schedule_templates (name, account_owner_id, created_by, is_seed, status)
-       VALUES (?, ?, ?, 0, 'active')`,
-      [name, accountId, req.user.id]
+      `INSERT INTO schedule_templates (name, account_owner_id, created_by, is_seed, status, cloned_from_template_id)
+       VALUES (?, ?, ?, 0, 'active', ?)`,
+      [name, accountId, req.user.id, id]
     );
-    const newTemplateId = r.insertId;
-
-    const idMap = new Map();
-    for (const it of src.items) {
-      const [ir] = await connection.query(
-        `INSERT INTO schedule_template_items
-           (template_id, name, default_duration_days, depends_on_all, sort_order)
-         VALUES (?, ?, ?, ?, ?)`,
-        [newTemplateId, it.name, it.default_duration_days, it.depends_on_all ? 1 : 0, it.sort_order]
-      );
-      idMap.set(it.id, ir.insertId);
-    }
-    for (const d of src.deps) {
-      const ni = idMap.get(d.item_id);
-      const nd = idMap.get(d.depends_on_item_id);
-      if (ni && nd) {
-        await connection.query(
-          'INSERT IGNORE INTO schedule_template_deps (item_id, depends_on_item_id) VALUES (?, ?)',
-          [ni, nd]
-        );
-      }
-    }
+    await copyItemsAndDeps(connection, id, r.insertId);
     await connection.commit();
-    const full = await loadTemplateFull(connection, newTemplateId);
+    const full = await loadTemplateFull(connection, r.insertId);
     res.status(201).json({ success: true, data: full });
   } catch (err) {
     if (connection) { try { await connection.rollback(); } catch (_) {} }
     logger.error('[schedule-templates] clone: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST /schedule-templates/:id/adopt — "Use See Job Run's template". Returns the
+// account's EXISTING personal copy of this source if one exists (no duplicate),
+// otherwise auto-clones it now. `data.adopted` = true when a new copy was created.
+router.post('/:id/adopt', async (req, res) => {
+  const accountId = accountOf(req);
+  const id = Number(req.params.id);
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [[src]] = await connection.query('SELECT id, name, account_owner_id, status FROM schedule_templates WHERE id = ? LIMIT 1', [id]);
+    if (!src || src.status !== 'active') return res.status(404).json({ success: false, message: 'Template not found' });
+    if (src.account_owner_id != null && Number(src.account_owner_id) !== Number(accountId)) {
+      return res.status(403).json({ success: false, message: 'Not your template' });
+    }
+    // Reopen an existing personal copy of this source, if any.
+    const [[existing]] = await connection.query(
+      "SELECT id FROM schedule_templates WHERE account_owner_id = ? AND cloned_from_template_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1",
+      [accountId, id]
+    );
+    if (existing) {
+      const full = await loadTemplateFull(connection, existing.id);
+      return res.json({ success: true, data: full, adopted: false });
+    }
+    // Otherwise auto-clone silently (no user-facing "save as new" step).
+    await connection.beginTransaction();
+    const [r] = await connection.query(
+      `INSERT INTO schedule_templates (name, account_owner_id, created_by, is_seed, status, cloned_from_template_id)
+       VALUES (?, ?, ?, 0, 'active', ?)`,
+      [src.name, accountId, req.user.id, id]
+    );
+    await copyItemsAndDeps(connection, id, r.insertId);
+    await connection.commit();
+    const full = await loadTemplateFull(connection, r.insertId);
+    res.status(201).json({ success: true, data: full, adopted: true });
+  } catch (err) {
+    if (connection) { try { await connection.rollback(); } catch (_) {} }
+    logger.error('[schedule-templates] adopt: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST /schedule-templates/:id/reset — "Reset to starter": wipe an owned template's
+// items/deps and re-copy them from whatever it was cloned from. 400 if it has no
+// clone source (a blank-started template is cleared by the client instead).
+router.post('/:id/reset', async (req, res) => {
+  const accountId = accountOf(req);
+  const id = Number(req.params.id);
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const owned = await loadOwnedTemplate(connection, id, accountId);
+    if (owned.error) return res.status(owned.error).json({ success: false, message: owned.error === 403 ? 'Not your template' : 'Template not found' });
+    const srcId = owned.template.cloned_from_template_id;
+    if (!srcId) return res.status(400).json({ success: false, code: 'NO_SOURCE', message: 'This template has no starter to reset to.' });
+
+    await connection.beginTransaction();
+    // Deleting items cascades their dep edges (FK ON DELETE CASCADE).
+    await connection.query('DELETE FROM schedule_template_items WHERE template_id = ?', [id]);
+    await copyItemsAndDeps(connection, srcId, id);
+    await connection.commit();
+    const full = await loadTemplateFull(connection, id);
+    res.json({ success: true, data: full });
+  } catch (err) {
+    if (connection) { try { await connection.rollback(); } catch (_) {} }
+    logger.error('[schedule-templates] reset: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     if (connection) connection.release();
@@ -261,14 +344,15 @@ router.post('/:id/items', async (req, res) => {
     if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
     const dur = req.body.default_duration_days;
     const dependsOnAll = req.body.depends_on_all ? 1 : 0;
+    const isInspection = req.body.is_inspection ? 1 : 0;
     const [[maxRow]] = await connection.query(
       'SELECT COALESCE(MAX(sort_order), 0) AS m FROM schedule_template_items WHERE template_id = ?',
       [id]
     );
     const [r] = await connection.query(
-      `INSERT INTO schedule_template_items (template_id, name, default_duration_days, depends_on_all, sort_order)
-       VALUES (?, ?, ?, ?, ?)`,
-      [id, name, (dur === '' || dur == null) ? null : Number(dur), dependsOnAll, Number(maxRow.m) + 1]
+      `INSERT INTO schedule_template_items (template_id, name, default_duration_days, depends_on_all, is_inspection, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [id, name, (dur === '' || dur == null) ? null : Number(dur), dependsOnAll, isInspection, Number(maxRow.m) + 1]
     );
     const [[item]] = await connection.query('SELECT * FROM schedule_template_items WHERE id = ? LIMIT 1', [r.insertId]);
     res.status(201).json({ success: true, data: item });
@@ -334,6 +418,7 @@ router.put('/:id/items/:itemId', async (req, res) => {
       vals.push((d === '' || d == null) ? null : Number(d));
     }
     if ('depends_on_all' in req.body) { sets.push('depends_on_all = ?'); vals.push(req.body.depends_on_all ? 1 : 0); }
+    if ('is_inspection' in req.body) { sets.push('is_inspection = ?'); vals.push(req.body.is_inspection ? 1 : 0); }
     if (!sets.length) return res.status(400).json({ success: false, message: 'No fields to update' });
     vals.push(itemId, id);
     await connection.query(
