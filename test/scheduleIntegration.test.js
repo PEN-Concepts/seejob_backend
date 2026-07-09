@@ -238,6 +238,40 @@ const tokenFor = (id, role, workingId) => jwt.sign({ id, role, working_id: worki
       .send({ job_id: JOB, owner_type: 'job', start_date: '2026-07-08', assignments: [] });
     ok(rApplyCycle.status === 409 && rApplyCycle.body.code === 'CYCLE', `apply of cyclic template → 409 CYCLE, not silently computed (got ${rApplyCycle.status} ${rApplyCycle.body.code || ''})`);
 
+    // ---------- T6: dependency BUSTS rejected at write-time (behavior reversal) ----------
+    section('T6 — dependency busts are REJECTED, not flagged (reject-at-write-time)');
+    const gs = await request(app).get(`/api/v1/job-schedules/${JOB}?owner_type=job`).set(auth(goldTok));
+    const sid6 = gs.body.data.schedule.id;
+    const bo = Object.fromEntries(gs.body.data.items.map((i) => [i.sort_order, i]));
+    const it1 = bo[1]; // Temp. Toilet (no deps)
+    const it2 = bo[2]; // Stake out building (depends on Temp. Toilet)
+
+    // (a) pin item 2 before its dependency finishes → 409, nothing saved
+    const rEarly = await request(app).put(`/api/v1/job-schedules/${sid6}/items/${it2.id}`).set(auth(goldTok)).send({ pinned_start_date: '2026-08-03' });
+    ok(rEarly.status === 409 && rEarly.body.code === 'SCHEDULE_CONFLICT', `pin item 2 too early → 409 SCHEDULE_CONFLICT (got ${rEarly.status} ${rEarly.body.code || ''})`);
+    ok(/Stake out/i.test(rEarly.body.message || '') && /Temp\. Toilet/i.test(rEarly.body.message || ''),
+      `message names the item + its dependency: "${rEarly.body.message}"`);
+    const [[chk2a]] = await pool.query('SELECT pinned_start_date FROM job_schedule_items WHERE id=?', [it2.id]);
+    ok(chk2a.pinned_start_date === null, 'rejected pin was NOT persisted (write rolled back)');
+
+    // (b) a valid, later pin is accepted (control)
+    const rLate = await request(app).put(`/api/v1/job-schedules/${sid6}/items/${it2.id}`).set(auth(goldTok)).send({ pinned_start_date: '2026-09-01' });
+    ok(rLate.status === 200, `a later (valid) pin is accepted → 200 (got ${rLate.status})`);
+
+    // (c) DOWNSTREAM bust: grow item 1's duration so it ends after item 2's pin → reject naming item 2
+    const rDown = await request(app).put(`/api/v1/job-schedules/${sid6}/items/${it1.id}`).set(auth(goldTok)).send({ duration_days: 40 });
+    ok(rDown.status === 409 && rDown.body.code === 'SCHEDULE_CONFLICT', `duration edit causing a DOWNSTREAM bust → 409 (got ${rDown.status})`);
+    ok(/Stake out/i.test(rDown.body.message || ''), `downstream rejection names the affected item (Stake out), not the edited one: "${rDown.body.message}"`);
+    const [[chk1]] = await pool.query('SELECT duration_days FROM job_schedule_items WHERE id=?', [it1.id]);
+    ok(Number(chk1.duration_days) === 1, `edited item's duration NOT changed (rejected; still 1, got ${chk1.duration_days})`);
+
+    // (d) calendar-drag path (PUT /tasks/update) too early → 409, task unchanged
+    const rDragBust = await request(app).put(`/api/v1/tasks/update/${it2.task_id}`).set(auth(goldTok))
+      .send({ start_date: '2026-08-03', duration_days: 1, user_id: it2.assignee_user_id, task_name: it2.name });
+    ok(rDragBust.status === 409 && rDragBust.body.code === 'SCHEDULE_CONFLICT', `calendar-drag too early → 409 (got ${rDragBust.status} ${rDragBust.body.code || ''})`);
+    const [[t2]] = await pool.query('SELECT start_date FROM tasks WHERE id=?', [it2.task_id]);
+    ok(String(t2.start_date).slice(0, 10) !== '2026-08-03', `dragged task was NOT moved to the rejected date (got ${String(t2.start_date).slice(0, 10)})`);
+
     console.log(`\n================  ${pass} passed, ${fail} failed  ================`);
   } catch (e) {
     console.error('\nFATAL', e);

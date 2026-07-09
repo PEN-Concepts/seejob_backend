@@ -205,13 +205,32 @@ function computeSchedule({ items, deps, startDate, skipSaturday, skipSunday }) {
       }
     }
     if (worst) {
+      const itemName = (it && it.name) || `item #${id}`;
       const depName = worst.name || `item #${worst.id}`;
-      const reason = `Starts ${r.start} but depends on "${depName}" which ends ${worst.end}`;
-      conflicts.push({ itemId: id, reason });
+      const reason =
+        `${itemName} can't start ${fmtHuman(r.start)} — it depends on "${depName}", ` +
+        `which doesn't finish until ${fmtHuman(worst.end)}.`;
+      conflicts.push({
+        itemId: id,
+        itemName,
+        dependencyId: worst.id,
+        dependencyName: depName,
+        dependencyEnd: worst.end,
+        attemptedStart: r.start,
+        reason,
+      });
     }
   }
 
   return { ok: true, results, conflicts };
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+// 'YYYY-MM-DD' -> 'Jul 8, 2026' for human-readable rejection messages.
+function fmtHuman(ymd) {
+  const d = parseYMD(ymd);
+  if (!d) return String(ymd || '');
+  return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
 }
 
 module.exports = {

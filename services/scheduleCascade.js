@@ -269,34 +269,41 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
     skipSunday: !!schedule.skip_sunday,
   });
 
+  // REJECT-AT-WRITE-TIME: a cycle or a dependency "bust" (an item starting before
+  // a dependency finishes — anywhere in the resulting graph, including downstream)
+  // aborts the whole edit. We throw BEFORE writing anything, so the caller rolls
+  // back the transaction and nothing is partially applied — the same treatment
+  // cycles already got at the door. No has_conflict flag is ever persisted now.
   if (!comp.ok) {
-    // Dependency cycle — flag the offenders, touch no dates.
-    for (const id of comp.cycle) {
-      await conn.query(
-        'UPDATE job_schedule_items SET has_conflict = 1, conflict_reason = ? WHERE id = ?',
-        ['Dependency cycle detected', id]
-      );
-    }
-    return [];
+    const err = new Error('This change would create a scheduling loop (an item would end up depending on itself).');
+    err.code = 'CYCLE';
+    err.cycle = comp.cycle;
+    throw err;
+  }
+  if (comp.conflicts.length) {
+    const err = new Error(comp.conflicts[0].reason);
+    err.code = 'SCHEDULE_CONFLICT';
+    err.bust = true;
+    err.conflicts = comp.conflicts;
+    throw err;
   }
 
-  const conflictSet = new Map(comp.conflicts.map((c) => [c.itemId, c.reason]));
   const jobName = await getJobName(conn, schedule.job_id, schedule.owner_type);
   const moved = [];
 
   for (const it of items) {
     const r = comp.results[it.id];
     if (!r) continue;
-    const conflictReason = conflictSet.get(it.id) || null;
     const oldStart = toDateOnly(it.computed_start_date);
     const oldEnd = toDateOnly(it.computed_end_date);
     const dateChanged = oldStart !== r.start || oldEnd !== r.end;
 
+    // Conflict-free by the time we reach here, so has_conflict is always cleared.
     await conn.query(
       `UPDATE job_schedule_items
-          SET computed_start_date = ?, computed_end_date = ?, has_conflict = ?, conflict_reason = ?
+          SET computed_start_date = ?, computed_end_date = ?, has_conflict = 0, conflict_reason = NULL
         WHERE id = ?`,
-      [r.start, r.end, conflictReason ? 1 : 0, conflictReason, it.id]
+      [r.start, r.end, it.id]
     );
 
     if (dateChanged && it.task_id) {

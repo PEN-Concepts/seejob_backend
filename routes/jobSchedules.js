@@ -40,6 +40,22 @@ function dispatchAll(payloads) {
   }
 }
 
+// If an edit was rejected by the schedule engine (a dependency "bust" or a cycle),
+// respond 409 with the specific, human-readable reason. Returns true when handled.
+// The caller must have already rolled back the transaction. Everything else falls
+// through to the generic 500.
+function respondScheduleReject(res, err) {
+  if (err && (err.bust || err.code === 'SCHEDULE_CONFLICT')) {
+    res.status(409).json({ success: false, code: 'SCHEDULE_CONFLICT', message: err.message, conflicts: err.conflicts || [] });
+    return true;
+  }
+  if (err && (err.cycle || err.code === 'CYCLE')) {
+    res.status(409).json({ success: false, code: 'CYCLE', message: err.message, cycle: err.cycle || [] });
+    return true;
+  }
+  return false;
+}
+
 async function loadScheduleRow(connection, sid) {
   const [[s]] = await connection.query('SELECT * FROM job_schedules WHERE id = ? LIMIT 1', [sid]);
   return s || null;
@@ -217,6 +233,7 @@ router.put('/:sid/items/:iid', async (req, res) => {
     res.json({ success: true, notified: allPayloads.length });
   } catch (err) {
     if (connection) { try { await connection.rollback(); } catch (_) {} }
+    if (respondScheduleReject(res, err)) return;
     logger.error('[job-schedules] edit item: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
@@ -261,6 +278,7 @@ router.delete('/:sid/items/:iid', async (req, res) => {
     res.json({ success: true, notified: payloads.length });
   } catch (err) {
     if (connection) { try { await connection.rollback(); } catch (_) {} }
+    if (respondScheduleReject(res, err)) return;
     logger.error('[job-schedules] delete item: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
@@ -313,6 +331,7 @@ router.post('/:sid/deps', async (req, res) => {
     res.status(201).json({ success: true, notified: payloads.length });
   } catch (err) {
     if (connection) { try { await connection.rollback(); } catch (_) {} }
+    if (respondScheduleReject(res, err)) return;
     logger.error('[job-schedules] add dep: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
@@ -335,6 +354,7 @@ router.delete('/:sid/deps/:depId', async (req, res) => {
     res.json({ success: true, notified: payloads.length });
   } catch (err) {
     if (connection) { try { await connection.rollback(); } catch (_) {} }
+    if (respondScheduleReject(res, err)) return;
     logger.error('[job-schedules] delete dep: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {

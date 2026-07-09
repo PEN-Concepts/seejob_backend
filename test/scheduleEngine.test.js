@@ -108,17 +108,29 @@ const cycComp = engine.computeSchedule({ items: cyItems, deps: cyDeps, startDate
 ok(cycComp.ok === false && (cycComp.cycle || []).length > 0, 'computeSchedule returns ok=false + cycle, no dates');
 ok(engine.detectCycle(cyItems, cyDeps.slice(0, 2)).length === 0, 'acyclic graph → no cycle');
 
-console.log('Test: bust detection on a pinned date that violates a dependency');
+// A pinned date earlier than a dependency's finish is a "bust". The engine reports
+// it as a conflict with a specific, human-readable reason; the cascade/route layer
+// then REJECTS the write (409) rather than saving it (reject-at-write-time — the
+// old "flag-and-keep" behavior was reversed). This test covers the DETECTION that
+// drives that rejection; scheduleIntegration.test.js covers the actual 409 + no-op.
+console.log('Test: dependency bust is detected with a specific reason (drives write-time rejection)');
 const bItems = [
   { id: 1, name: 'Foundation', duration_days: 5 },
   { id: 2, name: 'Framing', duration_days: 3, pinned_start_date: '2026-07-09' },
 ];
 const bDeps = [{ item_id: 2, depends_on_item_id: 1 }];
 const bComp = engine.computeSchedule({ items: bItems, deps: bDeps, startDate: '2026-07-08', skipSaturday: false, skipSunday: true });
-ok(bComp.ok === true, 'bust case still computes (flag-and-keep, not rejected)');
-ok(bComp.results[2].start === '2026-07-09', 'pinned start is honored as-is (not auto-corrected)');
-ok(bComp.conflicts.some((c) => c.itemId === 2), 'item 2 flagged as a conflict');
-ok(/depends on/.test((bComp.conflicts.find((c) => c.itemId === 2) || {}).reason || ''), 'conflict has a human-readable reason');
+ok(bComp.conflicts.length === 1 && bComp.conflicts[0].itemId === 2, 'the too-early pinned item (Framing) is reported as a conflict');
+const bc = bComp.conflicts.find((c) => c.itemId === 2) || {};
+ok(bc.dependencyName === 'Foundation', 'conflict identifies the specific violated dependency (Foundation)');
+ok(/Framing can't start/.test(bc.reason) && /Foundation/.test(bc.reason) && /doesn't finish until/.test(bc.reason),
+  `reason names the item, the dependency and the dates: "${bc.reason}"`);
+// A pinned date that is LATER than required is fine — no conflict (only delays are allowed).
+const okComp = engine.computeSchedule({
+  items: [{ id: 1, name: 'Foundation', duration_days: 5 }, { id: 2, name: 'Framing', duration_days: 3, pinned_start_date: '2026-08-01' }],
+  deps: [{ item_id: 2, depends_on_item_id: 1 }], startDate: '2026-07-08', skipSaturday: false, skipSunday: true,
+});
+ok(okComp.conflicts.length === 0, 'a pinned date later than required is NOT a conflict (delays are allowed)');
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -975,6 +975,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     // recompute. Wrapped in a SAVEPOINT so a schedule glitch can never break a
     // normal task edit; notifications are collected and dispatched after commit.
     let scheduleNotifPayloads = [];
+    let scheduleReject = null;
     try {
       const [[schedItem]] = await connection.query(
         "SELECT id, schedule_id FROM job_schedule_items WHERE task_id = ? LIMIT 1",
@@ -1003,13 +1004,31 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
           scheduleNotifPayloads =
             (await recomputeSchedule(connection, schedItem.schedule_id, { changedItemId: schedItem.id })) || [];
         } catch (cascadeErr) {
-          await connection.query("ROLLBACK TO SAVEPOINT sched_cascade");
-          scheduleNotifPayloads = [];
-          logger.error("[schedule] cascade hook: " + cascadeErr.message);
+          if (cascadeErr.bust || cascadeErr.code === "SCHEDULE_CONFLICT" || cascadeErr.cycle || cascadeErr.code === "CYCLE") {
+            scheduleReject = cascadeErr; // reject the whole task edit (calendar snaps back)
+          } else {
+            await connection.query("ROLLBACK TO SAVEPOINT sched_cascade");
+            scheduleNotifPayloads = [];
+            logger.error("[schedule] cascade hook: " + cascadeErr.message);
+          }
         }
       }
     } catch (hookErr) {
       logger.error("[schedule] cascade hook lookup: " + hookErr.message);
+    }
+
+    // A dependency bust / cycle from the cascade rejects the entire task edit:
+    // roll everything back (task change included) and return 409 so the Master
+    // Calendar reverts the drag and shows the specific reason.
+    if (scheduleReject) {
+      await connection.rollback();
+      const isCycle = scheduleReject.cycle || scheduleReject.code === "CYCLE";
+      return res.status(409).json({
+        message: scheduleReject.message,
+        code: isCycle ? "CYCLE" : "SCHEDULE_CONFLICT",
+        conflicts: scheduleReject.conflicts || [],
+        cycle: scheduleReject.cycle || [],
+      });
     }
 
     // -------------------------------------------------
