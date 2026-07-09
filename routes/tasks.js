@@ -532,7 +532,8 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
               t.team_color,
               t.team_leader,
               tl.name AS team_leader_name,
-              uc.name as created_by_name
+              uc.name as created_by_name,
+              (SELECT jsi.id FROM job_schedule_items jsi WHERE jsi.task_id = jt.id LIMIT 1) AS schedule_item_id
        FROM tasks jt
        LEFT JOIN user u ON u.id = jt.user_id
        LEFT JOIN job j ON j.id = jt.job_id
