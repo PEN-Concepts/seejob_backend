@@ -61,7 +61,11 @@ const stageSchema = Joi.object({
 });
 
 const inviteSchema = Joi.object({
-  client_name: Joi.string().required(),
+  // Split name (First/Last). `client_name` is optional now — the combined name is
+  // rebuilt from first/last, falling back to any client_name still sent.
+  first_name: Joi.string().allow(null, ""),
+  last_name: Joi.string().allow(null, ""),
+  client_name: Joi.string().allow(null, ""),
   client_email: Joi.string().email().required(),
   user_type: Joi.string().valid("client", "subcontractor").required(),
   client_mobile: Joi.string().allow(null, ""),
@@ -71,6 +75,12 @@ const inviteSchema = Joi.object({
   subcategory: Joi.number().integer().allow(null),
   job_id: Joi.number().integer().allow(null),
 }).custom((obj, helpers) => {
+  const hasName =
+    (obj.first_name && String(obj.first_name).trim()) ||
+    (obj.client_name && String(obj.client_name).trim());
+  if (!hasName) {
+    return helpers.message('client name is required');
+  }
   if (obj.user_type === 'subcontractor') {
     if (!obj.subcategory) {
       return helpers.message('subcategory is required for subcontractor');
@@ -78,6 +88,17 @@ const inviteSchema = Joi.object({
   }
   return obj;
 });
+
+/** Combined display name = TRIM(first) + ' ' + TRIM(last); empties dropped.
+ *  Falls back to a provided combined name. Mirrors the Contacts routes so
+ *  `user.name` never drifts from first_name/last_name. */
+function buildContactName(first, last, fallback) {
+  const combined = [first, last]
+    .map((s) => (s == null ? "" : String(s).trim()))
+    .filter(Boolean)
+    .join(" ");
+  return combined || (fallback == null ? "" : String(fallback).trim());
+}
 
 function generateOTP() {
   const digits = "0123456789";
@@ -151,6 +172,8 @@ async function assertUniqueMobile(connection, mobile) {
 async function createInvitedUser(connection, params) {
   const {
     client_name,
+    first_name,
+    last_name,
     client_email,
     clientMobile,
     user_type,
@@ -167,15 +190,20 @@ async function createInvitedUser(connection, params) {
   const business = isClient ? "" : (business_name || "");
   const tradeVal = isClient ? "" : (trade || "");
   const mobileVal = clientMobile && String(clientMobile).trim() !== "" ? clientMobile : null;
+  const name = buildContactName(first_name, last_name, client_name);
+  const firstVal = (first_name && String(first_name).trim()) || null;
+  const lastVal = (last_name && String(last_name).trim()) || null;
 
   const [insertResult] = await connection.query(
     `
     INSERT INTO user
-    (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (name, first_name, last_name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     [
-      client_name,
+      name,
+      firstVal,
+      lastVal,
       client_email,
       "",
       role,
@@ -349,6 +377,8 @@ router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, async
 
   const {
     client_name,
+    first_name,
+    last_name,
     client_email,
     client_mobile,
     client_phone,
@@ -358,6 +388,7 @@ router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, async
     subcategory,
   } = value;
   const clientMobile = (client_mobile || client_phone || "").toString().trim();
+  const contactName = buildContactName(first_name, last_name, client_name);
   const maybeJobId = Number(req.body?.job_id) || null;
   const createdBy = req.user.id;
 
@@ -372,7 +403,9 @@ router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, async
 
     // Create user
     const invitedUserId = await createInvitedUser(connection, {
-      client_name,
+      client_name: contactName,
+      first_name,
+      last_name,
       client_email,
       clientMobile,
       user_type,
@@ -397,12 +430,12 @@ router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, async
 
     // Record invite + send email
     const alreadyExists = await recordInvitedContact(connection, {
-      client_name,
+      client_name: contactName,
       client_email,
       currentTimestamp,
       createdBy,
     });
-    await sendInviteEmail(client_email, client_name);
+    await sendInviteEmail(client_email, contactName);
 
     return res.json({
       message: alreadyExists
@@ -1519,7 +1552,11 @@ router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites
     return res.status(400).json({ message: error.details[0].message });
   }
 
-  const { client_name, client_email, user_type, business_name, trade, subcategory } = value;
+  const { client_name, first_name, last_name, client_email, client_mobile, client_phone, user_type, business_name, trade, subcategory } = value;
+  const contactName = buildContactName(first_name, last_name, client_name);
+  const contactMobile = (client_mobile || client_phone || "").toString().trim() || null;
+  const contactFirst = (first_name && String(first_name).trim()) || null;
+  const contactLast = (last_name && String(last_name).trim()) || null;
   const userId = req.user.id;
   const role = Number(req.user?.role);
 
@@ -1551,16 +1588,18 @@ router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites
         const otp = generateOTP();
         const [insertResult] = await connection.query(
           `
-          INSERT INTO user 
-          (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO user
+          (name, first_name, last_name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `,
           [
-            client_name,
+            contactName,
+            contactFirst,
+            contactLast,
             client_email,
             "",
             newUserRole,
-            null,
+            contactMobile,
             newUserCategory,
             newUserSubcategory,
             user_type === "client" ? "" : (business_name || ""),
@@ -1621,7 +1660,7 @@ router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites
     );
 
     // 📧 Always send email (even if already invited)
-    await sendInviteEmail(client_email, client_name);
+    await sendInviteEmail(client_email, contactName);
 
     // 🟡 If already invited → do NOT insert again
     if (existingInvite.length > 0) {
@@ -1638,7 +1677,7 @@ router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites
       INSERT INTO invited_contacts (name, email, status, created_at, created_by)
       VALUES (?, ?, 0, ?, ?)
       `,
-      [client_name, client_email, currentTimestamp, userId]
+      [contactName, client_email, currentTimestamp, userId]
     );
 
     res.json({
@@ -1650,7 +1689,7 @@ router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites
   } catch (err) {
     // 🛡️ Race-condition protection
     if (err.code === "ER_DUP_ENTRY") {
-      await sendInviteEmail(client_email, client_name);
+      await sendInviteEmail(client_email, contactName);
       return res.json({
         message: "Invite email sent again. Record already exists.",
         alreadyExists: true,
