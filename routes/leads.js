@@ -112,7 +112,10 @@ router.post("/leads/create", auth.authenticateToken, async (req, res) => {
       user_id
     ];
 
-    const [result] = await pool.query(sql, values);
+    // Safety net: mysql2 throws on undefined bind params. Any field the client
+    // omits (e.g. lead_category/next_phase) would otherwise crash the INSERT.
+    const safeValues = values.map((v) => (v === undefined ? null : v));
+    const [result] = await pool.query(sql, safeValues);
 
     res.status(201).json({
       message: "Lead created successfully!",
