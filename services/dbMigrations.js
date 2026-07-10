@@ -40,6 +40,14 @@ async function ensureLeadBidStatusColumn(connection) {
         `ALTER TABLE leads MODIFY COLUMN bid_status VARCHAR(50) NULL DEFAULT NULL`
       );
     }
+    // prior_bid_status remembers the status before archiving so Unarchive can
+    // restore it (instead of forcing 'Waiting').
+    const [pcols] = await connection.query(`SHOW COLUMNS FROM leads LIKE 'prior_bid_status'`);
+    if (!pcols.length) {
+      await connection.query(
+        `ALTER TABLE leads ADD COLUMN prior_bid_status VARCHAR(50) NULL DEFAULT NULL`
+      );
+    }
   }
   leadBidStatusEnsured = true;
 }

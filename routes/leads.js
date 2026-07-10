@@ -238,8 +238,18 @@ router.patch("/leads/update-status/:id", auth.authenticateToken, async (req, res
   if (!bid_status) return res.status(400).json({ message: "Bid status is required" });
 
   try {
-    const sql = `UPDATE leads SET bid_status = ? WHERE id = ?`;
-    const values = [bid_status, req.params.id];
+    // When archiving, remember the pre-archive status so Unarchive can restore it.
+    // Only capture when the lead isn't already archived (so re-archiving keeps the
+    // real prior value, not 'Archived').
+    const isArchiving = bid_status === 'Archived';
+    const sql = isArchiving
+      ? `UPDATE leads
+           SET prior_bid_status = CASE WHEN (bid_status IS NULL OR bid_status <> 'Archived')
+                                       THEN bid_status ELSE prior_bid_status END,
+               bid_status = 'Archived'
+         WHERE id = ?`
+      : `UPDATE leads SET bid_status = ? WHERE id = ?`;
+    const values = isArchiving ? [req.params.id] : [bid_status, req.params.id];
 
     const [result] = await pool.query(sql, values);
     if (result.affectedRows === 0)
@@ -248,6 +258,27 @@ router.patch("/leads/update-status/:id", auth.authenticateToken, async (req, res
     res.status(200).json({ message: "Bid status updated successfully" });
   } catch (err) {
     logger.error("Error updating bid status", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// Unarchive: restore the pre-archive bid_status (fallback 'Waiting') and clear it.
+router.patch("/leads/unarchive/:id", auth.authenticateToken, async (req, res) => {
+  try {
+    const [[row]] = await pool.query(
+      `SELECT prior_bid_status FROM leads WHERE id = ?`,
+      [req.params.id]
+    );
+    if (!row) return res.status(404).json({ message: "Lead not found" });
+    const prior = row.prior_bid_status && String(row.prior_bid_status).trim();
+    const restored = prior && prior !== 'Archived' ? prior : 'Waiting';
+    await pool.query(
+      `UPDATE leads SET bid_status = ?, prior_bid_status = NULL WHERE id = ?`,
+      [restored, req.params.id]
+    );
+    res.status(200).json({ message: "Lead unarchived", bid_status: restored });
+  } catch (err) {
+    logger.error("Error unarchiving lead", err);
     res.status(500).json({ message: "Server error" });
   }
 });
