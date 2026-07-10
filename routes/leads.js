@@ -128,7 +128,14 @@ router.post("/leads/create", auth.authenticateToken, async (req, res) => {
 // GET all leads with  user_id filter
 router.get("/leads/all/:id", auth.authenticateToken, async (req, res) => {
   const user_id = req.params.id;
-  // console.log('user id in leads', user_id)
+  // ?archived=1 returns ONLY archived leads (for the Archive tab); default
+  // returns active leads and EXCLUDES bid_status='Archived'.
+  const onlyArchived =
+    String(req.query?.archived ?? '').trim() === '1' ||
+    String(req.query?.archived ?? '').trim().toLowerCase() === 'true';
+  const archiveClause = onlyArchived
+    ? "AND l.bid_status = 'Archived'"
+    : "AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')";
   let connection;
 
   try {
@@ -144,6 +151,7 @@ router.get("/leads/all/:id", auth.authenticateToken, async (req, res) => {
       LEFT JOIN user u ON u.id = l.client_id
       WHERE l.user_id = ?
         AND (l.status IS NULL OR l.status <> '3')
+        ${archiveClause}
       ORDER BY l.created_at DESC
     `, [ user_id]);
 

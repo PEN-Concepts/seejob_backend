@@ -672,6 +672,7 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
           AND NOT EXISTS (
             SELECT 1 FROM leads l2
             WHERE l2.id = t.job_id AND (l2.status IS NULL OR l2.status <> 3)
+              AND (l2.bid_status IS NULL OR l2.bid_status <> 'Archived')
           )
         )
         -- Effective date (due date, or created date if undated) today or earlier;

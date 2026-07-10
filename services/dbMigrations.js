@@ -20,6 +20,30 @@ async function ensureContactStatusColumn(connection) {
   contactStatusEnsured = true;
 }
 
+// leads.bid_status may be an ENUM('New Bid','Bid Now','Waiting','Lost Project').
+// The Archive feature adds an 'Archived' value; widen to VARCHAR so any string
+// (incl. 'Archived') is accepted. Idempotent — only ALTERs when the column is
+// not already a wide-enough VARCHAR (e.g. still an ENUM).
+let leadBidStatusEnsured = false;
+async function ensureLeadBidStatusColumn(connection) {
+  if (leadBidStatusEnsured) return;
+  const [[col]] = await connection.query(
+    `SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'leads' AND COLUMN_NAME = 'bid_status'`
+  );
+  if (col) {
+    const t = String(col.COLUMN_TYPE || '');
+    const m = /^varchar\((\d+)\)/i.exec(t);
+    const isWideVarchar = !!m && Number(m[1]) >= 30;
+    if (!isWideVarchar) {
+      await connection.query(
+        `ALTER TABLE leads MODIFY COLUMN bid_status VARCHAR(50) NULL DEFAULT NULL`
+      );
+    }
+  }
+  leadBidStatusEnsured = true;
+}
+
 // The lead detail view reuses the job Budget/Stage/Materials/Contacts panels,
 // passing the LEAD id in the job_id column. Those four tables historically keyed
 // rows purely by job_id with no type discriminator, so a lead and a job with the
@@ -375,6 +399,7 @@ async function ensurePlanLevelColumn(connection) {
 
 module.exports = {
   ensureContactStatusColumn,
+  ensureLeadBidStatusColumn,
   ensureOwnerTypeColumns,
   ensureRemindersTable,
   ensureScheduleTemplateTables,

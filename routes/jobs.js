@@ -628,6 +628,7 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
         FROM leads l
         WHERE l.user_id = ?
           AND (l.status IS NULL OR l.status <> '3')
+          AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')
         ORDER BY l.created_at DESC
       `,
       [managerId]
@@ -1939,6 +1940,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
            )
          )
          AND (l.status IS NULL OR l.status <> 3)
+         AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')
        ORDER BY l.created_at DESC`,
       [managerId, loggedInUserId]
     );
