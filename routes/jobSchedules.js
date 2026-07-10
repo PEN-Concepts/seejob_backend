@@ -15,6 +15,7 @@ const cascade = require('../services/scheduleCascade');
 const notify = require('../services/notify');
 const { requirePlan } = require('../utils/access');
 const { ensureScheduleTemplateTables } = require('../services/dbMigrations');
+const { getTimeStamp } = require('../common/timdate');
 
 router.use(async (req, res, next) => {
   let connection;
@@ -280,6 +281,124 @@ router.delete('/:sid/items/:iid', async (req, res) => {
     if (connection) { try { await connection.rollback(); } catch (_) {} }
     if (respondScheduleReject(res, err)) return;
     logger.error('[job-schedules] delete item: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST /job-schedules/:sid/items — add a NEW trade to a job's applied schedule.
+// Inserts the item, recomputes dates, then materializes one task + one stage for
+// it (recompute only updates linked tasks — it doesn't create them), mirroring the
+// per-item creation done at apply time. Job is untouched.
+router.post('/:sid/items', async (req, res) => {
+  const sid = Number(req.params.sid);
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  if (!name) return res.status(400).json({ success: false, message: 'Name is required' });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [[sched]] = await connection.query('SELECT * FROM job_schedules WHERE id = ? LIMIT 1', [sid]);
+    if (!sched) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Schedule not found' }); }
+
+    const [[mx]] = await connection.query(
+      'SELECT COALESCE(MAX(sort_order), 0) + 1 AS so FROM job_schedule_items WHERE schedule_id = ?',
+      [sid]
+    );
+    const dur = engine.normalizeDuration(b.duration_days != null && b.duration_days !== '' ? b.duration_days : 1);
+    const isInsp = b.is_inspection ? 1 : 0;
+
+    const [ins] = await connection.query(
+      `INSERT INTO job_schedule_items
+         (schedule_id, name, duration_days, sort_order, assignee_user_id, template_item_id, depends_on_all, is_inspection)
+       VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)`,
+      [sid, name, dur, mx.so, isInsp]
+    );
+    const iid = ins.insertId;
+
+    // Recompute so the new item gets computed dates (no deps → appends cleanly).
+    const payloads = await cascade.recomputeSchedule(connection, sid, { changedItemId: iid });
+
+    // Materialize the task + stage for the new item (recompute won't create them).
+    const [[item]] = await connection.query('SELECT * FROM job_schedule_items WHERE id = ? LIMIT 1', [iid]);
+    const now = getTimeStamp();
+    const startTs = item.computed_start_date ? `${String(item.computed_start_date).slice(0, 10)} 00:00:00` : null;
+    const endTs = item.computed_end_date ? `${String(item.computed_end_date).slice(0, 10)} 00:00:00` : null;
+
+    const [taskR] = await connection.query(
+      `INSERT INTO tasks
+         (task_name, user_id, team_id, duration_days, start_date, end_date, description,
+          job_id, created_at, created_by, task_type, is_calendar_task, is_appointment_task, priority)
+       VALUES (?, NULL, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, 1, 0, 'low')`,
+      [item.name, item.duration_days, startTs, endTs, sched.job_id, now, req.user.id, sched.owner_type]
+    );
+    const [stageR] = await connection.query(
+      `INSERT INTO stages (user_id, name, csi_code, job_id, owner_type, status, progress_status, created_at)
+       VALUES (?, ?, '', ?, ?, 1, 0, ?)`,
+      [req.user.id || null, item.name, sched.job_id, sched.owner_type, now]
+    );
+    await connection.query(
+      'UPDATE job_schedule_items SET task_id = ?, stage_id = ? WHERE id = ?',
+      [taskR.insertId, stageR.insertId, iid]
+    );
+
+    await connection.commit();
+    dispatchAll(payloads);
+    res.status(201).json({ success: true, id: iid });
+  } catch (err) {
+    if (connection) { try { await connection.rollback(); } catch (_) {} }
+    if (respondScheduleReject(res, err)) return;
+    logger.error('[job-schedules] add item: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// DELETE /job-schedules/:sid — delete an ENTIRE applied schedule. Archives its
+// tasks (archived_at + status_note — the job-deletion convention) and soft-deletes
+// its stages (status=0), then hard-deletes the schedule + items + deps. The job
+// itself is untouched and a schedule can be re-applied afterwards.
+router.delete('/:sid', async (req, res) => {
+  const sid = Number(req.params.sid);
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const [[sched]] = await connection.query('SELECT * FROM job_schedules WHERE id = ? LIMIT 1', [sid]);
+    if (!sched) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Schedule not found' }); }
+
+    const [items] = await connection.query(
+      'SELECT task_id, stage_id FROM job_schedule_items WHERE schedule_id = ?',
+      [sid]
+    );
+    const taskIds = items.map((i) => i.task_id).filter(Boolean);
+    const stageIds = items.map((i) => i.stage_id).filter(Boolean);
+    if (taskIds.length) {
+      await connection.query(
+        `UPDATE tasks
+            SET archived_at = NOW(),
+                status_note = COALESCE(NULLIF(status_note, ''), 'Archived: schedule deleted')
+          WHERE id IN (?) AND archived_at IS NULL`,
+        [taskIds]
+      );
+    }
+    if (stageIds.length) {
+      await connection.query('UPDATE stages SET status = 0, updated_at = NOW() WHERE id IN (?)', [stageIds]);
+    }
+    await connection.query('DELETE FROM job_schedule_deps WHERE schedule_id = ?', [sid]);
+    await connection.query('DELETE FROM job_schedule_items WHERE schedule_id = ?', [sid]);
+    await connection.query('DELETE FROM job_schedules WHERE id = ?', [sid]);
+
+    await connection.commit();
+    res.json({ success: true });
+  } catch (err) {
+    if (connection) { try { await connection.rollback(); } catch (_) {} }
+    logger.error('[job-schedules] delete schedule: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     if (connection) connection.release();
