@@ -68,6 +68,11 @@ function addUserSchema(user) {
       // "any.required": "State is required"
     }),
 
+    // Canonical IANA timezone (e.g. 'America/Los_Angeles'). Free-form string
+    // (IANA has hundreds of zones); just length-capped. Distinct from the legacy
+    // short-code `time_zone` above.
+    timezone: Joi.string().optional().allow("").max(64).messages({}),
+
     zipcode: Joi.string().optional().allow("").messages({
       // "string.empty": "City/Town is required",
       // "any.required": "City/Town is required"

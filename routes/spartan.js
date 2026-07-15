@@ -8,6 +8,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const logger = require("../common/logger");
 const auth = require("../services/authentication");
+const { todayFor, getUserTz } = require("../common/timdate");
 
 let tablesReady = false;
 async function ensureTables(conn) {
@@ -56,14 +57,17 @@ router.get("/goals", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
     await ensureTables(connection);
+    // "Today" is the user's own calendar day (their saved timezone), not the DB
+    // server's CURDATE(). An explicit ?date= overrides.
+    const effDate = date || todayFor(await getUserTz(connection, userId));
     const [rows] = await connection.query(
       `SELECT g.*, l.status AS today_status
          FROM spartan_goals g
          LEFT JOIN spartan_goal_log l
-           ON l.goal_id = g.id AND l.log_date = ${date ? "?" : "CURDATE()"}
+           ON l.goal_id = g.id AND l.log_date = ?
         WHERE g.user_id = ?
         ORDER BY (g.start_time IS NULL), g.start_time ASC, g.sort_order ASC, g.id ASC`,
-      date ? [date, userId] : [userId]
+      [effDate, userId]
     );
     return res.json({ success: true, goals: rows });
   } catch (err) {
@@ -193,20 +197,23 @@ router.post("/goals/:id/log", auth.authenticateToken, async (req, res) => {
     );
     if (!g) return res.status(404).json({ success: false, message: "Goal not found" });
 
+    // Log against the user's own calendar day (their timezone), not CURDATE().
+    const effDate = date || todayFor(await getUserTz(connection, userId));
+
     if (clear) {
       await connection.query(
         `DELETE FROM spartan_goal_log
-          WHERE goal_id = ? AND log_date = ${date ? "?" : "CURDATE()"}`,
-        date ? [id, date] : [id]
+          WHERE goal_id = ? AND log_date = ?`,
+        [id, effDate]
       );
       return res.json({ success: true, status: null });
     }
 
     await connection.query(
       `INSERT INTO spartan_goal_log (goal_id, user_id, log_date, status)
-       VALUES (?, ?, ${date ? "?" : "CURDATE()"}, ?)
+       VALUES (?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE status = VALUES(status)`,
-      date ? [id, userId, date, status] : [id, userId, status]
+      [id, userId, effDate, status]
     );
     return res.json({ success: true, status });
   } catch (err) {

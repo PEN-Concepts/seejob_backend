@@ -15,16 +15,18 @@ const storage = multer.diskStorage({
 });
 
 
-// File filter to allow images and docs
+// File filter to allow images and docs. Anchored so the extension must match
+// exactly (e.g. "png", not "notpng"). Images: jpg/jpeg/png/gif/webp/heic — kept
+// in sync with the frontend accept list (files-panel acceptTypes).
 function fileFilter(req, file, cb) {
-  const allowedExtensions = /jpeg|jpg|png|pdf|doc|docx|xls|xlsx/;
-  const ext = path.extname(file.originalname).toLowerCase().substring(1); 
+  const allowedExtensions = /^(jpeg|jpg|png|gif|webp|heic|pdf|doc|docx|xls|xlsx)$/;
+  const ext = path.extname(file.originalname).toLowerCase().substring(1);
   const mime = file.mimetype;
 
   if (allowedExtensions.test(ext)) {
     cb(null, true);
   } else {
-    cb(new Error("Only images and documents (pdf, doc, xls) are allowed"));
+    cb(new Error("Only images (jpg, jpeg, png, gif, webp, heic) and documents (pdf, doc, docx, xls, xlsx) are allowed"));
   }
 }
 

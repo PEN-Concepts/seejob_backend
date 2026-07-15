@@ -8,7 +8,7 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const auth = require("../services/authentication");
-const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
+const { getCurrentDateTime, getTimeStamp, nowFor, todayFor, getUserTz } = require("../common/timdate");
 const PDFDocument = require("pdfkit");
 const { v4: uuidv4 } = require("uuid");
 
@@ -156,11 +156,11 @@ router.post('/change-orders/:id/reactivate', auth.authenticateToken, async (req,
     );
     if (!rows.length) return res.status(404).json({ message: 'Change order not found' });
 
-    const newValidUntil = new Date();
-    newValidUntil.setDate(newValidUntil.getDate() + 30);
-    const validUntilStr = newValidUntil.toISOString().slice(0, 10);
-
-    const todayStr = new Date().toISOString().slice(0, 10);
+    // Document dates are shown to the client, so use the owner's calendar day
+    // (their saved timezone), not a UTC toISOString() day (off near midnight PT).
+    const tz = await getUserTz(connection, created_by_user_id);
+    const todayStr = todayFor(tz);
+    const validUntilStr = nowFor(tz).add(30, 'days').format('YYYY-MM-DD');
 
     await connection.execute(
       `UPDATE change_orders

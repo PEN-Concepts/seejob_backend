@@ -8,6 +8,7 @@ const multer = require('multer');
 const auth = require("../services/authentication");
 const { denyExpiredFreeWrites, isSameAccount } = require("../utils/access");
 const { getTimeStamp } = require("../common/timdate");
+const moment = require("moment-timezone");
 const admin = require("../config/firebase-admin");
 const logger = require("../common/logger");
 const { recomputeSchedule } = require("../services/scheduleCascade");
@@ -629,6 +630,24 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
       ? req.query.date
       : null;
 
+    // "Today" is the REQUESTING user's LOCAL calendar day (their saved timezone),
+    // not the DB server's CURDATE(). An explicit ?date= (already validated above)
+    // always overrides. Falls back to the process default (Pacific) if the user's
+    // timezone is unset/invalid.
+    let effectiveDate = targetDate;
+    if (!effectiveDate) {
+      const DEFAULT_TZ = process.env.TZ || 'America/Los_Angeles';
+      let userTz = DEFAULT_TZ;
+      try {
+        const [[tzRow]] = await connection.query(
+          'SELECT timezone FROM `user` WHERE id = ? LIMIT 1',
+          [assigneeId]
+        );
+        if (tzRow && tzRow.timezone && moment.tz.zone(tzRow.timezone)) userTz = tzRow.timezone;
+      } catch (e) { /* keep default */ }
+      effectiveDate = moment.tz(userTz).format('YYYY-MM-DD');
+    }
+
     const sql = `
       SELECT 
         t.id, 
@@ -681,7 +700,7 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
       ORDER BY (t.start_date IS NULL), COALESCE(t.start_date, t.created_at) ASC
     `;
 
-    const params = [managerId, managerId, managerId, targetDate];
+    const params = [managerId, managerId, managerId, effectiveDate];
     const [rows] = await connection.query(sql, params);
     await attachTaskImages(connection, rows);
 

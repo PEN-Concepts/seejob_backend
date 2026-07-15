@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require('../config/connection');
 const Joi = require('joi');
 const auth = require('../services/authentication');
-const { getTimeStamp } = require('../common/timdate');
+const { getTimeStamp, timeStampFor, getUserTz } = require('../common/timdate');
 const multer = require('multer');
 const path = require('path');
 const admin = require('../config/firebase-admin');
@@ -530,11 +530,18 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
       // Auto-clear: hide items filed > grace minutes ago (unless Kept). The
       // "Recently filed" peek (?filed=1) shows ONLY those cleared items.
       await ensureNotepadFlowColumns(connection);
+      // Grace timer is evaluated in the viewer's saved timezone (their wall clock)
+      // instead of the DB server's NOW(), so the 7-minute countdown lines up with
+      // what the user sees regardless of the server's zone.
+      const graceTz = await getUserTz(connection, signedin_user);
+      const graceNow = timeStampFor(graceTz);
       const filedView = String(req.query.filed || '') === '1';
       if (filedView) {
-        itemsSql += ` AND c.kept = 0 AND c.filed_at IS NOT NULL AND c.filed_at <= (NOW() - INTERVAL ${NOTEPAD_FILE_GRACE_MIN} MINUTE)`;
+        itemsSql += ` AND c.kept = 0 AND c.filed_at IS NOT NULL AND c.filed_at <= (? - INTERVAL ${NOTEPAD_FILE_GRACE_MIN} MINUTE)`;
+        itemParams.push(graceNow);
       } else {
-        itemsSql += ` AND (c.kept = 1 OR c.filed_at IS NULL OR c.filed_at > (NOW() - INTERVAL ${NOTEPAD_FILE_GRACE_MIN} MINUTE))`;
+        itemsSql += ` AND (c.kept = 1 OR c.filed_at IS NULL OR c.filed_at > (? - INTERVAL ${NOTEPAD_FILE_GRACE_MIN} MINUTE))`;
+        itemParams.push(graceNow);
       }
 
       itemsSql += ' ORDER BY c.id DESC';
@@ -1083,10 +1090,12 @@ router.put('/update/:id', auth.authenticateToken, async (req, res) => {
       // completed), stamp filed_at so it auto-clears from the Notepad after the
       // grace period — unless the user tapped "Keep" (kept = 1).
       await ensureNotepadFlowColumns(connection);
+      // Stamp filed_at in the acting user's timezone so it matches the grace read.
+      const filedTz = await getUserTz(connection, res.locals.id);
       await connection.query(
-        `UPDATE check_list SET filed_at = NOW()
+        `UPDATE check_list SET filed_at = ?
          WHERE id = ? AND filed_at IS NULL AND kept = 0 AND ${FILED_ELIGIBLE_SQL}`,
-        [id]
+        [timeStampFor(filedTz), id]
       );
 
       res.status(200).json({ success: true, message: 'Checklist item updated successfully' });
@@ -1113,11 +1122,12 @@ router.post('/:id/keep', auth.authenticateToken, async (req, res) => {
       if (!access.allowed) return res.status(403).json({ success: false, message: 'Clipboard requires an active plan.' });
       if (!access.canWrite) return res.status(403).json({ success: false, message: 'Your plan does not allow modifying Clipboard.' });
       await ensureNotepadFlowColumns(connection);
+      const keepTz = await getUserTz(connection, res.locals.id);
       await connection.query(
         keep
           ? 'UPDATE check_list SET kept = 1, filed_at = NULL WHERE id = ?'
-          : 'UPDATE check_list SET kept = 0, filed_at = NOW() WHERE id = ?',
-        [id]
+          : 'UPDATE check_list SET kept = 0, filed_at = ? WHERE id = ?',
+        keep ? [id] : [timeStampFor(keepTz), id]
       );
       res.status(200).json({ success: true });
     } finally {

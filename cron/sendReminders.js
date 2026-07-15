@@ -90,11 +90,30 @@ async function sendDueExplicit(connection) {
   }
 }
 
+// Resolve a user's saved IANA timezone (cached per tick). Falls back to the
+// process default (Pacific) when unset or invalid. Used to interpret each item's
+// LOCAL wall-clock time (appointment start, notepad due / 8 AM default) into the
+// correct absolute fire instant for THAT user.
+async function tzForUser(connection, uid, cache) {
+  if (cache.has(uid)) return cache.get(uid);
+  let tz = TZ;
+  try {
+    const [[row]] = await connection.query('SELECT timezone FROM `user` WHERE id = ? LIMIT 1', [uid]);
+    if (row && row.timezone && moment.tz.zone(row.timezone)) tz = row.timezone;
+  } catch (e) { /* keep default */ }
+  cache.set(uid, tz);
+  return tz;
+}
+
 // (2) Default reminders derived from appointments + Notepad items.
 async function sendDefaults(connection) {
   const now = moment.tz(TZ);
+  // Coarse ±1-day DB window (in the default zone) — generous enough to catch an
+  // item that is "today" in any US timezone; the exact fire check below uses the
+  // owning user's real zone.
   const from = now.clone().subtract(1, 'day').format('YYYY-MM-DD');
   const to = now.clone().add(1, 'day').format('YYYY-MM-DD');
+  const tzCache = new Map();
 
   // Appointments → 10 min before start (all-day is stored 09:00 → ~8:50 AM).
   const [appts] = await connection.query(
@@ -108,8 +127,9 @@ async function sendDefaults(connection) {
   for (const a of appts) {
     const uid = Number(a.uid);
     if (!uid) continue;
+    const utz = await tzForUser(connection, uid, tzCache);
     const timeStr = String(a.time_of_appointment || '09:00:00');
-    const apptM = moment.tz(`${a.doa} ${timeStr}`, 'YYYY-MM-DD HH:mm:ss', TZ);
+    const apptM = moment.tz(`${a.doa} ${timeStr}`, 'YYYY-MM-DD HH:mm:ss', utz);
     if (!apptM.isValid()) continue;
     const fireM = apptM.clone().subtract(10, 'minutes');
     if (now.isSameOrAfter(fireM) && now.isBefore(apptM.clone().add(5, 'minutes'))) {
@@ -145,18 +165,21 @@ async function sendDefaults(connection) {
   for (const c of notes) {
     const uid = Number(c.uid);
     if (!uid) continue;
+    const utz = await tzForUser(connection, uid, tzCache);
     const raw = String(c.due_date).replace('T', ' ');
     const dateStr = raw.slice(0, 10);
     const hasTime = /\d{2}:\d{2}/.test(raw) && !/00:00(:00)?$/.test(raw);
     let shouldFire = false;
     if (hasTime) {
-      const dueM = moment.tz(raw, 'YYYY-MM-DD HH:mm:ss', TZ);
+      const dueM = moment.tz(raw, 'YYYY-MM-DD HH:mm:ss', utz);
       if (!dueM.isValid()) continue;
       const fireM = dueM.clone().subtract(10, 'minutes');
       shouldFire = now.isSameOrAfter(fireM) && now.isBefore(dueM.clone().add(5, 'minutes'));
     } else {
-      const eightAM = moment.tz(`${dateStr} 08:00:00`, 'YYYY-MM-DD HH:mm:ss', TZ);
-      shouldFire = now.isSameOrAfter(eightAM) && now.isSame(eightAM, 'day');
+      const eightAM = moment.tz(`${dateStr} 08:00:00`, 'YYYY-MM-DD HH:mm:ss', utz);
+      // Compare in the user's zone so the "same day" guard is correct for them.
+      const nowUtz = now.clone().tz(utz);
+      shouldFire = nowUtz.isSameOrAfter(eightAM) && nowUtz.isSame(eightAM, 'day');
     }
     if (shouldFire && (await claimDefault(connection, uid, 'note', `${c.id}:default`))) {
       await sendToUser(connection, uid, {

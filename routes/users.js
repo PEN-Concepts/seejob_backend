@@ -1927,8 +1927,10 @@ router.post("/updateuser", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
+    // `time_zone` (legacy short code) and `timezone` (canonical IANA) use COALESCE
+    // so a save that omits them (e.g. an empty value) never wipes the stored value.
     query =
-      "UPDATE `user` SET `name` = ?, `email` = ? , `mobile` = ?, `category` = ?, `subcategory` = ?, `business` = ?, `organization_name` = ?, `trade` = ?, `social_security` = ?, `street` = ?, `city` = ?, `state` = ?, `zipcode` = ?, `contact_note` = ?, `updated_at` = ?, `updated_by` = ?, `secondary_email` = ?, `show_email`= ? , `time_zone` = ? WHERE (`id` = ?)";
+      "UPDATE `user` SET `name` = ?, `email` = ? , `mobile` = ?, `category` = ?, `subcategory` = ?, `business` = ?, `organization_name` = ?, `trade` = ?, `social_security` = ?, `street` = ?, `city` = ?, `state` = ?, `zipcode` = ?, `contact_note` = ?, `updated_at` = ?, `updated_by` = ?, `secondary_email` = ?, `show_email`= ? , `time_zone` = COALESCE(?, `time_zone`), `timezone` = COALESCE(?, `timezone`) WHERE (`id` = ?)";
 
     const [result] = await connection.query(query, [
       r.name,
@@ -1949,7 +1951,8 @@ router.post("/updateuser", auth.authenticateToken, async (req, res) => {
       signedin_user,
       r.secondary_email,
       show_email,
-      r.time_zone,
+      r.time_zone || null,
+      r.timezone || null,
       signedin_user,
     ]);
 
@@ -2338,7 +2341,8 @@ router.get("/get-user/:id", auth.authenticateToken, async (req, res) => {
         u.contact_note,
         u.status,
         u.contact_available,
-        u.time_zone
+        u.time_zone,
+        u.timezone
       FROM user u
       LEFT JOIN category c    ON c.id = u.category
       LEFT JOIN subcategory sc ON sc.id = u.subcategory

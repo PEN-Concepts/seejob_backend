@@ -405,6 +405,24 @@ async function ensurePlanLevelColumn(connection) {
   planLevelEnsured = true;
 }
 
+// Per-user IANA timezone (e.g. 'America/Los_Angeles'). This is the CANONICAL
+// timezone the app's date/time logic is intended to read (crons, reminders,
+// "today" filtering, due dates). It is DISTINCT from the legacy `time_zone`
+// short-code column (EST/PST/MST_DENVER…), which is display-only and is not read
+// by any server-side time logic. Existing users default to Pacific so behavior
+// is unchanged until per-user enforcement is wired up.
+let userTimezoneEnsured = false;
+async function ensureUserTimezoneColumn(connection) {
+  if (userTimezoneEnsured) return;
+  const [cols] = await connection.query("SHOW COLUMNS FROM `user` LIKE 'timezone'");
+  if (!cols.length) {
+    await connection.query(
+      "ALTER TABLE `user` ADD COLUMN `timezone` VARCHAR(64) NOT NULL DEFAULT 'America/Los_Angeles'"
+    );
+  }
+  userTimezoneEnsured = true;
+}
+
 module.exports = {
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,
@@ -412,4 +430,5 @@ module.exports = {
   ensureRemindersTable,
   ensureScheduleTemplateTables,
   ensurePlanLevelColumn,
+  ensureUserTimezoneColumn,
 };
