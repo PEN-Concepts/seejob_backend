@@ -3285,12 +3285,10 @@ router.get("/check-device", async (req, res) => {
 // log in as any other user without their password.
 const IMPERSONATOR_USER_ID = 246;
 
-function requireImpersonator(req, res, next) {
-  if (Number(req.user?.id) !== IMPERSONATOR_USER_ID) {
-    return res.status(403).json({ code: '403', message: 'Forbidden', data: {} });
-  }
-  next();
-}
+// Admin gate: super-admin id 246 OR an owner-exempt email (looked up by id).
+// Broadened from the old id-246-only check so the platform owner can reach admin
+// pages from their normal login; see utils/adminGate.js. Applied after auth.
+const { requireAdmin: requireImpersonator } = require("../utils/adminGate");
 
 // List every user in the system (id, name, email, role, category, mobile).
 router.get(

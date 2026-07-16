@@ -5,7 +5,9 @@ const router = express.Router();
 const { authenticateToken } = require("../services/authentication");
 const pool = require("../config/connection");
 const logger = require("../common/logger");
-const { getAccessMode } = require("../utils/access");
+const { getAccessMode, OWNER_EXEMPT_EMAILS } = require("../utils/access");
+const { requireAdmin } = require("../utils/adminGate");
+const { sendEmail, isRealEmail } = require("../services/notify");
 
 // Authorize.Net SDK
 const { APIControllers, APIContracts } = require("authorizenet");
@@ -15,14 +17,68 @@ const API_LOGIN_ID = process.env.AUTHORIZE_API_LOGIN_ID;
 const TRANSACTION_KEY = process.env.AUTHORIZE_TRANSACTION_KEY;
 const AUTHORIZE_ENV = process.env.AUTHORIZE_ENV || "sandbox"; // "sandbox" or "production"
 
+// Webhook "Signature Key" — a SEPARATE value from the API Login ID / Transaction
+// Key. In the Authorize.Net Merchant Interface it is Account → Settings → API
+// Credentials & Keys → "Signature Key". It is the HMAC-SHA512 secret used to sign
+// the raw webhook body (header `X-ANET-Signature: sha512=<HEX>`). Previously this
+// const was never declared, so the /webhook handler threw a ReferenceError on the
+// first line and never synced ARB events. AUTHORIZE_WEBHOOK_SIGNATURE_KEY is
+// accepted as an alias.
+const WEBHOOK_SIGNATURE_KEY =
+  process.env.AUTHORIZE_SIGNATURE_KEY ||
+  process.env.AUTHORIZE_WEBHOOK_SIGNATURE_KEY ||
+  "";
+
+// Public (publishable) values the browser Accept UI needs. The client key is
+// SAFE to expose (it only tokenizes cards; it can't move money). Served to the
+// frontend by GET /accept-config so the browser always matches whatever
+// environment the SERVER is on — flipping AUTHORIZE_ENV (+ the prod keys) on the
+// server switches the frontend too, with no separate frontend deploy.
+const PUBLIC_CLIENT_KEY = process.env.AUTHORIZE_PUBLIC_CLIENT_KEY || "";
+// Default grace window (days) after the sandbox→production flag runs, during which
+// affected accounts keep full access while they re-enter a card + re-subscribe.
+const REVERIFY_GRACE_DAYS = Number(process.env.REVERIFY_GRACE_DAYS) || 14;
+// Current sandbox publishable credentials (previously hardcoded in index.html).
+// Used ONLY as a fallback while AUTHORIZE_ENV is sandbox and the env vars aren't
+// set yet, so the existing sandbox card form keeps working unchanged. In
+// production these are never used — the real prod values MUST come from env.
+const SANDBOX_API_LOGIN_ID = "3Eke9v5NS7C";
+const SANDBOX_PUBLIC_CLIENT_KEY =
+  "8Yh357spP9xaQyxr8PEqbj78Yp9pyG72mQNG38C3Nv745L4M6rSdRj3jLpHk4rqh";
+
+function isProduction() {
+  return AUTHORIZE_ENV === "production";
+}
+
 function getApiEnvironment() {
 
-  if (AUTHORIZE_ENV === "production") {
+  if (isProduction()) {
     // Live Authorize.Net XML endpoint
     return "https://api2.authorize.net/xml/v1/request.api";
   }
   // Sandbox Authorize.Net XML endpoint
   return "https://apitest.authorize.net/xml/v1/request.api";
+}
+
+// The Accept UI script host must match the environment of the api login / client
+// key (js.authorize.net for production, jstest.authorize.net for sandbox).
+function getAcceptUiUrl() {
+  return isProduction()
+    ? "https://js.authorize.net/v3/AcceptUI.js"
+    : "https://jstest.authorize.net/v3/AcceptUI.js";
+}
+
+// Detect the "stored payment/customer profile no longer exists" case. Authorize.Net
+// returns E00040 ("The record cannot be found.") — expected for EVERY sandbox-era
+// profile once the account is switched to production. Detected specifically (not a
+// broad catch-all) so we can prompt re-entry instead of showing a generic error.
+function isProfileNotFoundError(err) {
+  const msg = err && err.message ? String(err.message) : "";
+  return (
+    msg.includes("E00040") ||
+    /record cannot be found/i.test(msg) ||
+    /cannot be found/i.test(msg)
+  );
 }
 
 function getValidationMode() {
@@ -171,37 +227,33 @@ async function createOrAddPaymentProfileForUser({ userId, email, opaqueData, bil
     let cardBrand = null;
     let cardLast4 = null;
 
-    if (!customerProfileId) {
-      // Try to create a new customer profile. If Authorize.Net says a duplicate
-      // customer profile already exists, reuse that profile id and just add a
-      // payment profile instead of failing.
+    // Create a brand-new customer profile (with its first payment profile).
+    // Handles E00039 (a profile with this merchantCustomerId already exists) by
+    // reusing the existing id (paymentProfileId comes back null in that case).
+    const createFreshCustomerProfile = async () => {
+      const pp = new APIContracts.CustomerPaymentProfileType();
+      pp.setCustomerType(APIContracts.CustomerTypeEnum.INDIVIDUAL);
+      pp.setPayment(paymentType);
+      pp.setBillTo(billTo);
+
+      const profile = new APIContracts.CustomerProfileType();
+      if (email) profile.setEmail(email);
+      profile.setMerchantCustomerId(String(userId));
+      profile.setPaymentProfiles([pp]);
+
+      const createRequest = new APIContracts.CreateCustomerProfileRequest();
+      createRequest.setMerchantAuthentication(merchantAuthentication);
+      createRequest.setProfile(profile);
+      createRequest.setValidationMode(getValidationMode());
+
+      const ctrl = new APIControllers.CreateCustomerProfileController(createRequest.getJSON());
+      ctrl.setEnvironment(getApiEnvironment());
+
       try {
-        const paymentProfile = new APIContracts.CustomerPaymentProfileType();
-        paymentProfile.setCustomerType(APIContracts.CustomerTypeEnum.INDIVIDUAL);
-        paymentProfile.setPayment(paymentType);
-        paymentProfile.setBillTo(billTo);
-
-        const profile = new APIContracts.CustomerProfileType();
-        if (email) profile.setEmail(email);
-        profile.setMerchantCustomerId(String(userId));
-        profile.setPaymentProfiles([paymentProfile]);
-
-        const createRequest = new APIContracts.CreateCustomerProfileRequest();
-        createRequest.setMerchantAuthentication(merchantAuthentication);
-        createRequest.setProfile(profile);
-        createRequest.setValidationMode(getValidationMode());
-
-        const ctrl = new APIControllers.CreateCustomerProfileController(
-          createRequest.getJSON()
-        );
-        ctrl.setEnvironment(getApiEnvironment());
-
         const result = await new Promise((resolve, reject) => {
           ctrl.execute(() => {
             const apiResponse = ctrl.getResponse();
-            if (!apiResponse) {
-              return reject(new Error("Empty response from Authorize.Net"));
-            }
+            if (!apiResponse) return reject(new Error("Empty response from Authorize.Net"));
             const response = new APIContracts.CreateCustomerProfileResponse(apiResponse);
             if (response.getMessages().getResultCode() === APIContracts.MessageTypeEnum.OK) {
               resolve(response);
@@ -209,86 +261,86 @@ async function createOrAddPaymentProfileForUser({ userId, email, opaqueData, bil
               const msgObj = response.getMessages().getMessage()[0];
               const code = msgObj && msgObj.getCode ? msgObj.getCode() : null;
               const text = msgObj && msgObj.getText ? msgObj.getText() : "Unknown error";
-              reject(
-                new Error(
-                  `Authorize.Net error${code ? ` [${code}]` : ""}: ${text}`
-                )
-              );
+              reject(new Error(`Authorize.Net error${code ? ` [${code}]` : ""}: ${text}`));
             }
           });
         });
-
-        createdCustomerProfileId = result.getCustomerProfileId();
-        const paymentProfileIds = result
-          .getCustomerPaymentProfileIdList()
-          .getNumericString();
-
-        // Ensure we always store a simple string payment profile id
-        createdPaymentProfileId = Array.isArray(paymentProfileIds)
-          ? String(paymentProfileIds[0])
-          : String(paymentProfileIds);
-
-        customerProfileId = createdCustomerProfileId;
+        const ppids = result.getCustomerPaymentProfileIdList().getNumericString();
+        return {
+          customerProfileId: result.getCustomerProfileId(),
+          paymentProfileId: Array.isArray(ppids) ? String(ppids[0]) : String(ppids),
+        };
       } catch (e) {
         const msg = e && e.message ? String(e.message) : "";
-        // Prefer code-based detection when present in the error string, fallback to message parsing.
-        // Authorize.Net commonly returns E00039 for duplicate records.
         const hasDuplicateCode = msg.includes("[E00039]") || msg.includes("E00039");
-
         if (hasDuplicateCode || msg.includes("A duplicate record with ID")) {
           const match = msg.match(/ID (\d+) already exists/);
-          if (match && match[1]) {
-            customerProfileId = match[1];
-          }
-        } else {
-          throw e;
+          if (match && match[1]) return { customerProfileId: match[1], paymentProfileId: null };
         }
+        throw e;
       }
-    }
+    };
 
-    // At this point, if customerProfileId is set but we do not yet have a
-    // createdPaymentProfileId, create a payment profile under the existing
-    // customer profile.
-    if (customerProfileId && !createdPaymentProfileId) {
-      const paymentProfile = new APIContracts.CustomerPaymentProfileType();
-      paymentProfile.setCustomerType(APIContracts.CustomerTypeEnum.INDIVIDUAL);
-      paymentProfile.setPayment(paymentType);
-      paymentProfile.setBillTo(billTo);
+    // Add a payment profile under an existing customer profile.
+    const addPaymentProfileUnder = async (cpid) => {
+      const pp = new APIContracts.CustomerPaymentProfileType();
+      pp.setCustomerType(APIContracts.CustomerTypeEnum.INDIVIDUAL);
+      pp.setPayment(paymentType);
+      pp.setBillTo(billTo);
 
       const createPayProfReq = new APIContracts.CreateCustomerPaymentProfileRequest();
       createPayProfReq.setMerchantAuthentication(merchantAuthentication);
-      createPayProfReq.setCustomerProfileId(customerProfileId);
-      createPayProfReq.setPaymentProfile(paymentProfile);
+      createPayProfReq.setCustomerProfileId(cpid);
+      createPayProfReq.setPaymentProfile(pp);
       createPayProfReq.setValidationMode(getValidationMode());
 
-      const ctrl = new APIControllers.CreateCustomerPaymentProfileController(
-        createPayProfReq.getJSON()
-      );
+      const ctrl = new APIControllers.CreateCustomerPaymentProfileController(createPayProfReq.getJSON());
       ctrl.setEnvironment(getApiEnvironment());
 
       const result = await new Promise((resolve, reject) => {
         ctrl.execute(() => {
           const apiResponse = ctrl.getResponse();
-          if (!apiResponse) {
-            return reject(new Error("Empty response from Authorize.Net"));
-          }
+          if (!apiResponse) return reject(new Error("Empty response from Authorize.Net"));
           const response = new APIContracts.CreateCustomerPaymentProfileResponse(apiResponse);
           if (response.getMessages().getResultCode() === APIContracts.MessageTypeEnum.OK) {
             resolve(response);
           } else {
-            reject(
-              new Error(
-                "Authorize.Net error: " +
-                  JSON.stringify(
-                    response.getMessages().getMessage()[0].getText()
-                  )
-              )
-            );
+            const m = response.getMessages().getMessage()[0];
+            const code = m && m.getCode ? m.getCode() : null;
+            const text = m && m.getText ? m.getText() : "Unknown error";
+            reject(new Error(`Authorize.Net error${code ? ` [${code}]` : ""}: ${text}`));
           }
         });
       });
+      return String(result.getCustomerPaymentProfileId());
+    };
 
-      createdPaymentProfileId = String(result.getCustomerPaymentProfileId());
+    if (!customerProfileId) {
+      const fresh = await createFreshCustomerProfile();
+      customerProfileId = fresh.customerProfileId;
+      createdPaymentProfileId = fresh.paymentProfileId;
+    }
+
+    // Add a payment profile under the customer profile. If the STORED profile no
+    // longer exists (E00040 — expected for every sandbox-era profile once the
+    // account is switched to production), transparently create a FRESH customer
+    // profile so re-entering a card just works instead of failing on the stale id.
+    if (customerProfileId && !createdPaymentProfileId) {
+      try {
+        createdPaymentProfileId = await addPaymentProfileUnder(customerProfileId);
+      } catch (e) {
+        if (isProfileNotFoundError(e)) {
+          logger.warn(
+            `user_payment_methods: stored customer profile ${customerProfileId} not found (E00040) — creating a fresh profile for user ${userId}`
+          );
+          const fresh = await createFreshCustomerProfile();
+          customerProfileId = fresh.customerProfileId;
+          createdPaymentProfileId =
+            fresh.paymentProfileId || (await addPaymentProfileUnder(customerProfileId));
+        } else {
+          throw e;
+        }
+      }
     }
 
     // After we know customerProfileId and createdPaymentProfileId,
@@ -645,6 +697,25 @@ router.post("/payment-method", authenticateToken, async (req, res) => {
   }
 });
 
+// Public (publishable) Accept UI config for the browser. Follows the server's
+// AUTHORIZE_ENV so the frontend tokenizes against the SAME environment the backend
+// uses — flip the server .env and the browser follows, no frontend redeploy.
+// Returns configured:false (never a sandbox key) if production keys aren't set yet,
+// so the frontend can show a clear "temporarily unavailable" instead of misfiring.
+router.get("/accept-config", authenticateToken, (req, res) => {
+  const production = isProduction();
+  const apiLoginId = API_LOGIN_ID || (production ? "" : SANDBOX_API_LOGIN_ID);
+  const clientKey = PUBLIC_CLIENT_KEY || (production ? "" : SANDBOX_PUBLIC_CLIENT_KEY);
+  return res.json({
+    success: true,
+    env: production ? "production" : "sandbox",
+    acceptUiUrl: getAcceptUiUrl(),
+    apiLoginId,
+    clientKey,
+    configured: !!(apiLoginId && clientKey),
+  });
+});
+
 // Cancel a subscription for the authenticated user (also cancels in Authorize.Net ARB when possible)
 router.post("/subscriptions/:id/cancel", authenticateToken, async (req, res) => {
   const userId = req.user && req.user.id ? req.user.id : res.locals.id;
@@ -877,6 +948,16 @@ router.put("/payment-method/:id", authenticateToken, async (req, res) => {
     });
   } catch (err) {
     logger.error("/payments/payment-method/:id error: " + err.message);
+    // Stored profile gone (E00040) — route the user to ADD a fresh card instead
+    // of "update", so the sandbox→production transition is graceful.
+    if (isProfileNotFoundError(err)) {
+      return res.status(409).json({
+        success: false,
+        code: "PAYMENT_PROFILE_NOT_FOUND",
+        message:
+          "Your saved card needs to be re-entered. Please add your payment method again — nothing has changed on your bank's side.",
+      });
+    }
     return res.status(400).json({
       success: false,
       message: "Your payment method could not be updated. Please try again.",
@@ -1333,6 +1414,17 @@ router.post("/subscriptions", authenticateToken, async (req, res) => {
     } catch (arbErr) {
       await connection.rollback();
       logger.error("/payments/subscriptions ARB create error: " + arbErr.message);
+      // The stored payment profile doesn't exist on this Authorize.Net account —
+      // expected for every sandbox-era profile after the production switch. Tell
+      // the user to re-enter their card rather than showing a generic decline.
+      if (isProfileNotFoundError(arbErr)) {
+        return res.status(409).json({
+          success: false,
+          code: "PAYMENT_PROFILE_NOT_FOUND",
+          message:
+            "Your saved card needs to be re-entered before you can subscribe. Please add your payment method again — nothing has changed on your bank's side.",
+        });
+      }
       return res.status(400).json({
         success: false,
         message: canceledOldSubscription
@@ -1534,6 +1626,34 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
       }
     }
 
+    // Sandbox→production re-verification prompt: the billing user has a
+    // subscription flagged needs_reverification and no active one. Owner-exempt
+    // accounts always read as paid and are never prompted (per the CCP edge case).
+    let needsReverification = false;
+    let reverificationDueAt = null;
+    // Only the ACCOUNT OWNER (the person whose billing this is) is prompted to
+    // re-confirm — an employee resolves to their owner's billing but has no card of
+    // their own, so they must not see the banner. billingUserId !== userId means the
+    // viewer is an employee inheriting someone else's billing → suppress.
+    const isBillingOwner = Number(billingUserId) === Number(userId);
+    if (!hasActiveSubscription && isBillingOwner) {
+      const [reverifyRows] = await connection.query(
+        `SELECT reverification_due_at FROM subscriptions
+          WHERE user_id = ? AND needs_reverification = 1
+          ORDER BY reverification_due_at DESC LIMIT 1`,
+        [billingUserId]
+      );
+      const [emailRows] = await connection.query(
+        "SELECT email FROM `user` WHERE id = ? LIMIT 1",
+        [billingUserId]
+      );
+      const billingEmail = String(emailRows[0] && emailRows[0].email ? emailRows[0].email : "").trim().toLowerCase();
+      if (reverifyRows.length && !OWNER_EXEMPT_EMAILS.has(billingEmail)) {
+        needsReverification = true;
+        reverificationDueAt = reverifyRows[0].reverification_due_at || null;
+      }
+    }
+
     return res.json({
       success: true,
       hasPaymentMethod,
@@ -1541,6 +1661,8 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
       hasActiveSubscription,
       subscription,
       features,
+      needs_reverification: needsReverification,
+      reverification_due_at: reverificationDueAt,
     });
   } catch (err) {
     logger.error("/payments/billing/status error: " + err.message);
@@ -1553,102 +1675,653 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
   }
 });
 
-// Authorize.Net webhook endpoint to keep local subscriptions in sync with ARB events
-router.post("/webhook", async (req, res) => {
+// Map an Authorize.Net ARB event type (or status string) to a LOCAL subscription
+// status. Local status intentionally stays within the existing value set the rest
+// of the app understands ({active, canceled}) — anything that isn't clearly active
+// (suspended/terminated/expired/cancelled) means "not billing", so it maps to
+// 'canceled'. The admin page surfaces the richer live ARB status separately.
+// Returns null for events we don't act on.
+function localStatusForArbEvent(eventType) {
+  const t = String(eventType || "").toLowerCase();
+  if (!t.includes("subscription")) return null;
+  if (t.includes("cancel") || t.includes("terminat") || t.includes("suspend") || t.includes("expir")) {
+    return "canceled";
+  }
+  if (t.includes("created") || t.includes("updated") || t.includes("renew")) {
+    return "active";
+  }
+  return null;
+}
+
+// Timing-safe, case-insensitive comparison of the received signature against the
+// expected HMAC. Authorize.Net sends `X-ANET-Signature: sha512=<HEX>` (upper-case
+// hex); we normalise both sides and compare as bytes so a length/format mismatch
+// can't throw.
+function signatureMatches(expectedHex, headerValue) {
+  const received = String(headerValue || "").trim().replace(/^sha512=/i, "").toLowerCase();
+  const expected = String(expectedHex || "").toLowerCase();
+  if (!received || received.length !== expected.length) return false;
   try {
-    const rawBody = req.rawBody || JSON.stringify(req.body || {});
-    const signatureHeader =
-      req.get("X-ANET-SIGNATURE") || req.get("x-anet-signature");
+    return crypto.timingSafeEqual(Buffer.from(received, "utf8"), Buffer.from(expected, "utf8"));
+  } catch (e) {
+    return false;
+  }
+}
 
-    if (WEBHOOK_SIGNATURE_KEY && signatureHeader) {
-      const expected =
-        "sha512=" +
-        crypto
-          .createHmac("sha512", WEBHOOK_SIGNATURE_KEY)
-          .update(rawBody, "utf8")
-          .digest("hex");
+// Authorize.Net webhook endpoint to keep local subscriptions in sync with ARB
+// events (declines/cancellations/suspensions/renewals initiated outside the app).
+// Verifies the HMAC-SHA512 signature over the RAW body before trusting anything.
+// Status codes are meaningful: 401 = bad/absent signature, 500 = misconfig or a
+// real DB failure (so it is noticed and Authorize.Net retries), 200 = handled or
+// intentionally ignored. It no longer swallows processing failures as 200.
+router.post("/webhook", async (req, res) => {
+  // 1) Authenticity — never trust an unsigned/misconfigured billing webhook.
+  if (!WEBHOOK_SIGNATURE_KEY) {
+    logger.error(
+      "/payments/webhook rejected: AUTHORIZE_SIGNATURE_KEY is not configured — cannot verify webhook authenticity."
+    );
+    return res.status(500).send("Webhook signature key not configured");
+  }
 
-      if (expected !== signatureHeader) {
-        logger.warn("/payments/webhook signature mismatch");
-        return res.status(401).send("Invalid signature");
+  const rawBody =
+    typeof req.rawBody === "string" && req.rawBody.length
+      ? req.rawBody
+      : JSON.stringify(req.body || {});
+  const signatureHeader = req.get("X-ANET-Signature") || req.get("x-anet-signature");
+
+  const expectedHex = crypto
+    .createHmac("sha512", WEBHOOK_SIGNATURE_KEY)
+    .update(rawBody, "utf8")
+    .digest("hex");
+
+  if (!signatureHeader || !signatureMatches(expectedHex, signatureHeader)) {
+    logger.warn("/payments/webhook rejected: missing/invalid X-ANET-Signature");
+    return res.status(401).send("Invalid signature");
+  }
+
+  // 2) Parse + map the event.
+  const event = req.body || {};
+  const eventType = event.eventType || "";
+  const payload = event.payload || {};
+  const subscriptionId =
+    payload.id || payload.subscriptionId || payload.subscription_id || null;
+
+  const newStatus = localStatusForArbEvent(eventType);
+
+  // Verified, but not an event we act on (or no subscription reference) — ack so
+  // Authorize.Net stops retrying. This is a legitimate 200, not a swallowed error.
+  if (!subscriptionId || !newStatus) {
+    return res.status(200).send("Ignored");
+  }
+
+  // 3) Persist. A genuine DB failure here returns 500 (logged + retried), never a
+  // silent 200.
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    await connection.query(
+      "UPDATE subscriptions SET status = ? WHERE authorize_subscription_id = ?",
+      [newStatus, String(subscriptionId)]
+    );
+
+    const [subRows] = await connection.query(
+      "SELECT user_id, plan_id FROM subscriptions WHERE authorize_subscription_id = ? ORDER BY created_at DESC LIMIT 1",
+      [String(subscriptionId)]
+    );
+
+    if (subRows.length) {
+      const subscription = subRows[0];
+      await syncSubcontractorRole12Rights({
+        connection,
+        userId: subscription.user_id,
+        planId: newStatus === "active" ? subscription.plan_id : null,
+      });
+    }
+
+    logger.info(
+      `/payments/webhook applied ${eventType} -> ${newStatus} for ARB subscription ${subscriptionId}`
+    );
+    return res.status(200).send("OK");
+  } catch (dbErr) {
+    logger.error("/payments/webhook DB error: " + dbErr.message);
+    // Surface the failure so it is retried/noticed rather than lost.
+    return res.status(500).send("Processing failed");
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ─── Admin: Plan & Payment Status ──────────────────────────────────────────────
+// Sensitive billing data — gated by requireAdmin (super-admin 246 OR owner email).
+
+const EMPLOYEE_CATEGORY = 1;
+const TRIAL_DAYS = 60;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const NEVER_GATED_ROLES = new Set([12]);
+
+function isBidProPlan(name, level) {
+  return (level === null || level === undefined) && /bid\s*pro/i.test(String(name || ""));
+}
+
+// Live ARB subscription status. Returns a lowercase status string
+// (active/suspended/expired/canceled/terminated) or throws.
+async function getArbSubscriptionStatus(remoteId) {
+  const merchantAuthentication = new APIContracts.MerchantAuthenticationType();
+  merchantAuthentication.setName(API_LOGIN_ID);
+  merchantAuthentication.setTransactionKey(TRANSACTION_KEY);
+
+  const request = new APIContracts.ARBGetSubscriptionStatusRequest();
+  request.setMerchantAuthentication(merchantAuthentication);
+  request.setSubscriptionId(String(remoteId));
+
+  const ctrl = new APIControllers.ARBGetSubscriptionStatusController(request.getJSON());
+  ctrl.setEnvironment(getApiEnvironment());
+
+  return new Promise((resolve, reject) => {
+    ctrl.execute(() => {
+      const apiResponse = ctrl.getResponse();
+      if (!apiResponse) return reject(new Error("Empty response from Authorize.Net"));
+      const response = new APIContracts.ARBGetSubscriptionStatusResponse(apiResponse);
+      if (response.getMessages().getResultCode() === APIContracts.MessageTypeEnum.OK) {
+        resolve(String(response.getStatus() || "").toLowerCase());
+      } else {
+        const m = response.getMessages().getMessage()[0];
+        const code = m && m.getCode ? m.getCode() : null;
+        const text = m && m.getText ? m.getText() : "unknown";
+        reject(new Error(`Authorize.Net ARB status error${code ? ` [${code}]` : ""}: ${text}`));
       }
+    });
+  });
+}
+
+// Map a live ARB status to the local {active|canceled} value set (see the webhook
+// note): only 'active' is billing; everything else is treated as not-active.
+function localStatusForArbStatus(arbStatus) {
+  return String(arbStatus || "").toLowerCase() === "active" ? "active" : "canceled";
+}
+
+// Short cache so re-loads / multiple rows don't hammer the ARB API.
+const arbStatusCache = new Map(); // remoteId -> { status, at }
+const ARB_CACHE_MS = 10 * 60 * 1000;
+
+// GET /payments/admin/subscriptions-overview
+// Fast, LOCAL-only snapshot of every user's plan + payment status. No ARB calls
+// here (those are lazy, per-row, via /admin/subscription-live/:id) so the page
+// never blocks on the payment provider.
+router.get(
+  "/admin/subscriptions-overview",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    let connection;
+    try {
+      connection = await pool.getConnection();
+
+      const [users] = await connection.query(
+        `SELECT u.id, u.name, u.email, u.role, u.category, u.created_by, u.created_at,
+                r.name AS role_name
+           FROM \`user\` u
+           LEFT JOIN role r ON r.id = u.role
+          ORDER BY u.name ASC`
+      );
+
+      const [activeSubs] = await connection.query(
+        `SELECT s.id AS sub_id, s.user_id, s.amount, s.billing_interval, s.status,
+                s.next_billing_at, s.authorize_subscription_id,
+                p.name AS plan_name, p.level AS plan_level
+           FROM subscriptions s
+           JOIN plans p ON p.id = s.plan_id
+          WHERE s.status = 'active'`
+      );
+
+      const [pastCounts] = await connection.query(
+        `SELECT user_id, COUNT(*) AS c
+           FROM subscriptions
+          WHERE status <> 'active'
+          GROUP BY user_id`
+      );
+
+      const [reverifyRows] = await connection.query(
+        `SELECT DISTINCT user_id FROM subscriptions WHERE needs_reverification = 1`
+      );
+      const reverifySet = new Set(reverifyRows.map((r) => Number(r.user_id)));
+
+      const usersById = new Map();
+      users.forEach((u) => usersById.set(Number(u.id), u));
+
+      const activeByUser = new Map(); // userId -> [subs]
+      activeSubs.forEach((s) => {
+        const k = Number(s.user_id);
+        if (!activeByUser.has(k)) activeByUser.set(k, []);
+        activeByUser.get(k).push(s);
+      });
+
+      const pastByUser = new Map();
+      pastCounts.forEach((r) => pastByUser.set(Number(r.user_id), Number(r.c)));
+
+      const rows = users.map((u) => {
+        const isEmployee = Number(u.category) === EMPLOYEE_CATEGORY && !!u.created_by;
+        const effectiveId = isEmployee ? Number(u.created_by) : Number(u.id);
+        const effUser = usersById.get(effectiveId) || u;
+
+        const effEmail = String(effUser.email || "").trim().toLowerCase();
+        const effRole = Number(effUser.role);
+        const effSubs = activeByUser.get(effectiveId) || [];
+
+        // Separate the tier plan from the Bid Pro add-on.
+        const tierSub = effSubs.find((s) => !isBidProPlan(s.plan_name, s.plan_level)) || null;
+        const addOnSub = effSubs.find((s) => isBidProPlan(s.plan_name, s.plan_level)) || null;
+        const hasActiveSubscription = effSubs.length > 0;
+
+        // Access mode — identical rules to utils/access.getAccessInfo, computed
+        // here in JS over the batched data (no per-user DB round trips).
+        const createdAt = effUser.created_at ? new Date(effUser.created_at) : null;
+        let daysLeft = 0;
+        let trialEndsAt = null;
+        if (createdAt && !isNaN(createdAt.getTime())) {
+          const end = createdAt.getTime() + TRIAL_DAYS * DAY_MS;
+          trialEndsAt = new Date(end).toISOString();
+          daysLeft = Math.max(0, Math.ceil((end - Date.now()) / DAY_MS));
+        }
+        const ownerExempt = OWNER_EXEMPT_EMAILS.has(effEmail);
+        let accessMode;
+        if (ownerExempt || NEVER_GATED_ROLES.has(effRole) || hasActiveSubscription) {
+          accessMode = "paid";
+        } else if (!createdAt || isNaN(createdAt.getTime())) {
+          accessMode = "paid";
+        } else {
+          accessMode = daysLeft > 0 ? "trial_active" : "expired_free";
+        }
+
+        return {
+          id: Number(u.id),
+          name: u.name,
+          email: u.email,
+          role: Number(u.role),
+          role_name: u.role_name,
+          category: Number(u.category),
+          is_employee: isEmployee,
+          inherits_from: isEmployee
+            ? { id: effectiveId, name: effUser.name || null, email: effUser.email || null }
+            : null,
+          owner_exempt: ownerExempt,
+          access_mode: accessMode,
+          is_paying: accessMode === "paid" && (hasActiveSubscription || (!ownerExempt && !NEVER_GATED_ROLES.has(effRole))),
+          trial_ends_at: trialEndsAt,
+          trial_days_left: daysLeft,
+          plan: tierSub
+            ? {
+                subscription_id: tierSub.sub_id,
+                name: tierSub.plan_name,
+                level: tierSub.plan_level,
+                amount: tierSub.amount,
+                interval: tierSub.billing_interval,
+                status: tierSub.status,
+                next_billing_at: tierSub.next_billing_at,
+                authorize_subscription_id: tierSub.authorize_subscription_id,
+              }
+            : null,
+          bid_pro_addon: addOnSub
+            ? {
+                subscription_id: addOnSub.sub_id,
+                name: addOnSub.plan_name,
+                amount: addOnSub.amount,
+                interval: addOnSub.billing_interval,
+                status: addOnSub.status,
+                next_billing_at: addOnSub.next_billing_at,
+                authorize_subscription_id: addOnSub.authorize_subscription_id,
+              }
+            : null,
+          has_past_subscriptions: (pastByUser.get(Number(u.id)) || 0) > 0,
+          needs_reverification: reverifySet.has(effectiveId),
+        };
+      });
+
+      return res.status(200).json({ success: true, count: rows.length, users: rows });
+    } catch (err) {
+      logger.error("/payments/admin/subscriptions-overview error: " + err.message);
+      return res.status(500).json({ success: false, message: "Unable to load billing overview." });
+    } finally {
+      if (connection) connection.release();
     }
+  }
+);
 
-    const event = req.body || {};
-    const eventType = event.eventType || "";
-    const payload = event.payload || {};
-
-    // We care mainly about subscription-related events.
-    let subscriptionId =
-      payload.id || payload.subscriptionId || payload.subscription_id || null;
-
-    if (!subscriptionId) {
-      // Nothing to do for events without a subscription reference.
-      return res.status(200).send("Ignored");
+// GET /payments/admin/subscription-live/:id  (?refresh=1 bypasses the cache)
+// Lazy, per-subscription live check against Authorize.Net ARB. If the live status
+// disagrees with the local record, it reconciles the local record. On any ARB
+// error/timeout it returns checked:false with the local status (so the page shows
+// "couldn't verify live" rather than failing).
+router.get(
+  "/admin/subscription-live/:id",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    const subId = Number(req.params.id);
+    if (!Number.isFinite(subId) || subId <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid subscription id" });
     }
+    const force = String(req.query.refresh || "") === "1";
 
-    let newStatus = null;
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      const [rows] = await connection.query(
+        "SELECT id, user_id, plan_id, status, authorize_subscription_id FROM subscriptions WHERE id = ? LIMIT 1",
+        [subId]
+      );
+      if (!rows.length) {
+        return res.status(404).json({ success: false, message: "Subscription not found." });
+      }
+      const sub = rows[0];
+      const localBefore = sub.status;
+      const remoteId = sub.authorize_subscription_id;
 
-    if (
-      eventType === "net.authorize.customer.subscription.cancelled" ||
-      eventType === "net.authorize.customer.subscription.terminated"
-    ) {
-      newStatus = "canceled";
-    } else if (
-      eventType === "net.authorize.customer.subscription.suspended" ||
-      eventType === "net.authorize.customer.subscription.pastdue"
-    ) {
-      // We do not currently distinguish these in the app; treat as not active.
-      newStatus = "canceled";
-    } else if (
-      eventType === "net.authorize.customer.subscription.created" ||
-      eventType === "net.authorize.customer.subscription.updated" ||
-      eventType === "net.authorize.customer.subscription.renewed"
-    ) {
-      // Ensure the local record is active if ARB says so.
-      newStatus = "active";
+      if (!remoteId) {
+        return res.json({ success: true, checked: false, reason: "no_authorize_subscription_id", local_status: localBefore });
+      }
+      if (!API_LOGIN_ID || !TRANSACTION_KEY) {
+        return res.json({ success: true, checked: false, reason: "authnet_not_configured", local_status: localBefore });
+      }
+
+      let arbStatus;
+      const cached = arbStatusCache.get(String(remoteId));
+      if (!force && cached && Date.now() - cached.at < ARB_CACHE_MS) {
+        arbStatus = cached.status;
+      } else {
+        try {
+          arbStatus = await getArbSubscriptionStatus(remoteId);
+          arbStatusCache.set(String(remoteId), { status: arbStatus, at: Date.now() });
+        } catch (e) {
+          logger.error("/payments/admin/subscription-live ARB error: " + e.message);
+          return res.json({ success: true, checked: false, reason: "authnet_error", error: e.message, local_status: localBefore });
+        }
+      }
+
+      const mapped = localStatusForArbStatus(arbStatus);
+      let reconciled = false;
+      if (mapped !== localBefore) {
+        await connection.query("UPDATE subscriptions SET status = ? WHERE id = ?", [mapped, subId]);
+        await syncSubcontractorRole12Rights({
+          connection,
+          userId: sub.user_id,
+          planId: mapped === "active" ? sub.plan_id : null,
+        });
+        reconciled = true;
+        logger.info(`/payments/admin/subscription-live reconciled sub ${subId}: ${localBefore} -> ${mapped} (ARB=${arbStatus})`);
+      }
+
+      return res.json({
+        success: true,
+        checked: true,
+        arb_status: arbStatus,
+        local_status: mapped,
+        local_status_before: localBefore,
+        mismatch: mapped !== localBefore,
+        reconciled,
+      });
+    } catch (err) {
+      logger.error("/payments/admin/subscription-live error: " + err.message);
+      return res.status(500).json({ success: false, message: "Unable to check live subscription status." });
+    } finally {
+      if (connection) connection.release();
     }
+  }
+);
 
-    if (!newStatus) {
-      return res.status(200).send("Ignored");
+// POST /payments/admin/reverify-sandbox-subscriptions
+// ONE-TIME go-live action (owner-run, after switching AUTHORIZE_ENV to production).
+// Marks every currently-'active' subscription as needing re-verification and moves
+// its status to 'canceled' — these all reference sandbox profiles/ARB ids that don't
+// exist on the live account and never actually charged anyone, so they must not keep
+// reading as "paying". They stay visible (history + the flag) and their owners get a
+// re-add-card prompt. Idempotent-ish: only touches rows still 'active'.
+router.post(
+  "/admin/reverify-sandbox-subscriptions",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    const dryRun = !!(req.body && req.body.dryRun);
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      const [before] = await connection.query(
+        "SELECT COUNT(*) AS c FROM subscriptions WHERE status = 'active'"
+      );
+      // Grace window: flagged accounts keep full access (utils/access.js) until
+      // this deadline, so the go-live notice can promise uninterrupted service
+      // while users re-enter a card + re-subscribe. Overridable via ?graceDays=.
+      const graceDays = Math.max(0, Math.min(90, Number(req.query.graceDays) || REVERIFY_GRACE_DAYS));
+
+      // Preview only — how many active subscriptions WOULD be flagged. No mutation.
+      if (dryRun) {
+        return res.json({
+          success: true,
+          dryRun: true,
+          active_count: before[0] ? Number(before[0].c) : 0,
+          grace_days: graceDays,
+        });
+      }
+      const [result] = await connection.query(
+        "UPDATE subscriptions SET needs_reverification = 1, status = 'canceled', reverification_due_at = DATE_ADD(NOW(), INTERVAL ? DAY) WHERE status = 'active'",
+        [graceDays]
+      );
+      logger.info(
+        `/payments/admin/reverify-sandbox-subscriptions flagged ${result.affectedRows} active subscription(s), ${graceDays}-day grace`
+      );
+      return res.json({
+        success: true,
+        active_before: before[0] ? Number(before[0].c) : 0,
+        flagged: result.affectedRows || 0,
+        grace_days: graceDays,
+      });
+    } catch (err) {
+      logger.error("/payments/admin/reverify-sandbox-subscriptions error: " + err.message);
+      return res.status(500).json({ success: false, message: "Unable to flag subscriptions." });
+    } finally {
+      if (connection) connection.release();
     }
+  }
+);
+
+// ── Owner-triggered re-verification emails (A = heads-up, B = action) ──────────
+// Approved copy from the prior CCP, personalized per recipient. Sent only when the
+// owner explicitly triggers it (never scheduled). Audience mirrors the in-app
+// banner: account owners only (subscriptions belong to owners, so employees are
+// inherently excluded), minus owner-exempt + anyone without a real email.
+
+function fmtDate(d) {
+  try {
+    return new Date(d).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+  } catch (e) {
+    return String(d || "");
+  }
+}
+
+const DASHBOARD_URL = "https://seejobrun.com/user-dashboard";
+
+function buildReverifyEmail(type, { firstName, migrationDate, deadline }) {
+  const hi = `Hi ${firstName || "there"},`;
+  if (type === "A") {
+    const when = migrationDate ? fmtDate(migrationDate) : "shortly";
+    const subject = "A small upgrade to SeeJobRun billing — quick action coming";
+    const text =
+      `${hi}\n\nWe're upgrading the secure payment system behind SeeJobRun on ${when}. ` +
+      `After that, you'll need to re-confirm your payment card and plan — a quick one-time step.\n\n` +
+      `Nothing is happening to your account or data, and there's nothing to do yet. When the upgrade goes live ` +
+      `you'll have a 14-day window (and an in-app reminder) to re-confirm, with no interruption to your access in the meantime. ` +
+      `We'll send simple instructions then.\n\nThanks for being with us,\nSeeJobRun`;
+    const html =
+      `<p>${hi}</p><p>We're upgrading the secure payment system behind SeeJobRun on <strong>${when}</strong>. ` +
+      `After that, you'll need to re-confirm your payment card and plan — a quick one-time step.</p>` +
+      `<p>Nothing is happening to your account or data, and there's nothing to do yet. When the upgrade goes live ` +
+      `you'll have a <strong>14-day window</strong> (and an in-app reminder) to re-confirm, with <strong>no interruption to your access</strong> in the meantime. ` +
+      `We'll send simple instructions then.</p><p>Thanks for being with us,<br/>SeeJobRun</p>`;
+    return { subject, text, html };
+  }
+  // type B
+  const by = deadline ? fmtDate(deadline) : "the date shown in the app";
+  const subject = `Action needed: re-confirm your payment method by ${by}`;
+  const text =
+    `${hi}\n\nOur payment system upgrade is now live. To keep your subscription active, please re-confirm your card and plan by ${by}. ` +
+    `Your full access continues until then.\n\n` +
+    `A couple of reassurances: your account and data are safe, and nothing has been charged during this upgrade.\n\n` +
+    `It takes about a minute:\n` +
+    `1. Log in at ${DASHBOARD_URL}\n` +
+    `2. Go to Profile → Payment Methods → Add Card\n` +
+    `3. Open Subscription and choose your plan to confirm\n\n` +
+    `Questions? Just reply to this email.\n\nThanks,\nSeeJobRun`;
+  const html =
+    `<p>${hi}</p><p>Our payment system upgrade is now live. To keep your subscription active, please re-confirm your card and plan by <strong>${by}</strong>. ` +
+    `Your full access continues until then.</p>` +
+    `<p>A couple of reassurances: your account and data are safe, and nothing has been charged during this upgrade.</p>` +
+    `<p>It takes about a minute:</p><ol>` +
+    `<li>Log in at <a href="${DASHBOARD_URL}">${DASHBOARD_URL}</a></li>` +
+    `<li>Go to <strong>Profile → Payment Methods → Add Card</strong></li>` +
+    `<li>Open <strong>Subscription</strong> and choose your plan to confirm</li></ol>` +
+    `<p>Questions? Just reply to this email.</p><p>Thanks,<br/>SeeJobRun</p>`;
+  return { subject, text, html };
+}
+
+// POST /payments/admin/send-reverification-email
+// body: { emailType: 'A'|'B', migrationDate?: 'YYYY-MM-DD' (required for A send),
+//         dryRun?: boolean }
+// dryRun returns the computed recipient list WITHOUT sending, so the owner can
+// review it against the Plan & Payment Status page before actually sending.
+router.post(
+  "/admin/send-reverification-email",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    const emailType = String((req.body && req.body.emailType) || "").toUpperCase();
+    const dryRun = !!(req.body && req.body.dryRun);
+    const migrationDate = req.body && req.body.migrationDate ? String(req.body.migrationDate) : "";
+    if (emailType !== "A" && emailType !== "B") {
+      return res.status(400).json({ success: false, message: "emailType must be 'A' or 'B'." });
+    }
+    if (emailType === "A" && !dryRun && !migrationDate) {
+      return res.status(400).json({ success: false, message: "migrationDate is required to send Email A." });
+    }
+    const triggeredBy = (req.user && req.user.id) || (res.locals && res.locals.id) || null;
 
     let connection;
     try {
       connection = await pool.getConnection();
 
-      await connection.query(
-        "UPDATE subscriptions SET status = ? WHERE authorize_subscription_id = ?",
-        [newStatus, String(subscriptionId)]
-      );
+      // Audience: account owners. Email A → those with an active sub (about to be
+      // flagged); Email B → those already flagged needs_reverification. Subscriptions
+      // belong to owners, so employees are inherently excluded.
+      const sql =
+        emailType === "B"
+          ? // Flagged owners who have NOT yet re-subscribed. Excluding anyone with a
+            // current active subscription means a repeat send is a safe reminder to
+            // non-responders — people who already re-added a card + re-subscribed
+            // drop out automatically (their old flagged row is ignored).
+            `SELECT s.user_id AS id, u.name, u.email, MAX(s.reverification_due_at) AS due
+               FROM subscriptions s JOIN \`user\` u ON u.id = s.user_id
+              WHERE s.needs_reverification = 1
+                AND NOT EXISTS (
+                  SELECT 1 FROM subscriptions a WHERE a.user_id = s.user_id AND a.status = 'active'
+                )
+              GROUP BY s.user_id, u.name, u.email`
+          : `SELECT s.user_id AS id, u.name, u.email, NULL AS due
+               FROM subscriptions s JOIN \`user\` u ON u.id = s.user_id
+              WHERE s.status = 'active'
+              GROUP BY s.user_id, u.name, u.email`;
+      const [rows] = await connection.query(sql);
 
-      const [subRows] = await connection.query(
-        "SELECT user_id, plan_id FROM subscriptions WHERE authorize_subscription_id = ? ORDER BY created_at DESC LIMIT 1",
-        [String(subscriptionId)]
-      );
+      const recipients = [];
+      const skipped = [];
+      for (const r of rows) {
+        const email = String(r.email || "").trim();
+        if (OWNER_EXEMPT_EMAILS.has(email.toLowerCase())) {
+          skipped.push({ id: r.id, name: r.name, reason: "owner-exempt" });
+          continue;
+        }
+        if (!isRealEmail(email) || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          skipped.push({ id: r.id, name: r.name, reason: "no valid email on file" });
+          continue;
+        }
+        recipients.push({ id: r.id, name: r.name, email, due: r.due });
+      }
 
-      if (subRows.length) {
-        const subscription = subRows[0];
-        await syncSubcontractorRole12Rights({
-          connection,
-          userId: subscription.user_id,
-          planId: newStatus === "active" ? subscription.plan_id : null,
+      if (dryRun) {
+        return res.json({
+          success: true,
+          dryRun: true,
+          emailType,
+          total: recipients.length,
+          recipients: recipients.map((r) => ({ id: r.id, name: r.name, email: r.email })),
+          skipped,
         });
       }
-    } catch (dbErr) {
-      logger.error("/payments/webhook DB error: " + dbErr.message);
-      // Still return 200 so Authorize.Net does not keep retrying forever.
-      return res.status(200).send("Received");
+
+      let sent = 0;
+      const failed = [];
+      for (const r of recipients) {
+        const firstName = String(r.name || "").trim().split(/\s+/)[0] || "there";
+        const deadline = r.due ? r.due : "";
+        const msg = buildReverifyEmail(emailType, { firstName, migrationDate, deadline });
+        const okSend = await sendEmail(r.email, msg.subject, msg.text, msg.html);
+        try {
+          await connection.query(
+            `INSERT INTO reverification_email_log (user_id, email_type, recipient_email, status, triggered_by)
+             VALUES (?, ?, ?, ?, ?)`,
+            [r.id, emailType, r.email, okSend ? "sent" : "failed", triggeredBy]
+          );
+        } catch (logErr) {
+          logger.error("reverification_email_log insert failed: " + logErr.message);
+        }
+        if (okSend) sent++;
+        else failed.push({ id: r.id, email: r.email });
+      }
+
+      logger.info(
+        `/payments/admin/send-reverification-email type=${emailType} sent=${sent} failed=${failed.length} skipped=${skipped.length} by=${triggeredBy}`
+      );
+      return res.json({ success: true, emailType, total: recipients.length, sent, failed, skipped });
+    } catch (err) {
+      logger.error("/payments/admin/send-reverification-email error: " + err.message);
+      return res.status(500).json({ success: false, message: "Unable to send re-verification emails." });
     } finally {
       if (connection) connection.release();
     }
-
-    return res.status(200).send("OK");
-  } catch (err) {
-    logger.error("/payments/webhook error: " + err.message);
-    // Respond 200 to avoid repeated retries; log for manual inspection.
-    return res.status(200).send("Error logged");
   }
-});
+);
+
+// GET /payments/admin/reverification-email-log
+// Read-only history of the re-verification email sends (reads the existing
+// reverification_email_log as-is). Newest first; joins names for display.
+router.get(
+  "/admin/reverification-email-log",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      const [rows] = await connection.query(
+        `SELECT l.id, l.user_id, u.name AS user_name, l.email_type, l.recipient_email,
+                l.status, l.sent_at, l.triggered_by, t.name AS triggered_by_name
+           FROM reverification_email_log l
+           LEFT JOIN \`user\` u ON u.id = l.user_id
+           LEFT JOIN \`user\` t ON t.id = l.triggered_by
+          ORDER BY l.sent_at DESC, l.id DESC
+          LIMIT 1000`
+      );
+      const [counts] = await connection.query(
+        `SELECT status, COUNT(*) AS c FROM reverification_email_log GROUP BY status`
+      );
+      const summary = counts.reduce((m, r) => { m[r.status] = Number(r.c); return m; }, {});
+      return res.status(200).json({ success: true, entries: rows, summary });
+    } catch (err) {
+      logger.error("/payments/admin/reverification-email-log error: " + err.message);
+      return res.status(500).json({ success: false, message: "Unable to load send history." });
+    } finally {
+      if (connection) connection.release();
+    }
+  }
+);
 
 module.exports = router;

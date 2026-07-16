@@ -423,6 +423,55 @@ async function ensureUserTimezoneColumn(connection) {
   userTimezoneEnsured = true;
 }
 
+// `subscriptions.needs_reverification` — set at the sandbox→production go-live so
+// pre-switch "active" subscriptions (which point at sandbox profiles/ARB ids that
+// don't exist on the live account, and never really charged anyone) can be shown
+// as "needs re-verification" and their owners prompted to re-add a card. Adding the
+// flag column keeps the existing `status` value set untouched. Idempotent.
+let subReverifyEnsured = false;
+async function ensureSubscriptionReverifyColumn(connection) {
+  if (subReverifyEnsured) return;
+  const [cols] = await connection.query(
+    "SHOW COLUMNS FROM subscriptions LIKE 'needs_reverification'"
+  );
+  if (!cols.length) {
+    await connection.query(
+      "ALTER TABLE subscriptions ADD COLUMN needs_reverification TINYINT NOT NULL DEFAULT 0"
+    );
+  }
+  // Grace deadline: while this is in the future, a flagged account keeps FULL
+  // access (see utils/access.js) even though its sandbox subscription is canceled,
+  // so users have an uninterrupted window to re-enter a card + re-subscribe.
+  const [dueCols] = await connection.query(
+    "SHOW COLUMNS FROM subscriptions LIKE 'reverification_due_at'"
+  );
+  if (!dueCols.length) {
+    await connection.query(
+      "ALTER TABLE subscriptions ADD COLUMN reverification_due_at DATETIME NULL"
+    );
+  }
+  subReverifyEnsured = true;
+}
+
+// Audit log for the owner-triggered re-verification emails (who got which email,
+// when, and whether it sent) so a send can be verified afterward. Idempotent.
+let reverifyEmailLogEnsured = false;
+async function ensureReverifyEmailLogTable(connection) {
+  if (reverifyEmailLogEnsured) return;
+  await connection.query(
+    `CREATE TABLE IF NOT EXISTS reverification_email_log (
+       id INT PRIMARY KEY AUTO_INCREMENT,
+       user_id INT NULL,
+       email_type CHAR(1) NOT NULL,
+       recipient_email VARCHAR(190) NULL,
+       status VARCHAR(20) NOT NULL,
+       triggered_by INT NULL,
+       sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB`
+  );
+  reverifyEmailLogEnsured = true;
+}
+
 module.exports = {
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,
@@ -431,4 +480,6 @@ module.exports = {
   ensureScheduleTemplateTables,
   ensurePlanLevelColumn,
   ensureUserTimezoneColumn,
+  ensureSubscriptionReverifyColumn,
+  ensureReverifyEmailLogTable,
 };

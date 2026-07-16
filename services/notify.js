@@ -171,6 +171,7 @@ async function dispatchScheduleNotification(conn, { userId, jobName, items, send
 
 module.exports = {
   sendEmail,
+  isRealEmail,
   sendPushToUser,
   insertNotification,
   dispatchScheduleNotification,

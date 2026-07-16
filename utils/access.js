@@ -135,7 +135,31 @@ async function getAccessInfo(userId, connection) {
         mode = daysLeft > 0 ? "trial_active" : "expired_free";
       }
 
-      return { mode, trialEndsAt, daysLeft, hasActiveSubscription };
+      // Re-verification grace: an account whose sandbox subscription was flagged
+      // at the production switch keeps FULL access until its grace deadline, so the
+      // go-live notice can honestly promise uninterrupted service. Only matters for
+      // accounts that would otherwise be expired_free (trial/paid already have it).
+      // Scoped try/catch so a not-yet-migrated column can never lock anyone out.
+      let reverifyGraceUntil = null;
+      if (mode === "expired_free") {
+        try {
+          const [graceRows] = await conn.query(
+            `SELECT reverification_due_at FROM subscriptions
+              WHERE user_id = ? AND needs_reverification = 1
+                AND reverification_due_at IS NOT NULL AND reverification_due_at > NOW()
+              ORDER BY reverification_due_at DESC LIMIT 1`,
+            [effectiveId]
+          );
+          if (graceRows.length) {
+            reverifyGraceUntil = graceRows[0].reverification_due_at;
+            mode = "paid"; // grace window: full access while they re-verify
+          }
+        } catch (graceErr) {
+          // Column may not exist pre-migration — ignore and keep expired_free.
+        }
+      }
+
+      return { mode, trialEndsAt, daysLeft, hasActiveSubscription, reverifyGraceUntil };
     } catch (err) {
       logger.error("getAccessInfo error: " + err.message);
       return fallback;
@@ -344,6 +368,7 @@ function denyExpiredFreeWrites(req, res, next) {
 
 module.exports = {
   TRIAL_DAYS,
+  OWNER_EXEMPT_EMAILS,
   resolveOwnerId,
   getAccessInfo,
   getAccessMode,
