@@ -81,9 +81,19 @@ function isProfileNotFoundError(err) {
   );
 }
 
+// Validation mode for CIM customer/payment-profile create + update calls.
+// In PRODUCTION we use NONE (not liveMode): liveMode runs a real AVS/auth
+// validation transaction when the profile is created, and because we don't collect
+// a full billing address (only name + optional zip), that check fails with
+// Authorize.Net E00027 ("one or more missing or invalid required fields") — which
+// blocked all production card-adds. With NONE, the profile is stored from the
+// Accept.js opaque token without that pre-check; the card is validated at the first
+// real ARB subscription charge instead. Sandbox stays TESTMODE (unchanged behavior).
+// Applies consistently to all three billing paths since each calls this helper:
+// createCustomerProfile, createCustomerPaymentProfile, and PUT /payment-method/:id.
 function getValidationMode() {
   return AUTHORIZE_ENV === "production"
-    ? APIContracts.ValidationModeEnum.LIVEMODE
+    ? APIContracts.ValidationModeEnum.NONE
     : APIContracts.ValidationModeEnum.TESTMODE;
 }
 
