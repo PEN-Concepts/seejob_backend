@@ -76,8 +76,11 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
     await conn.query(`INSERT INTO plan_features (plan_id, feature_key) VALUES (4,'job'),(4,'task')`);
     await conn.query(`INSERT INTO role VALUES (14,'General Contractor'),(12,'Subcontractor')`);
     await conn.query(`INSERT INTO plans (id,name,amount,\`interval\`,is_active,level) VALUES
+      (1,'Basic',29.00,'monthly',1,1),
       (4,'Gold',99.00,'monthly',1,4),
-      (6,'Bid Pro',19.00,'monthly',1,NULL)`);
+      (5,'Platinum',250.00,'monthly',1,5),
+      (6,'Bid Pro',19.00,'monthly',1,NULL),
+      (7,'Legacy Off',10.00,'monthly',0,NULL)`);
 
     // Users: 100 owner-exempt (no sub), 101 trial (new), 102 expired (old, no sub),
     // 103 paying Gold, 104 employee of 103, 105 for webhook cancel test.
@@ -181,6 +184,19 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
     const cfg = await request(app).get('/api/payments/accept-config').set('Authorization', tok(103));
     ok(cfg.status === 200 && /jstest\.authorize\.net/.test(cfg.body.acceptUiUrl) && cfg.body.env === 'sandbox', 'accept-config: sandbox url + env', JSON.stringify(cfg.body));
     ok(cfg.body.apiLoginId && cfg.body.clientKey && cfg.body.configured === true, 'accept-config: sandbox fallback keys present + configured', JSON.stringify({ a: !!cfg.body.apiLoginId, c: !!cfg.body.clientKey }));
+
+    // --- GET /payments/plans (public catalog: active-only, Platinum excluded, price asc) ---
+    const plansRes = await request(app).get('/api/payments/plans').set('Authorization', tok(103));
+    const plans = (plansRes.body && plansRes.body.plans) || [];
+    const names = plans.map((p) => p.name);
+    ok(plansRes.status === 200 && Array.isArray(plans), 'plans: endpoint returns a list', String(plansRes.status));
+    ok(!names.includes('Platinum'), 'plans: Platinum excluded from public catalog', JSON.stringify(names));
+    ok(!names.includes('Legacy Off'), 'plans: inactive plan (is_active=0) excluded', JSON.stringify(names));
+    ok(names.includes('Bid Pro') && names.includes('Basic') && names.includes('Gold'), 'plans: active public plans present (Bid Pro/Basic/Gold)', JSON.stringify(names));
+    const p0 = plans[0] || {};
+    ok(p0.id != null && p0.name && p0.amount != null && p0.interval && p0.is_active != null, 'plans: rows include id/name/amount/interval/is_active', JSON.stringify(p0));
+    const amts = plans.map((p) => Number(p.amount));
+    ok(amts.every((a, i) => i === 0 || a >= amts[i - 1]), 'plans: ordered by amount ascending', JSON.stringify(amts));
 
     // --- go-live reverify endpoint flags all active subs (canceled + flagged) ---
     const [activeBefore] = await conn.query("SELECT COUNT(*) AS c FROM subscriptions WHERE status='active'");

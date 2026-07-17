@@ -726,6 +726,28 @@ router.get("/accept-config", authenticateToken, (req, res) => {
   });
 });
 
+// Public plan catalog for the subscribe page — the SINGLE source of truth for
+// prices, so card price, confirm-dialog price, and the amount charged
+// (createSubscription copies plans.amount) can never diverge. Active plans only,
+// and Platinum is excluded (grandfathered/off the public page — its existing
+// subscribers keep it via billing/status, which is a separate query). Ordered by
+// price ascending (Bid Pro, Basic, Bronze, Silver, Gold).
+router.get("/plans", authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [rows] = await connection.query(
+      "SELECT id, name, amount, `interval`, is_active FROM plans WHERE is_active = 1 AND LOWER(name) <> 'platinum' ORDER BY amount ASC"
+    );
+    return res.json({ success: true, plans: rows });
+  } catch (err) {
+    logger.error("/payments/plans error: " + err.message);
+    return res.status(500).json({ success: false, message: "Unable to load plans." });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // Cancel a subscription for the authenticated user (also cancels in Authorize.Net ARB when possible)
 router.post("/subscriptions/:id/cancel", authenticateToken, async (req, res) => {
   const userId = req.user && req.user.id ? req.user.id : res.locals.id;
