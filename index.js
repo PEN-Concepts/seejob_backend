@@ -8,7 +8,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
-const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable } = require("./services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureFirstLoginColumn, ensureSubscriptionPaymentColumns, ensureReverifyEmailLogTable } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
 const userRoute = require("./routes/users");
 const contactRoute = require("./routes/contacts");
@@ -178,6 +178,8 @@ const startServer = async (retries = 5, delay = 5000) => {
                 await ensureLeadBidStatusColumn(migrationConn);
                 await ensureUserTimezoneColumn(migrationConn);
                 await ensureSubscriptionReverifyColumn(migrationConn);
+                await ensureFirstLoginColumn(migrationConn);
+                await ensureSubscriptionPaymentColumns(migrationConn);
                 await ensureReverifyEmailLogTable(migrationConn);
             } catch (err) {
                 logger.error('boot migrations failed:', err);

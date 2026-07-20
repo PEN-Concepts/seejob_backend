@@ -576,6 +576,15 @@ router.post("/login-pin", async (req, res) => {
       });
     }
 
+    // Stamp first login once (best-effort; PIN login implies a prior login, so this
+    // is normally already set). The 60-day trial clock runs from first_login_at.
+    try {
+      await connection.query(
+        "UPDATE `user` SET first_login_at = NOW() WHERE id = ? AND first_login_at IS NULL",
+        [user.id]
+      );
+    } catch (e) { /* column absent pre-migration — ignore */ }
+
     const payload = {
       id: user.id,
       name: user.name,
@@ -728,6 +737,14 @@ router.post("/login", async (req, res) => {
       `,
       [id, deviceToken, req.headers["user-agent"]]
     );
+
+    // Stamp first login once — the 60-day trial clock runs from first_login_at.
+    try {
+      await connection.query(
+        "UPDATE `user` SET first_login_at = NOW() WHERE id = ? AND first_login_at IS NULL",
+        [id]
+      );
+    } catch (e) { /* column absent pre-migration — ignore */ }
 
     // ===============================
     // Set Cookie
@@ -954,6 +971,15 @@ router.post("/login-otp-verify", async (req, res) => {
       "INSERT INTO user_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)",
       [id, deviceToken, req.headers["user-agent"]]
     );
+
+    // Stamp first login once — the 60-day trial clock runs from first_login_at
+    // (an invited user reads as "Pending" until this fires on their first login).
+    try {
+      await connection.query(
+        "UPDATE `user` SET first_login_at = NOW() WHERE id = ? AND first_login_at IS NULL",
+        [id]
+      );
+    } catch (e) { /* column absent pre-migration — ignore */ }
 
     res.cookie("device_token", deviceToken, {
       httpOnly: true,

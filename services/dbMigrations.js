@@ -453,6 +453,44 @@ async function ensureSubscriptionReverifyColumn(connection) {
   subReverifyEnsured = true;
 }
 
+// `user.first_login_at` — stamped once on a user's FIRST successful login. The
+// 60-day trial clock now runs from this (not from row/invite creation), so an
+// invited person who never logs in reads as "Pending" and doesn't burn trial days.
+// BACKFILL: existing users get first_login_at = created_at so their CURRENT trial
+// window is unchanged when this ships (only brand-new invites get the pending
+// treatment). Idempotent.
+let firstLoginEnsured = false;
+async function ensureFirstLoginColumn(connection) {
+  if (firstLoginEnsured) return;
+  const [cols] = await connection.query("SHOW COLUMNS FROM `user` LIKE 'first_login_at'");
+  if (!cols.length) {
+    await connection.query("ALTER TABLE `user` ADD COLUMN `first_login_at` DATETIME NULL");
+    // One-time backfill so no existing user's trial window shifts on deploy.
+    await connection.query(
+      "UPDATE `user` SET first_login_at = created_at WHERE first_login_at IS NULL AND created_at IS NOT NULL"
+    );
+  }
+  firstLoginEnsured = true;
+}
+
+// Subscription payment tracking — `paid_count` (# of real payments received),
+// `last_payment_at`, and `past_due_since` (when a renewal failed AFTER the account
+// had paid at least once). Fed by the Authorize.Net payment/subscription webhook
+// events. "Paying" vs "Paying (Unverified)" is paid_count>=1 vs 0; a past_due sub
+// keeps full access for a 7-day grace window (see utils/access.js). Idempotent.
+let subPaymentEnsured = false;
+async function ensureSubscriptionPaymentColumns(connection) {
+  if (subPaymentEnsured) return;
+  const add = async (name, def) => {
+    const [c] = await connection.query(`SHOW COLUMNS FROM subscriptions LIKE '${name}'`);
+    if (!c.length) await connection.query(`ALTER TABLE subscriptions ADD COLUMN ${name} ${def}`);
+  };
+  await add("paid_count", "INT NOT NULL DEFAULT 0");
+  await add("last_payment_at", "DATETIME NULL");
+  await add("past_due_since", "DATETIME NULL");
+  subPaymentEnsured = true;
+}
+
 // Audit log for the owner-triggered re-verification emails (who got which email,
 // when, and whether it sent) so a send can be verified afterward. Idempotent.
 let reverifyEmailLogEnsured = false;
@@ -481,5 +519,7 @@ module.exports = {
   ensurePlanLevelColumn,
   ensureUserTimezoneColumn,
   ensureSubscriptionReverifyColumn,
+  ensureFirstLoginColumn,
+  ensureSubscriptionPaymentColumns,
   ensureReverifyEmailLogTable,
 };

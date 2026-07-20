@@ -60,7 +60,8 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     await conn.query(`CREATE TABLE subcategory (id INT PRIMARY KEY, name VARCHAR(80))`);
     await conn.query(`CREATE TABLE \`user\` (
       id INT PRIMARY KEY, name VARCHAR(150), email VARCHAR(190),
-      role INT, category INT, subcategory INT NULL, created_by INT NULL, created_at DATETIME NULL
+      role INT, category INT, subcategory INT NULL, created_by INT NULL, created_at DATETIME NULL,
+      first_login_at DATETIME NULL
     ) ENGINE=InnoDB`);
     await conn.query(`CREATE TABLE plans (
       id INT PRIMARY KEY, name VARCHAR(80), amount DECIMAL(10,2), \`interval\` VARCHAR(20),
@@ -69,7 +70,8 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     await conn.query(`CREATE TABLE subscriptions (
       id INT PRIMARY KEY AUTO_INCREMENT, user_id INT, plan_id INT, amount DECIMAL(10,2),
       billing_interval VARCHAR(20), status VARCHAR(30), next_billing_at DATETIME NULL,
-      authorize_subscription_id VARCHAR(60) NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      authorize_subscription_id VARCHAR(60) NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      paid_count INT NOT NULL DEFAULT 0, last_payment_at DATETIME NULL, past_due_since DATETIME NULL
     ) ENGINE=InnoDB`);
 
     await conn.query(`CREATE TABLE user_payment_methods (
@@ -108,11 +110,25 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
       (112,'Grace GC','grace@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
       (113,'GraceExpired GC','graceexp@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
       (114,'Emp Of Owner','empofowner@x.com',5,1,11,100, NOW() - INTERVAL 5 DAY),
+      (115,'Pending Invitee','pending@x.com',14,2,NULL,NULL, NOW() - INTERVAL 3 DAY),
+      (116,'Past Due GC','pastdue@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
+      (117,'Webhook Pay GC','wpay@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY),
+      (118,'Webhook NoPay GC','wnopay@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY),
       (246,'gc gc','gcgc@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY)`);
+    // Backfill first_login_at = created_at for everyone EXCEPT the never-logged-in
+    // invitee (115) — mirrors the deploy migration so trial windows are unchanged.
+    await conn.query("UPDATE `user` SET first_login_at = created_at WHERE id <> 115");
 
-    await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,next_billing_at,authorize_subscription_id) VALUES
-      (103,4,99.00,'monthly','active', NOW() + INTERVAL 20 DAY, 'ARBGOLD'),
-      (105,4,99.00,'monthly','active', NOW() + INTERVAL 20 DAY, 'ARB123')`);
+    await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,next_billing_at,authorize_subscription_id,paid_count,last_payment_at) VALUES
+      (103,4,99.00,'monthly','active', NOW() + INTERVAL 20 DAY, 'ARBGOLD', 2, NOW() - INTERVAL 30 DAY),
+      (105,4,99.00,'monthly','active', NOW() + INTERVAL 20 DAY, 'ARB123', 0, NULL)`);
+    // 116: was paying (paid_count 3), latest renewal failed 2 days ago → past_due, in grace.
+    await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,authorize_subscription_id,paid_count,past_due_since) VALUES
+      (116,4,99.00,'monthly','past_due','ARBPASTDUE', 3, NOW() - INTERVAL 2 DAY)`);
+    // 117/118: fresh active subs (0 payments) for the webhook payment/failure flow.
+    await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,authorize_subscription_id,paid_count) VALUES
+      (117,4,99.00,'monthly','active','ARBPAY', 0),
+      (118,4,99.00,'monthly','active','ARBNOPAY', 0)`);
     // A local-only active sub with no ARB id (tests the live-check no-remote branch).
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,authorize_subscription_id) VALUES
       (107,4,99.00,'monthly','active', NULL)`);
@@ -171,6 +187,30 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     const [afterCreate] = await conn.query("SELECT status FROM subscriptions WHERE authorize_subscription_id='ARB123'");
     ok(afterCreate[0] && afterCreate[0].status === 'active', 'webhook: created event set local status -> active', afterCreate[0] && afterCreate[0].status);
 
+    // --- Webhook: real payment capture bumps paid_count (ARBPAY, payNum 1) ---
+    const payBody = JSON.stringify({ eventType: 'net.authorize.payment.authcapture.created', payload: { id: 'txn-1', subscription: { id: 'ARBPAY', payNum: 1 } } });
+    await request(app).post('/api/payments/webhook').set('Content-Type', 'application/json').set('X-ANET-Signature', sign(payBody)).send(payBody);
+    const [afterPay] = await conn.query("SELECT paid_count, status, last_payment_at FROM subscriptions WHERE authorize_subscription_id='ARBPAY'");
+    ok(Number(afterPay[0].paid_count) === 1 && afterPay[0].status === 'active' && afterPay[0].last_payment_at, 'webhook: payment capture -> paid_count=1 + last_payment_at', JSON.stringify(afterPay[0]));
+
+    // --- Webhook: renewal failure AFTER a real payment -> past_due (grace), not canceled ---
+    const suspendPaid = JSON.stringify({ eventType: 'net.authorize.customer.subscription.suspended', payload: { id: 'ARBPAY' } });
+    await request(app).post('/api/payments/webhook').set('Content-Type', 'application/json').set('X-ANET-Signature', sign(suspendPaid)).send(suspendPaid);
+    const [afterFail] = await conn.query("SELECT status, past_due_since FROM subscriptions WHERE authorize_subscription_id='ARBPAY'");
+    ok(afterFail[0].status === 'past_due' && afterFail[0].past_due_since, 'webhook: suspend after a real payment -> past_due (not canceled)', JSON.stringify(afterFail[0]));
+
+    // --- Webhook: a later successful payment RESTORES active + clears past_due ---
+    const payBody2 = JSON.stringify({ eventType: 'net.authorize.payment.authcapture.created', payload: { id: 'txn-2', subscription: { id: 'ARBPAY', payNum: 2 } } });
+    await request(app).post('/api/payments/webhook').set('Content-Type', 'application/json').set('X-ANET-Signature', sign(payBody2)).send(payBody2);
+    const [afterResume] = await conn.query("SELECT status, paid_count, past_due_since FROM subscriptions WHERE authorize_subscription_id='ARBPAY'");
+    ok(afterResume[0].status === 'active' && Number(afterResume[0].paid_count) === 2 && !afterResume[0].past_due_since, 'webhook: payment resumes -> active + paid_count=2 + past_due cleared', JSON.stringify(afterResume[0]));
+
+    // --- Webhook: suspend with ZERO prior payments -> canceled (never was "paying") ---
+    const suspendNoPay = JSON.stringify({ eventType: 'net.authorize.customer.subscription.suspended', payload: { id: 'ARBNOPAY' } });
+    await request(app).post('/api/payments/webhook').set('Content-Type', 'application/json').set('X-ANET-Signature', sign(suspendNoPay)).send(suspendNoPay);
+    const [afterNoPay] = await conn.query("SELECT status, past_due_since FROM subscriptions WHERE authorize_subscription_id='ARBNOPAY'");
+    ok(afterNoPay[0].status === 'canceled' && !afterNoPay[0].past_due_since, 'webhook: suspend with 0 payments -> canceled (not past_due)', JSON.stringify(afterNoPay[0]));
+
     // --- Admin gate ---
     const r246 = await request(app).get('/api/payments/admin/subscriptions-overview').set('Authorization', tok(246));
     ok(r246.status === 200, 'gate: super-admin id 246 allowed (200)', String(r246.status));
@@ -191,6 +231,18 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     ok(p && p.access_mode === 'paid' && p.plan && p.plan.name === 'Gold' && Number(p.plan.amount) === 99, 'overview: paying user -> paid + Gold @ 99', JSON.stringify(p && p.plan));
     const e = byId.get(104);
     ok(e && e.is_employee === true && e.inherits_from && e.inherits_from.id === 103 && e.access_mode === 'paid', 'overview: employee inherits owner (paid)', JSON.stringify(e && e.inherits_from));
+
+    // --- Redefined billing_status per account ---
+    ok(byId.get(115) && byId.get(115).billing_status === 'pending' && byId.get(115).access_mode !== 'expired_free', 'overview: invited/never-logged-in -> billing_status pending (not blocked)', JSON.stringify(byId.get(115) && { b: byId.get(115).billing_status, m: byId.get(115).access_mode }));
+    ok(byId.get(101) && byId.get(101).billing_status === 'trial', 'overview: logged-in new user -> trial', byId.get(101) && byId.get(101).billing_status);
+    ok(byId.get(102) && byId.get(102).billing_status === 'expired', 'overview: elapsed trial -> expired', byId.get(102) && byId.get(102).billing_status);
+    ok(byId.get(103) && byId.get(103).billing_status === 'paying' && byId.get(103).paid_count >= 1, 'overview: active sub + real payment -> paying', JSON.stringify(byId.get(103) && { b: byId.get(103).billing_status, pc: byId.get(103).paid_count }));
+    ok(byId.get(105) && byId.get(105).billing_status === 'paying_unverified' && byId.get(105).paid_count === 0, 'overview: active sub, 0 payments -> paying_unverified', JSON.stringify(byId.get(105) && { b: byId.get(105).billing_status, pc: byId.get(105).paid_count }));
+    ok(byId.get(116) && byId.get(116).billing_status === 'past_due' && byId.get(116).access_mode === 'paid', 'overview: past_due (in grace) -> past_due + full access', JSON.stringify(byId.get(116) && { b: byId.get(116).billing_status, m: byId.get(116).access_mode }));
+    ok(byId.get(100) && byId.get(100).billing_status === 'paying' && byId.get(100).owner_exempt === true, 'overview: owner-exempt -> paying + owner flag', JSON.stringify(byId.get(100) && { b: byId.get(100).billing_status }));
+    // Owner-exempt (no real sub) is NOT counted as a paying customer.
+    ok(byId.get(100) && byId.get(100).is_paying === false, 'overview: owner-exempt not counted as paying', String(byId.get(100) && byId.get(100).is_paying));
+    ok(byId.get(116) && byId.get(116).is_paying === true, 'overview: past_due account IS counted as paying', String(byId.get(116) && byId.get(116).is_paying));
 
     // --- Re-verification grace: overview must mirror access.js (not show Expired) ---
     const grace = byId.get(112);

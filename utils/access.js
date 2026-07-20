@@ -17,6 +17,7 @@ const pool = require("../config/connection");
 const logger = require("../common/logger");
 
 const TRIAL_DAYS = 60;
+const PAST_DUE_GRACE_DAYS = 7; // full access preserved this long after a failed renewal
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Roles that are internal/admin and must never be trial-gated.
@@ -76,90 +77,148 @@ async function resolveOwnerId(userId, connection) {
 }
 
 /**
- * Full access info for a user: { mode, trialEndsAt, daysLeft, hasActiveSubscription }.
- * This is the single source of truth consumed by both /users/my-rights (for the
- * client) and the write/read guards (for enforcement).
+ * PURE billing-state derivation — the single source of truth for BOTH the access
+ * tier and the display label. Used by getAccessInfo (per-user) and the admin
+ * overview (batched over prefetched rows) so the two can never drift. Inputs are
+ * plain data + `now` (ms). Returns:
+ *   access:        'full' | 'readonly'                       (enforcement decision)
+ *   mode:          'paid' | 'trial_active' | 'expired_free'  (legacy value guards read)
+ *   billingStatus: 'pending'|'trial'|'paying'|'paying_unverified'|'past_due'|'expired'
+ *   daysLeft, trialEndsAt                                    (trial / grace countdown)
+ *
+ * CRITICAL: access is decided by having an ACTIVE subscription (or a live trial /
+ * grace window), NEVER by paidCount. paidCount ONLY splits the 'paying' vs
+ * 'paying_unverified' label — a brand-new subscriber with 0 confirmed payments
+ * still gets full access immediately, and an unfired/failed payment webhook can
+ * never lock out a genuine subscriber.
+ */
+function computeBillingState(inp) {
+  const now = inp.now || Date.now();
+  const paidFull = (billingStatus, extra) =>
+    ({ access: "full", mode: "paid", billingStatus, daysLeft: 0, trialEndsAt: null, ...extra });
+
+  // Comped / internal accounts → always full access.
+  if (inp.ownerExempt || inp.neverGated) return paidFull("paying");
+
+  // Active subscription → full access; label depends on whether a real payment
+  // has been confirmed (paid_count), but access does NOT.
+  if (inp.hasActiveSubscription) return paidFull(inp.paidCount >= 1 ? "paying" : "paying_unverified");
+
+  // Past due — had at least one real payment, latest renewal failed. Full access
+  // for a PAST_DUE_GRACE_DAYS window, then read-only until a payment restores it.
+  if (inp.pastDueSince) {
+    const t = new Date(inp.pastDueSince).getTime();
+    if (!isNaN(t)) {
+      const graceEnd = t + PAST_DUE_GRACE_DAYS * DAY_MS;
+      if (now < graceEnd) {
+        return paidFull("past_due", { daysLeft: Math.max(0, Math.ceil((graceEnd - now) / DAY_MS)), trialEndsAt: new Date(graceEnd).toISOString() });
+      }
+      return { access: "readonly", mode: "expired_free", billingStatus: "past_due", daysLeft: 0, trialEndsAt: new Date(graceEnd).toISOString() };
+    }
+  }
+
+  // Sandbox→prod re-verification grace (existing mechanism) → full while it lasts.
+  if (inp.reverifyGraceUntil) {
+    const t = new Date(inp.reverifyGraceUntil).getTime();
+    if (!isNaN(t) && now < t) {
+      return paidFull("paying_unverified", { daysLeft: Math.max(0, Math.ceil((t - now) / DAY_MS)), trialEndsAt: new Date(t).toISOString() });
+    }
+  }
+
+  // No subscription — trial keyed off FIRST LOGIN (not row/invite creation).
+  const flAt = inp.firstLoginAt ? new Date(inp.firstLoginAt).getTime() : NaN;
+  if (isNaN(flAt)) {
+    // Never logged in → Pending. Not started; not blocked (they hold no session
+    // yet — the first login stamps first_login_at and flips them to Trial).
+    return { access: "full", mode: "trial_active", billingStatus: "pending", daysLeft: TRIAL_DAYS, trialEndsAt: null };
+  }
+  const end = flAt + TRIAL_DAYS * DAY_MS;
+  const daysLeft = Math.max(0, Math.ceil((end - now) / DAY_MS));
+  if (daysLeft > 0) {
+    return { access: "full", mode: "trial_active", billingStatus: "trial", daysLeft, trialEndsAt: new Date(end).toISOString() };
+  }
+  return { access: "readonly", mode: "expired_free", billingStatus: "expired", daysLeft: 0, trialEndsAt: new Date(end).toISOString() };
+}
+
+/**
+ * Full access info for a user: { mode, billingStatus, trialEndsAt, daysLeft,
+ * hasActiveSubscription, paidCount, reverifyGraceUntil }. The single source of
+ * truth consumed by /users/my-rights (client) and the write/read guards.
+ * Gathers the data, then defers the tier decision to computeBillingState().
  */
 async function getAccessInfo(userId, connection) {
   return withConnection(connection, async (conn) => {
     const fallback = {
-      mode: "paid",
-      trialEndsAt: null,
-      daysLeft: 0,
-      hasActiveSubscription: false,
+      mode: "paid", billingStatus: "paying", trialEndsAt: null, daysLeft: 0,
+      hasActiveSubscription: false, paidCount: 0, reverifyGraceUntil: null,
     };
     try {
-      // Employees (category 1) share their account OWNER's access tier — an
-      // employee never holds their own subscription (the paid plan lives on the
-      // owner's account), so evaluate the owner here, not the employee.
-      // resolveOwnerId returns the user themselves for owners/contractors/clients,
-      // so this is a no-op for everyone except employees.
+      // Employees (category 1) share their account OWNER's tier; resolveOwnerId is
+      // a no-op for everyone else.
       const effectiveId = await resolveOwnerId(userId, conn);
 
-      const [userRows] = await conn.query(
-        "SELECT id, role, created_at, email FROM user WHERE id = ? LIMIT 1",
-        [effectiveId]
-      );
-      if (!userRows.length) return fallback;
-
-      const role = userRows[0].role;
-      const email = String(userRows[0].email || "").trim().toLowerCase();
-      const [subRows] = await conn.query(
-        "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
-        [effectiveId]
-      );
-      const hasActiveSubscription = subRows.length > 0;
-
-      const createdAt = userRows[0].created_at
-        ? new Date(userRows[0].created_at)
-        : null;
-      let trialEndsAt = null;
-      let daysLeft = 0;
-      if (createdAt && !isNaN(createdAt.getTime())) {
-        const end = createdAt.getTime() + TRIAL_DAYS * DAY_MS;
-        trialEndsAt = new Date(end).toISOString();
-        daysLeft = Math.max(0, Math.ceil((end - Date.now()) / DAY_MS));
+      // first_login_at may not exist pre-migration — fall back defensively.
+      let userRow;
+      try {
+        const [r] = await conn.query("SELECT id, role, created_at, email, first_login_at FROM user WHERE id = ? LIMIT 1", [effectiveId]);
+        userRow = r[0];
+      } catch (e) {
+        const [r] = await conn.query("SELECT id, role, created_at, email FROM user WHERE id = ? LIMIT 1", [effectiveId]);
+        userRow = r[0];
       }
+      if (!userRow) return fallback;
+      const role = Number(userRow.role);
+      const email = String(userRow.email || "").trim().toLowerCase();
 
-      let mode;
-      if (
-        OWNER_EXEMPT_EMAILS.has(email) ||
-        NEVER_GATED_ROLES.has(Number(role)) ||
-        hasActiveSubscription
-      ) {
-        mode = "paid";
-      } else if (!createdAt || isNaN(createdAt.getTime())) {
-        // Unknown signup date -> don't restrict.
-        mode = "paid";
-      } else {
-        mode = daysLeft > 0 ? "trial_active" : "expired_free";
+      // Active (grants access) + past_due (grace) subs. paid_count/past_due_since
+      // may be pre-migration → fall back to status only.
+      let subs = [];
+      try {
+        const [r] = await conn.query("SELECT status, paid_count, past_due_since FROM subscriptions WHERE user_id = ? AND status IN ('active','past_due')", [effectiveId]);
+        subs = r;
+      } catch (e) {
+        const [r] = await conn.query("SELECT status FROM subscriptions WHERE user_id = ? AND status = 'active'", [effectiveId]);
+        subs = r;
       }
+      const hasActiveSubscription = subs.some((s) => s.status === "active");
+      const paidCount = subs.reduce((m, s) => Math.max(m, Number(s.paid_count || 0)), 0);
+      const pastDueTimes = subs.filter((s) => s.status === "past_due" && s.past_due_since).map((s) => new Date(s.past_due_since).getTime()).filter((t) => !isNaN(t));
+      const pastDueSince = pastDueTimes.length ? new Date(Math.min(...pastDueTimes)).toISOString() : null;
 
-      // Re-verification grace: an account whose sandbox subscription was flagged
-      // at the production switch keeps FULL access until its grace deadline, so the
-      // go-live notice can honestly promise uninterrupted service. Only matters for
-      // accounts that would otherwise be expired_free (trial/paid already have it).
-      // Scoped try/catch so a not-yet-migrated column can never lock anyone out.
+      // Existing sandbox→prod re-verification grace.
       let reverifyGraceUntil = null;
-      if (mode === "expired_free") {
-        try {
-          const [graceRows] = await conn.query(
-            `SELECT reverification_due_at FROM subscriptions
-              WHERE user_id = ? AND needs_reverification = 1
-                AND reverification_due_at IS NOT NULL AND reverification_due_at > NOW()
-              ORDER BY reverification_due_at DESC LIMIT 1`,
-            [effectiveId]
-          );
-          if (graceRows.length) {
-            reverifyGraceUntil = graceRows[0].reverification_due_at;
-            mode = "paid"; // grace window: full access while they re-verify
-          }
-        } catch (graceErr) {
-          // Column may not exist pre-migration — ignore and keep expired_free.
-        }
-      }
+      try {
+        const [graceRows] = await conn.query(
+          `SELECT reverification_due_at FROM subscriptions
+            WHERE user_id = ? AND needs_reverification = 1
+              AND reverification_due_at IS NOT NULL AND reverification_due_at > NOW()
+            ORDER BY reverification_due_at DESC LIMIT 1`,
+          [effectiveId]
+        );
+        if (graceRows.length) reverifyGraceUntil = graceRows[0].reverification_due_at;
+      } catch (graceErr) { /* column may not exist pre-migration */ }
 
-      return { mode, trialEndsAt, daysLeft, hasActiveSubscription, reverifyGraceUntil };
+      const st = computeBillingState({
+        ownerExempt: OWNER_EXEMPT_EMAILS.has(email),
+        neverGated: NEVER_GATED_ROLES.has(role),
+        hasActiveSubscription,
+        paidCount,
+        createdAt: userRow.created_at,
+        firstLoginAt: userRow.first_login_at,
+        pastDueSince,
+        reverifyGraceUntil,
+        now: Date.now(),
+      });
+
+      return {
+        mode: st.mode,
+        billingStatus: st.billingStatus,
+        trialEndsAt: st.trialEndsAt,
+        daysLeft: st.daysLeft,
+        hasActiveSubscription,
+        paidCount,
+        reverifyGraceUntil,
+      };
     } catch (err) {
       logger.error("getAccessInfo error: " + err.message);
       return fallback;
@@ -368,7 +427,10 @@ function denyExpiredFreeWrites(req, res, next) {
 
 module.exports = {
   TRIAL_DAYS,
+  PAST_DUE_GRACE_DAYS,
   OWNER_EXEMPT_EMAILS,
+  NEVER_GATED_ROLES,
+  computeBillingState,
   resolveOwnerId,
   getAccessInfo,
   getAccessMode,

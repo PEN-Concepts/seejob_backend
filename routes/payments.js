@@ -5,7 +5,7 @@ const router = express.Router();
 const { authenticateToken } = require("../services/authentication");
 const pool = require("../config/connection");
 const logger = require("../common/logger");
-const { getAccessMode, OWNER_EXEMPT_EMAILS } = require("../utils/access");
+const { getAccessMode, OWNER_EXEMPT_EMAILS, computeBillingState } = require("../utils/access");
 const { requireAdmin } = require("../utils/adminGate");
 const { sendEmail, isRealEmail } = require("../services/notify");
 const { previewAccountDeletion, cascadeDeleteAccount } = require("../services/accountDelete");
@@ -1714,15 +1714,19 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
 // (suspended/terminated/expired/cancelled) means "not billing", so it maps to
 // 'canceled'. The admin page surfaces the richer live ARB status separately.
 // Returns null for events we don't act on.
-function localStatusForArbEvent(eventType) {
+// Classify an Authorize.Net webhook event into what it means for us:
+//   'payment'  — a real recurring charge was captured (bumps paid_count)
+//   'activate' — subscription created/updated/renewed  -> local status active
+//   'fail'     — subscription suspended / payment failed -> past_due (if it had a
+//                real payment) else canceled
+//   'cancel'   — subscription cancelled/terminated/expired -> canceled
+function classifyArbEvent(eventType) {
   const t = String(eventType || "").toLowerCase();
+  if (t.includes("payment") && (t.includes("authcapture") || t.includes("capture"))) return "payment";
   if (!t.includes("subscription")) return null;
-  if (t.includes("cancel") || t.includes("terminat") || t.includes("suspend") || t.includes("expir")) {
-    return "canceled";
-  }
-  if (t.includes("created") || t.includes("updated") || t.includes("renew")) {
-    return "active";
-  }
+  if (t.includes("suspend") || t.includes("fail")) return "fail";
+  if (t.includes("cancel") || t.includes("terminat") || t.includes("expir")) return "cancel";
+  if (t.includes("created") || t.includes("updated") || t.includes("renew")) return "activate";
   return null;
 }
 
@@ -1772,53 +1776,100 @@ router.post("/webhook", async (req, res) => {
     return res.status(401).send("Invalid signature");
   }
 
-  // 2) Parse + map the event.
+  // 2) Parse + classify the event.
   const event = req.body || {};
   const eventType = event.eventType || "";
   const payload = event.payload || {};
-  const subscriptionId =
-    payload.id || payload.subscriptionId || payload.subscription_id || null;
+  const kind = classifyArbEvent(eventType);
 
-  const newStatus = localStatusForArbEvent(eventType);
+  // For a recurring-payment capture, the ARB subscription id is nested under the
+  // transaction's `subscription`; for lifecycle events it's the payload id.
+  const paySub = payload.subscription || {};
+  const paySubId = paySub.id || paySub.subscriptionId || null;
+  const payNum = Number(paySub.payNum) || null;
+  const subscriptionId = payload.id || payload.subscriptionId || payload.subscription_id || null;
 
-  // Verified, but not an event we act on (or no subscription reference) — ack so
-  // Authorize.Net stops retrying. This is a legitimate 200, not a swallowed error.
-  if (!subscriptionId || !newStatus) {
-    return res.status(200).send("Ignored");
-  }
+  // Verified, but not an event we act on — ack so Authorize.Net stops retrying.
+  if (!kind) return res.status(200).send("Ignored");
+  if (kind === "payment" && !paySubId) return res.status(200).send("Ignored"); // one-off charge
+  if (kind !== "payment" && !subscriptionId) return res.status(200).send("Ignored");
 
-  // 3) Persist. A genuine DB failure here returns 500 (logged + retried), never a
-  // silent 200.
+  // 3) Persist. A genuine DB failure returns 500 (logged + retried), never a silent 200.
   let connection;
   try {
     connection = await pool.getConnection();
+    const arbId = String(kind === "payment" ? paySubId : subscriptionId);
+    let effectiveStatus = null; // for the rights sync + log
 
-    await connection.query(
-      "UPDATE subscriptions SET status = ? WHERE authorize_subscription_id = ?",
-      [newStatus, String(subscriptionId)]
-    );
+    if (kind === "payment") {
+      // A real charge landed: record it, clear any past-due, (re)activate. payNum is
+      // the ARB payment sequence number (authoritative count); fall back to +1.
+      if (payNum) {
+        await connection.query(
+          "UPDATE subscriptions SET paid_count = GREATEST(paid_count, ?), last_payment_at = NOW(), past_due_since = NULL, status = 'active' WHERE authorize_subscription_id = ?",
+          [payNum, arbId]
+        );
+      } else {
+        await connection.query(
+          "UPDATE subscriptions SET paid_count = paid_count + 1, last_payment_at = NOW(), past_due_since = NULL, status = 'active' WHERE authorize_subscription_id = ?",
+          [arbId]
+        );
+      }
+      effectiveStatus = "active";
+    } else if (kind === "activate") {
+      await connection.query(
+        "UPDATE subscriptions SET status = 'active', past_due_since = NULL WHERE authorize_subscription_id = ?",
+        [arbId]
+      );
+      effectiveStatus = "active";
+    } else if (kind === "fail") {
+      // Past due ONLY if this subscription already had a real payment; otherwise a
+      // failed brand-new/sandbox sub is just canceled (never was "paying").
+      const [pc] = await connection.query(
+        "SELECT COALESCE(MAX(paid_count),0) AS paid FROM subscriptions WHERE authorize_subscription_id = ?",
+        [arbId]
+      );
+      if (pc.length && Number(pc[0].paid) >= 1) {
+        await connection.query(
+          "UPDATE subscriptions SET status = 'past_due', past_due_since = COALESCE(past_due_since, NOW()) WHERE authorize_subscription_id = ?",
+          [arbId]
+        );
+        effectiveStatus = "past_due";
+      } else {
+        await connection.query(
+          "UPDATE subscriptions SET status = 'canceled' WHERE authorize_subscription_id = ?",
+          [arbId]
+        );
+        effectiveStatus = "canceled";
+      }
+    } else { // cancel
+      await connection.query(
+        "UPDATE subscriptions SET status = 'canceled', past_due_since = NULL WHERE authorize_subscription_id = ?",
+        [arbId]
+      );
+      effectiveStatus = "canceled";
+    }
 
     const [subRows] = await connection.query(
       "SELECT user_id, plan_id FROM subscriptions WHERE authorize_subscription_id = ? ORDER BY created_at DESC LIMIT 1",
-      [String(subscriptionId)]
+      [arbId]
     );
-
     if (subRows.length) {
-      const subscription = subRows[0];
+      // Keep entitlements while active OR in the past-due grace window; drop on cancel.
+      const keepRights = effectiveStatus === "active" || effectiveStatus === "past_due";
       await syncSubcontractorRole12Rights({
         connection,
-        userId: subscription.user_id,
-        planId: newStatus === "active" ? subscription.plan_id : null,
+        userId: subRows[0].user_id,
+        planId: keepRights ? subRows[0].plan_id : null,
       });
     }
 
     logger.info(
-      `/payments/webhook applied ${eventType} -> ${newStatus} for ARB subscription ${subscriptionId}`
+      `/payments/webhook applied ${eventType} (${kind}) -> ${effectiveStatus} for ARB subscription ${arbId}`
     );
     return res.status(200).send("OK");
   } catch (dbErr) {
     logger.error("/payments/webhook DB error: " + dbErr.message);
-    // Surface the failure so it is retried/noticed rather than lost.
     return res.status(500).send("Processing failed");
   } finally {
     if (connection) connection.release();
@@ -1891,24 +1942,52 @@ router.get(
     try {
       connection = await pool.getConnection();
 
-      const [users] = await connection.query(
-        `SELECT u.id, u.name, u.email, u.role, u.category, u.subcategory, u.created_by, u.created_at,
-                r.name AS role_name, c.name AS category_name, sc.name AS subcategory_name
-           FROM \`user\` u
-           LEFT JOIN role r ON r.id = u.role
-           LEFT JOIN category c ON c.id = u.category
-           LEFT JOIN subcategory sc ON sc.id = u.subcategory
-          ORDER BY u.name ASC`
-      );
+      let users;
+      try {
+        [users] = await connection.query(
+          `SELECT u.id, u.name, u.email, u.role, u.category, u.subcategory, u.created_by, u.created_at, u.first_login_at,
+                  r.name AS role_name, c.name AS category_name, sc.name AS subcategory_name
+             FROM \`user\` u
+             LEFT JOIN role r ON r.id = u.role
+             LEFT JOIN category c ON c.id = u.category
+             LEFT JOIN subcategory sc ON sc.id = u.subcategory
+            ORDER BY u.name ASC`
+        );
+      } catch (e) {
+        [users] = await connection.query(
+          `SELECT u.id, u.name, u.email, u.role, u.category, u.subcategory, u.created_by, u.created_at,
+                  r.name AS role_name, c.name AS category_name, sc.name AS subcategory_name
+             FROM \`user\` u
+             LEFT JOIN role r ON r.id = u.role
+             LEFT JOIN category c ON c.id = u.category
+             LEFT JOIN subcategory sc ON sc.id = u.subcategory
+            ORDER BY u.name ASC`
+        );
+      }
 
-      const [activeSubs] = await connection.query(
-        `SELECT s.id AS sub_id, s.user_id, s.amount, s.billing_interval, s.status,
-                s.next_billing_at, s.authorize_subscription_id,
-                p.name AS plan_name, p.level AS plan_level
-           FROM subscriptions s
-           JOIN plans p ON p.id = s.plan_id
-          WHERE s.status = 'active'`
-      );
+      // Active (grants access) + past_due (grace) subs, with payment tracking. Fall
+      // back to a status-only query if the payment columns aren't migrated yet.
+      let activeSubs;
+      try {
+        [activeSubs] = await connection.query(
+          `SELECT s.id AS sub_id, s.user_id, s.amount, s.billing_interval, s.status,
+                  s.next_billing_at, s.authorize_subscription_id,
+                  s.paid_count, s.last_payment_at, s.past_due_since,
+                  p.name AS plan_name, p.level AS plan_level
+             FROM subscriptions s
+             JOIN plans p ON p.id = s.plan_id
+            WHERE s.status IN ('active','past_due')`
+        );
+      } catch (e) {
+        [activeSubs] = await connection.query(
+          `SELECT s.id AS sub_id, s.user_id, s.amount, s.billing_interval, s.status,
+                  s.next_billing_at, s.authorize_subscription_id,
+                  p.name AS plan_name, p.level AS plan_level
+             FROM subscriptions s
+             JOIN plans p ON p.id = s.plan_id
+            WHERE s.status = 'active'`
+        );
+      }
 
       const [pastCounts] = await connection.query(
         `SELECT user_id, COUNT(*) AS c
@@ -1940,11 +2019,11 @@ router.get(
       const usersById = new Map();
       users.forEach((u) => usersById.set(Number(u.id), u));
 
-      const activeByUser = new Map(); // userId -> [subs]
+      const subsByUser = new Map(); // userId -> [subs] (active + past_due)
       activeSubs.forEach((s) => {
         const k = Number(s.user_id);
-        if (!activeByUser.has(k)) activeByUser.set(k, []);
-        activeByUser.get(k).push(s);
+        if (!subsByUser.has(k)) subsByUser.set(k, []);
+        subsByUser.get(k).push(s);
       });
 
       const pastByUser = new Map();
@@ -1957,40 +2036,49 @@ router.get(
 
         const effEmail = String(effUser.email || "").trim().toLowerCase();
         const effRole = Number(effUser.role);
-        const effSubs = activeByUser.get(effectiveId) || [];
+        const effSubs = subsByUser.get(effectiveId) || [];
 
-        // Separate the tier plan from the Bid Pro add-on.
-        const tierSub = effSubs.find((s) => !isBidProPlan(s.plan_name, s.plan_level)) || null;
-        const addOnSub = effSubs.find((s) => isBidProPlan(s.plan_name, s.plan_level)) || null;
-        const hasActiveSubscription = effSubs.length > 0;
+        const activeSubsForUser = effSubs.filter((s) => s.status === "active");
+        const pastDueSubs = effSubs.filter((s) => s.status === "past_due");
+        const hasActiveSubscription = activeSubsForUser.length > 0;
+        const paidCount = effSubs.reduce((m, s) => Math.max(m, Number(s.paid_count || 0)), 0);
+        const pastDueTimes = pastDueSubs
+          .map((s) => (s.past_due_since ? new Date(s.past_due_since).getTime() : NaN))
+          .filter((t) => !isNaN(t));
+        const pastDueSince = pastDueTimes.length ? new Date(Math.min(...pastDueTimes)).toISOString() : null;
 
-        // Access mode — identical rules to utils/access.getAccessInfo, computed
-        // here in JS over the batched data (no per-user DB round trips).
-        const createdAt = effUser.created_at ? new Date(effUser.created_at) : null;
-        let daysLeft = 0;
-        let trialEndsAt = null;
-        if (createdAt && !isNaN(createdAt.getTime())) {
-          const end = createdAt.getTime() + TRIAL_DAYS * DAY_MS;
-          trialEndsAt = new Date(end).toISOString();
-          daysLeft = Math.max(0, Math.ceil((end - Date.now()) / DAY_MS));
-        }
+        // Prefer an active sub for the plan display; else show the past_due one.
+        const displaySubs = hasActiveSubscription ? activeSubsForUser : effSubs;
+        const tierSub = displaySubs.find((s) => !isBidProPlan(s.plan_name, s.plan_level)) || null;
+        const addOnSub = displaySubs.find((s) => isBidProPlan(s.plan_name, s.plan_level)) || null;
+
+        const reverifyGraceUntil = graceByUser.has(effectiveId) ? graceByUser.get(effectiveId) : null;
         const ownerExempt = OWNER_EXEMPT_EMAILS.has(effEmail);
-        let accessMode;
-        if (ownerExempt || NEVER_GATED_ROLES.has(effRole) || hasActiveSubscription) {
-          accessMode = "paid";
-        } else if (!createdAt || isNaN(createdAt.getTime())) {
-          accessMode = "paid";
-        } else {
-          accessMode = daysLeft > 0 ? "trial_active" : "expired_free";
-        }
 
-        // Grace window (only rescues expired_free, exactly like access.js): a flagged
-        // account keeps paid access until its deadline.
-        let reverifyGraceUntil = null;
-        if (accessMode === "expired_free" && graceByUser.has(effectiveId)) {
-          reverifyGraceUntil = graceByUser.get(effectiveId);
-          accessMode = "paid";
-        }
+        // SINGLE SOURCE OF TRUTH: the same pure derivation utils/access.getAccessInfo
+        // uses, fed the batched data — so the admin page and real access never drift.
+        const st = computeBillingState({
+          ownerExempt,
+          neverGated: NEVER_GATED_ROLES.has(effRole),
+          hasActiveSubscription,
+          paidCount,
+          createdAt: effUser.created_at,
+          firstLoginAt: effUser.first_login_at,
+          pastDueSince,
+          reverifyGraceUntil,
+          now: Date.now(),
+        });
+
+        // "Paying" for the counter = a real paying-type account (has an active or
+        // past-due sub, or is in reverify grace) — not a comped owner-exempt row.
+        const isPaying =
+          ["paying", "paying_unverified", "past_due"].includes(st.billingStatus) &&
+          (hasActiveSubscription || !!pastDueSince || !!reverifyGraceUntil);
+
+        const lastPaymentAt = displaySubs.reduce((acc, s) => {
+          const t = s.last_payment_at ? new Date(s.last_payment_at).getTime() : NaN;
+          return !isNaN(t) && (acc === null || t > acc) ? t : acc;
+        }, null);
 
         return {
           id: Number(u.id),
@@ -1999,10 +2087,6 @@ router.get(
           role: Number(u.role),
           role_name: u.role_name,
           category: Number(u.category),
-          // Human account-type from the category/subcategory reference tables — the
-          // reliable discriminator. (u.role is overloaded as a category marker for
-          // clients/contractors, so joining `role` mislabels them; see the admin
-          // page, which derives its ROLE column from category_name.)
           category_name: u.category_name || null,
           subcategory: u.subcategory != null ? Number(u.subcategory) : null,
           subcategory_name: u.subcategory_name || null,
@@ -2010,16 +2094,16 @@ router.get(
           inherits_from: isEmployee
             ? { id: effectiveId, name: effUser.name || null, email: effUser.email || null }
             : null,
-          // OWNER-exempt flag is for DISPLAY (the "owner" badge). ownerExempt is
-          // computed on the EFFECTIVE (account-owner) user, so an inheriting
-          // employee would otherwise inherit the owner's exemption and wrongly show
-          // the badge. Scope it to non-employees: only the actual account owner.
-          // (Access-mode computation above still uses the effUser-based ownerExempt.)
           owner_exempt: ownerExempt && !isEmployee,
-          access_mode: accessMode,
-          is_paying: accessMode === "paid" && (hasActiveSubscription || (!ownerExempt && !NEVER_GATED_ROLES.has(effRole))),
-          trial_ends_at: trialEndsAt,
-          trial_days_left: daysLeft,
+          access_mode: st.mode,
+          billing_status: st.billingStatus, // pending|trial|paying|paying_unverified|past_due|expired
+          is_paying: isPaying,
+          paid_count: paidCount,
+          last_payment_at: lastPaymentAt ? new Date(lastPaymentAt).toISOString() : null,
+          first_login_at: effUser.first_login_at || null,
+          past_due_since: pastDueSince,
+          trial_ends_at: st.trialEndsAt,
+          trial_days_left: st.daysLeft,
           plan: tierSub
             ? {
                 subscription_id: tierSub.sub_id,
