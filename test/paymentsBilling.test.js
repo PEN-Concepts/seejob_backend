@@ -100,6 +100,8 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
       (107,'NoRemote GC','noremote@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY),
       (108,'Client Person','client@x.com',3,3,11,103, NOW() - INTERVAL 10 DAY),
       (109,'Sub Contractor','sub@x.com',12,2,12,103, NOW() - INTERVAL 10 DAY),
+      (112,'Grace GC','grace@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
+      (113,'GraceExpired GC','graceexp@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
       (246,'gc gc','gcgc@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY)`);
 
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,next_billing_at,authorize_subscription_id) VALUES
@@ -116,6 +118,10 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
     ok(revCols.length === 1, 'migration: subscriptions.needs_reverification column added', String(revCols.length));
     const [dueCols] = await conn.query("SHOW COLUMNS FROM subscriptions LIKE 'reverification_due_at'");
     ok(dueCols.length === 1, 'migration: subscriptions.reverification_due_at column added', String(dueCols.length));
+    // Flagged (canceled) subs for the overview grace test: 112 still in grace, 113 past it.
+    await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,needs_reverification,reverification_due_at) VALUES
+      (112,4,99.00,'monthly','canceled',1, NOW() + INTERVAL 14 DAY),
+      (113,4,99.00,'monthly','canceled',1, NOW() - INTERVAL 1 DAY)`);
     const { ensureReverifyEmailLogTable } = require('../services/dbMigrations');
     await ensureReverifyEmailLogTable(conn);
     const [logTbl] = await conn.query("SHOW TABLES LIKE 'reverification_email_log'");
@@ -179,6 +185,16 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
     ok(p && p.access_mode === 'paid' && p.plan && p.plan.name === 'Gold' && Number(p.plan.amount) === 99, 'overview: paying user -> paid + Gold @ 99', JSON.stringify(p && p.plan));
     const e = byId.get(104);
     ok(e && e.is_employee === true && e.inherits_from && e.inherits_from.id === 103 && e.access_mode === 'paid', 'overview: employee inherits owner (paid)', JSON.stringify(e && e.inherits_from));
+
+    // --- Re-verification grace: overview must mirror access.js (not show Expired) ---
+    const grace = byId.get(112);
+    ok(grace && grace.access_mode === 'paid' && grace.is_paying === true && grace.needs_reverification === true && !!grace.reverify_grace_until,
+      'overview: flagged account IN grace -> paid + is_paying + grace date (mirrors access.js)',
+      JSON.stringify(grace && { am: grace.access_mode, pay: grace.is_paying, nr: grace.needs_reverification, until: grace.reverify_grace_until, plan: grace.plan }));
+    const graceExp = byId.get(113);
+    ok(graceExp && graceExp.access_mode === 'expired_free' && graceExp.is_paying === false,
+      'overview: flagged account PAST grace -> expired_free (no rescue)',
+      JSON.stringify(graceExp && { am: graceExp.access_mode, pay: graceExp.is_paying }));
 
     // --- Account-type source: category/subcategory, NOT the role FK (Foreman bug) ---
     const client = byId.get(108);

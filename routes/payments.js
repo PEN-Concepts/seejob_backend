@@ -1921,6 +1921,21 @@ router.get(
       );
       const reverifySet = new Set(reverifyRows.map((r) => Number(r.user_id)));
 
+      // Re-verification grace deadlines — mirror utils/access.getAccessInfo so the
+      // admin page's access-mode matches the REAL access an account has. A flagged
+      // account (sub canceled at go-live) keeps full "paid" access until its grace
+      // deadline; without this the overview computes expired_free for every account
+      // the reverify trigger touched, wrongly showing "Expired" + zeroing the paying
+      // counters even though access.js still grants them access.
+      const [graceRows] = await connection.query(
+        `SELECT user_id, MAX(reverification_due_at) AS due
+           FROM subscriptions
+          WHERE needs_reverification = 1 AND reverification_due_at IS NOT NULL
+            AND reverification_due_at > NOW()
+          GROUP BY user_id`
+      );
+      const graceByUser = new Map(graceRows.map((r) => [Number(r.user_id), r.due]));
+
       const usersById = new Map();
       users.forEach((u) => usersById.set(Number(u.id), u));
 
@@ -1966,6 +1981,14 @@ router.get(
           accessMode = "paid";
         } else {
           accessMode = daysLeft > 0 ? "trial_active" : "expired_free";
+        }
+
+        // Grace window (only rescues expired_free, exactly like access.js): a flagged
+        // account keeps paid access until its deadline.
+        let reverifyGraceUntil = null;
+        if (accessMode === "expired_free" && graceByUser.has(effectiveId)) {
+          reverifyGraceUntil = graceByUser.get(effectiveId);
+          accessMode = "paid";
         }
 
         return {
@@ -2016,6 +2039,7 @@ router.get(
             : null,
           has_past_subscriptions: (pastByUser.get(Number(u.id)) || 0) > 0,
           needs_reverification: reverifySet.has(effectiveId),
+          reverify_grace_until: reverifyGraceUntil,
         };
       });
 
