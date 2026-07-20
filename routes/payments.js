@@ -1891,10 +1891,12 @@ router.get(
       connection = await pool.getConnection();
 
       const [users] = await connection.query(
-        `SELECT u.id, u.name, u.email, u.role, u.category, u.created_by, u.created_at,
-                r.name AS role_name
+        `SELECT u.id, u.name, u.email, u.role, u.category, u.subcategory, u.created_by, u.created_at,
+                r.name AS role_name, c.name AS category_name, sc.name AS subcategory_name
            FROM \`user\` u
            LEFT JOIN role r ON r.id = u.role
+           LEFT JOIN category c ON c.id = u.category
+           LEFT JOIN subcategory sc ON sc.id = u.subcategory
           ORDER BY u.name ASC`
       );
 
@@ -1973,6 +1975,13 @@ router.get(
           role: Number(u.role),
           role_name: u.role_name,
           category: Number(u.category),
+          // Human account-type from the category/subcategory reference tables — the
+          // reliable discriminator. (u.role is overloaded as a category marker for
+          // clients/contractors, so joining `role` mislabels them; see the admin
+          // page, which derives its ROLE column from category_name.)
+          category_name: u.category_name || null,
+          subcategory: u.subcategory != null ? Number(u.subcategory) : null,
+          subcategory_name: u.subcategory_name || null,
           is_employee: isEmployee,
           inherits_from: isEmployee
             ? { id: effectiveId, name: effUser.name || null, email: effUser.email || null }

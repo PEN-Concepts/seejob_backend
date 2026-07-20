@@ -51,9 +51,11 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
     conn = await pool.getConnection();
 
     await conn.query(`CREATE TABLE role (id INT PRIMARY KEY, name VARCHAR(80))`);
+    await conn.query(`CREATE TABLE category (id INT PRIMARY KEY, name VARCHAR(80))`);
+    await conn.query(`CREATE TABLE subcategory (id INT PRIMARY KEY, name VARCHAR(80))`);
     await conn.query(`CREATE TABLE \`user\` (
       id INT PRIMARY KEY, name VARCHAR(150), email VARCHAR(190),
-      role INT, category INT, created_by INT NULL, created_at DATETIME NULL
+      role INT, category INT, subcategory INT NULL, created_by INT NULL, created_at DATETIME NULL
     ) ENGINE=InnoDB`);
     await conn.query(`CREATE TABLE plans (
       id INT PRIMARY KEY, name VARCHAR(80), amount DECIMAL(10,2), \`interval\` VARCHAR(20),
@@ -74,7 +76,11 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
       id INT PRIMARY KEY AUTO_INCREMENT, plan_id INT, feature_key VARCHAR(80)
     ) ENGINE=InnoDB`);
     await conn.query(`INSERT INTO plan_features (plan_id, feature_key) VALUES (4,'job'),(4,'task')`);
-    await conn.query(`INSERT INTO role VALUES (14,'General Contractor'),(12,'Subcontractor')`);
+    // Role id 3 is "Foreman" — this is the collision: clients are stored with
+    // user.role=3 as a category marker, so a role-table join mislabels them Foreman.
+    await conn.query(`INSERT INTO role VALUES (14,'General Contractor'),(12,'Subcontractor'),(3,'Foreman')`);
+    await conn.query(`INSERT INTO category VALUES (1,'Employee'),(2,'Contractor'),(3,'Client')`);
+    await conn.query(`INSERT INTO subcategory VALUES (11,'Client'),(12,'Subcontractor'),(1,'Foreman')`);
     await conn.query(`INSERT INTO plans (id,name,amount,\`interval\`,is_active,level) VALUES
       (1,'Basic',29.00,'monthly',1,1),
       (4,'Gold',99.00,'monthly',1,4),
@@ -84,15 +90,17 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
 
     // Users: 100 owner-exempt (no sub), 101 trial (new), 102 expired (old, no sub),
     // 103 paying Gold, 104 employee of 103, 105 for webhook cancel test.
-    await conn.query(`INSERT INTO \`user\` (id,name,email,role,category,created_by,created_at) VALUES
-      (100,'Owner Exempt','admin@oakcoast.net',14,2,NULL, NOW() - INTERVAL 400 DAY),
-      (101,'Trial User','trial@x.com',14,2,NULL, NOW() - INTERVAL 5 DAY),
-      (102,'Expired User','expired@x.com',14,2,NULL, NOW() - INTERVAL 90 DAY),
-      (103,'Paying GC','paying@x.com',14,2,NULL, NOW() - INTERVAL 200 DAY),
-      (104,'Employee','emp@x.com',5,1,103, NOW() - INTERVAL 3 DAY),
-      (105,'Webhook GC','webhook@x.com',14,2,NULL, NOW() - INTERVAL 10 DAY),
-      (107,'NoRemote GC','noremote@x.com',14,2,NULL, NOW() - INTERVAL 10 DAY),
-      (246,'gc gc','gcgc@x.com',14,2,NULL, NOW() - INTERVAL 10 DAY)`);
+    await conn.query(`INSERT INTO \`user\` (id,name,email,role,category,subcategory,created_by,created_at) VALUES
+      (100,'Owner Exempt','admin@oakcoast.net',14,2,NULL,NULL, NOW() - INTERVAL 400 DAY),
+      (101,'Trial User','trial@x.com',14,2,NULL,NULL, NOW() - INTERVAL 5 DAY),
+      (102,'Expired User','expired@x.com',14,2,NULL,NULL, NOW() - INTERVAL 90 DAY),
+      (103,'Paying GC','paying@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
+      (104,'Employee','emp@x.com',5,1,NULL,103, NOW() - INTERVAL 3 DAY),
+      (105,'Webhook GC','webhook@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY),
+      (107,'NoRemote GC','noremote@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY),
+      (108,'Client Person','client@x.com',3,3,11,103, NOW() - INTERVAL 10 DAY),
+      (109,'Sub Contractor','sub@x.com',12,2,12,103, NOW() - INTERVAL 10 DAY),
+      (246,'gc gc','gcgc@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY)`);
 
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,next_billing_at,authorize_subscription_id) VALUES
       (103,4,99.00,'monthly','active', NOW() + INTERVAL 20 DAY, 'ARBGOLD'),
@@ -171,6 +179,18 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
     ok(p && p.access_mode === 'paid' && p.plan && p.plan.name === 'Gold' && Number(p.plan.amount) === 99, 'overview: paying user -> paid + Gold @ 99', JSON.stringify(p && p.plan));
     const e = byId.get(104);
     ok(e && e.is_employee === true && e.inherits_from && e.inherits_from.id === 103 && e.access_mode === 'paid', 'overview: employee inherits owner (paid)', JSON.stringify(e && e.inherits_from));
+
+    // --- Account-type source: category/subcategory, NOT the role FK (Foreman bug) ---
+    const client = byId.get(108);
+    // The client's role=3 would join role-table row 3 = 'Foreman'; the endpoint must
+    // instead expose category_name='Client' so the UI can label it correctly.
+    ok(client && client.category === 3 && client.category_name === 'Client', 'overview: client exposes category_name=Client (not role Foreman)', JSON.stringify(client && { role_name: client.role_name, category_name: client.category_name }));
+    ok(client && client.role_name === 'Foreman', 'overview: (sanity) client role_name still joins to Foreman — proves the collision the UI must ignore', client && client.role_name);
+    ok(client && client.subcategory === 11 && client.subcategory_name === 'Client', 'overview: client subcategory_name present', JSON.stringify(client && { sc: client.subcategory, scn: client.subcategory_name }));
+    const sub = byId.get(109);
+    ok(sub && sub.category_name === 'Contractor', 'overview: contractor exposes category_name=Contractor', sub && sub.category_name);
+    const gc = byId.get(103);
+    ok(gc && gc.category_name === 'Contractor' && gc.role === 14, 'overview: GC owner category_name present (UI maps role 14 -> GC)', gc && gc.category_name);
 
     // --- Live-status graceful degradation (Authorize.Net not configured) ---
     const [goldSub] = await conn.query("SELECT id FROM subscriptions WHERE authorize_subscription_id='ARBGOLD'");
