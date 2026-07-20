@@ -717,55 +717,21 @@ router.post("/update_user_status", async (req, res) => {
   }
 });
 
-router.post("/delete_user", async (req, res) => {
-  let connection;
-
-  try {
-    const { user_id } = req.body;
-
-    if (!user_id) {
-      return res.status(400).json({
-        success: false,
-        message: "user_id is required",
-      });
-    }
-
-    connection = await pool.getConnection();
-
-    const [result] = await connection.execute(
-      `DELETE FROM user WHERE id = ?`,
-      [user_id]
-    );
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      });
-    }
-
-    res.json({
-      success: true,
-      message: "User deleted successfully",
-    });
-  } catch (err) {
-    // MySQL: ER_ROW_IS_REFERENCED_2 â€” child rows still reference this user
-    if (err.errno === 1451) {
-      return res.status(409).json({
-        success: false,
-        message:
-          "Cannot delete this user because related data still exists in the system",
-        error: err.message,
-      });
-    }
-    res.status(500).json({
-      success: false,
-      message: "Database error",
-      error: err.message,
-    });
-  } finally {
-    if (connection) connection.release();
-  }
+// RETIRED 2026-07-20. This endpoint had NO authentication and ran a bare
+// single-row user delete with zero child cleanup — it orphaned all of a
+// user's data and was an unauthenticated bypass around every safeguard. Account
+// deletion now goes exclusively through the owner-gated, two-step, cascade-aware
+// flow: GET /payments/admin/account-delete-preview/:id then
+// DELETE /payments/admin/account/:id (requireAdmin + typed-email confirmation +
+// full cascade + ARB cancel + employee detach, all in one transaction). This stub
+// stays only so any stale caller gets a clear 410 instead of silently deleting.
+router.post("/delete_user", (req, res) => {
+  return res.status(410).json({
+    success: false,
+    code: "ENDPOINT_RETIRED",
+    message:
+      "This endpoint has been retired. Use the Admin Plan & Payment Status page (owner-only) to delete an account safely.",
+  });
 });
 
 router.get('/rights', auth.authenticateToken, async (req, res) => {

@@ -27,6 +27,11 @@ ok(/AUTHORIZE_SIGNATURE_KEY/.test(paySrc), 'source: reads AUTHORIZE_SIGNATURE_KE
 ok(/return res\.status\(500\)\.send\("Processing failed"\)/.test(paySrc), 'source: webhook returns 500 (not 200) on a DB failure');
 ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe');
 
+// Old unsafe /delete_user must be retired (no bare DELETE FROM user, no bypass).
+const adminCRSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin_contactRequest.js'), 'utf8');
+ok(/code:\s*"ENDPOINT_RETIRED"/.test(adminCRSrc), 'source: old /delete_user endpoint is retired (returns 410)');
+ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user no longer runs a bare DELETE FROM user');
+
 // ---- B) Integration ----
 (async () => {
   let db, pool, conn, app, request, jwt;
@@ -102,6 +107,7 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
       (109,'Sub Contractor','sub@x.com',12,2,12,103, NOW() - INTERVAL 10 DAY),
       (112,'Grace GC','grace@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
       (113,'GraceExpired GC','graceexp@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
+      (114,'Emp Of Owner','empofowner@x.com',5,1,11,100, NOW() - INTERVAL 5 DAY),
       (246,'gc gc','gcgc@x.com',14,2,NULL,NULL, NOW() - INTERVAL 10 DAY)`);
 
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,next_billing_at,authorize_subscription_id) VALUES
@@ -195,6 +201,12 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
     ok(graceExp && graceExp.access_mode === 'expired_free' && graceExp.is_paying === false,
       'overview: flagged account PAST grace -> expired_free (no rescue)',
       JSON.stringify(graceExp && { am: graceExp.access_mode, pay: graceExp.is_paying }));
+
+    // --- OWNER badge: owner_exempt must NOT leak to an inheriting employee ---
+    const exemptOwner = byId.get(100);   // admin@oakcoast.net — owner-exempt account owner
+    const empOfOwner = byId.get(114);    // employee (cat 1) whose created_by = 100
+    ok(exemptOwner && exemptOwner.owner_exempt === true, 'owner_exempt: the actual exempt account owner is flagged', JSON.stringify(exemptOwner && { oe: exemptOwner.owner_exempt, emp: exemptOwner.is_employee }));
+    ok(empOfOwner && empOfOwner.is_employee === true && empOfOwner.owner_exempt === false, 'owner_exempt: inheriting employee is NOT flagged (no leaked OWNER badge)', JSON.stringify(empOfOwner && { oe: empOfOwner.owner_exempt, emp: empOfOwner.is_employee, am: empOfOwner.access_mode }));
 
     // --- Account-type source: category/subcategory, NOT the role FK (Foreman bug) ---
     const client = byId.get(108);
@@ -333,6 +345,20 @@ ok(/timingSafeEqual/.test(paySrc), 'source: signature comparison is timing-safe'
     ok(hist.body.summary && typeof hist.body.summary === 'object', 'history: includes a status summary', JSON.stringify(hist.body.summary));
     const histForbid = await request(app).get('/api/payments/admin/reverification-email-log').set('Authorization', tok(101));
     ok(histForbid.status === 403, 'history: non-admin forbidden (403)', String(histForbid.status));
+
+    // --- Account delete safeguards (full cascade covered by accountDelete.test.js) ---
+    const previewForbid = await request(app).get('/api/payments/admin/account-delete-preview/101').set('Authorization', tok(101));
+    ok(previewForbid.status === 403, 'account-delete: preview is owner-only (non-admin 403)', String(previewForbid.status));
+    const delForbid = await request(app).delete('/api/payments/admin/account/101').set('Authorization', tok(101)).send({ confirmEmail: 'trial@x.com' });
+    ok(delForbid.status === 403, 'account-delete: delete is owner-only (non-admin 403)', String(delForbid.status));
+    const delMismatch = await request(app).delete('/api/payments/admin/account/101').set('Authorization', tok(246)).send({ confirmEmail: 'wrong@x.com' });
+    ok(delMismatch.status === 400 && delMismatch.body.code === 'CONFIRM_MISMATCH', 'account-delete: wrong typed email is rejected (400)', JSON.stringify({ s: delMismatch.status, c: delMismatch.body && delMismatch.body.code }));
+    const [stillThere] = await conn.query('SELECT COUNT(*) AS c FROM `user` WHERE id = 101');
+    ok(Number(stillThere[0].c) === 1, 'account-delete: nothing deleted when the typed email is wrong', String(stillThere[0].c));
+    const delOwner = await request(app).delete('/api/payments/admin/account/100').set('Authorization', tok(246)).send({ confirmEmail: 'admin@oakcoast.net' });
+    ok(delOwner.status === 403 && delOwner.body.code === 'OWNER_PROTECTED', 'account-delete: owner-exempt account is protected (403)', JSON.stringify({ s: delOwner.status, c: delOwner.body && delOwner.body.code }));
+    const [ownerStill] = await conn.query('SELECT COUNT(*) AS c FROM `user` WHERE id = 100');
+    ok(Number(ownerStill[0].c) === 1, 'account-delete: the protected owner is untouched', String(ownerStill[0].c));
   } catch (err) {
     ok(false, 'integration threw', String(err && err.stack ? err.stack.split('\n').slice(0, 3).join(' | ') : err));
   } finally {

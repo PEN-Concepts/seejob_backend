@@ -8,6 +8,7 @@ const logger = require("../common/logger");
 const { getAccessMode, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { requireAdmin } = require("../utils/adminGate");
 const { sendEmail, isRealEmail } = require("../services/notify");
+const { previewAccountDeletion, cascadeDeleteAccount } = require("../services/accountDelete");
 
 // Authorize.Net SDK
 const { APIControllers, APIContracts } = require("authorizenet");
@@ -2009,7 +2010,12 @@ router.get(
           inherits_from: isEmployee
             ? { id: effectiveId, name: effUser.name || null, email: effUser.email || null }
             : null,
-          owner_exempt: ownerExempt,
+          // OWNER-exempt flag is for DISPLAY (the "owner" badge). ownerExempt is
+          // computed on the EFFECTIVE (account-owner) user, so an inheriting
+          // employee would otherwise inherit the owner's exemption and wrongly show
+          // the badge. Scope it to non-employees: only the actual account owner.
+          // (Access-mode computation above still uses the effUser-based ownerExempt.)
+          owner_exempt: ownerExempt && !isEmployee,
           access_mode: accessMode,
           is_paying: accessMode === "paid" && (hasActiveSubscription || (!ownerExempt && !NEVER_GATED_ROLES.has(effRole))),
           trial_ends_at: trialEndsAt,
@@ -2184,6 +2190,115 @@ router.post(
     } catch (err) {
       logger.error("/payments/admin/reverify-sandbox-subscriptions error: " + err.message);
       return res.status(500).json({ success: false, message: "Unable to flag subscriptions." });
+    } finally {
+      if (connection) connection.release();
+    }
+  }
+);
+
+// ── Account delete (owner-only) ────────────────────────────────────────────────
+// Cancel a live Authorize.Net subscription by its ARB id (reused by the cascade).
+async function cancelArbSubscription(remoteId) {
+  if (!remoteId || !API_LOGIN_ID || !TRANSACTION_KEY) return;
+  const merchantAuthentication = new APIContracts.MerchantAuthenticationType();
+  merchantAuthentication.setName(API_LOGIN_ID);
+  merchantAuthentication.setTransactionKey(TRANSACTION_KEY);
+  const cancelRequest = new APIContracts.ARBCancelSubscriptionRequest();
+  cancelRequest.setMerchantAuthentication(merchantAuthentication);
+  cancelRequest.setSubscriptionId(String(remoteId));
+  const ctrl = new APIControllers.ARBCancelSubscriptionController(cancelRequest.getJSON());
+  ctrl.setEnvironment(getApiEnvironment());
+  await new Promise((resolve, reject) => {
+    ctrl.execute(() => {
+      const apiResponse = ctrl.getResponse();
+      if (!apiResponse) return reject(new Error("Empty response from Authorize.Net"));
+      const response = new APIContracts.ARBCancelSubscriptionResponse(apiResponse);
+      if (response.getMessages().getResultCode() === APIContracts.MessageTypeEnum.OK) return resolve(true);
+      const text = response.getMessages().getMessage()[0].getText() || "Unknown error";
+      // "record not found" (E00040) = the sandbox-era sub doesn't exist on the live
+      // account — nothing to cancel, so treat as success (idempotent for cleanup).
+      if (/E00040|not found|cannot be found/i.test(text)) return resolve(true);
+      return reject(new Error("Authorize.Net ARB cancel error: " + text));
+    });
+  });
+}
+
+// GET /payments/admin/account-delete-preview/:userId
+// Step-2 dry run: exact counts the owner reviews before typing the email to confirm.
+router.get(
+  "/admin/account-delete-preview/:userId",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    const targetId = Number(req.params.userId);
+    if (!Number.isFinite(targetId) || targetId <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid user id." });
+    }
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      const preview = await previewAccountDeletion(connection, targetId);
+      if (!preview) return res.status(404).json({ success: false, message: "Account not found." });
+      return res.json({ success: true, preview });
+    } catch (err) {
+      logger.error("/payments/admin/account-delete-preview error: " + err.message);
+      return res.status(500).json({ success: false, message: "Unable to build the delete preview." });
+    } finally {
+      if (connection) connection.release();
+    }
+  }
+);
+
+// DELETE /payments/admin/account/:userId
+// Permanent cascade delete. Body must include { confirmEmail } matching the target's
+// email (server-side re-check — the client typing it is not trusted on its own).
+// Owner-exempt accounts (the platform owners) can never be deleted here.
+router.delete(
+  "/admin/account/:userId",
+  authenticateToken,
+  requireAdmin,
+  async (req, res) => {
+    const targetId = Number(req.params.userId);
+    const confirmEmail = String((req.body && req.body.confirmEmail) || "").trim().toLowerCase();
+    if (!Number.isFinite(targetId) || targetId <= 0) {
+      return res.status(400).json({ success: false, message: "Invalid user id." });
+    }
+    if (Number(req.user && req.user.id) === targetId) {
+      return res.status(400).json({ success: false, message: "You cannot delete your own account here." });
+    }
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      const [rows] = await connection.query(
+        "SELECT id, email FROM `user` WHERE id = ? LIMIT 1",
+        [targetId]
+      );
+      if (!rows.length) return res.status(404).json({ success: false, message: "Account not found." });
+      const email = String(rows[0].email || "").trim().toLowerCase();
+
+      // The typed email must match the target account (defence against mis-click / wrong row).
+      if (!confirmEmail || confirmEmail !== email) {
+        return res.status(400).json({ success: false, code: "CONFIRM_MISMATCH", message: "The typed email does not match this account." });
+      }
+      // Never allow deleting a platform-owner-exempt account through this tool.
+      if (OWNER_EXEMPT_EMAILS.has(email)) {
+        return res.status(403).json({ success: false, code: "OWNER_PROTECTED", message: "This is a protected owner account and cannot be deleted." });
+      }
+
+      await connection.beginTransaction();
+      let result;
+      try {
+        result = await cascadeDeleteAccount(connection, targetId, { cancelArb: cancelArbSubscription });
+        await connection.commit();
+      } catch (e) {
+        await connection.rollback();
+        throw e;
+      }
+      logger.info(`/payments/admin/account delete: uid ${targetId} (${email}) by ${req.user && req.user.id} — ${JSON.stringify(result.tables)}`);
+      return res.json({ success: true, deleted_user_id: targetId, ...result });
+    } catch (err) {
+      logger.error("/payments/admin/account delete error: " + err.message);
+      return res.status(500).json({ success: false, message: "Unable to delete the account. Nothing was deleted." });
     } finally {
       if (connection) connection.release();
     }
