@@ -6,7 +6,52 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const auth = require("../services/authentication");
-const { denyExpiredFreeWrites, isSameAccount } = require("../utils/access");
+const { denyExpiredFreeWrites, isSameAccount, getAccessMode, resolveOwnerId } = require("../utils/access");
+
+// For an expired_free user, keep ONLY tasks on FOREIGN (other-account) jobs/leads
+// they collaborate on — hide everything on their own account's jobs/leads and
+// their own no-job tasks. Preserves requirement #4 (collaborator tasks assigned by
+// OTHER GCs stay visible) while fully locking their own data once the trial ends.
+// No-op for paid/trial users (returns rows unchanged) and fails OPEN on error.
+async function filterTasksForExpired(connection, userId, rows) {
+  if (!rows || !rows.length || !userId) return rows;
+  let mode = "paid";
+  try {
+    mode = await getAccessMode(userId, connection);
+  } catch (e) {
+    return rows; // fail open
+  }
+  if (mode !== "expired_free") return rows;
+  try {
+    const acct = await resolveOwnerId(userId, connection);
+    const accountClause =
+      "(SELECT id FROM `user` WHERE id = ? OR (created_by = ? AND category = 1))";
+    let ownJobs = new Set();
+    let ownLeads = new Set();
+    try {
+      const [j] = await connection.query(
+        `SELECT id FROM job WHERE created_by IN ${accountClause}`,
+        [acct, acct]
+      );
+      ownJobs = new Set(j.map((r) => Number(r.id)));
+    } catch (e) { /* keep empty */ }
+    try {
+      const [l] = await connection.query(
+        `SELECT id FROM leads WHERE user_id IN ${accountClause}`,
+        [acct, acct]
+      );
+      ownLeads = new Set(l.map((r) => Number(r.id)));
+    } catch (e) { /* keep empty */ }
+    return rows.filter((r) => {
+      const jid = Number(r.job_id);
+      if (!r.job_id || jid === 0) return false; // own no-job/personal task
+      const type = String(r.task_type || "job").toLowerCase();
+      return type === "lead" ? !ownLeads.has(jid) : !ownJobs.has(jid);
+    });
+  } catch (e) {
+    return rows; // fail open
+  }
+}
 const { getTimeStamp } = require("../common/timdate");
 const moment = require("moment-timezone");
 const admin = require("../config/firebase-admin");
@@ -557,7 +602,8 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
     const [rows] = await connection.query(baseSql, params);
     await attachTaskImages(connection, rows);
 
-    res.status(200).json(rows);
+    const visible = await filterTasksForExpired(connection, loggedInUserId, rows);
+    res.status(200).json(visible);
   } catch (err) {
     logger.error("Error fetching tasks", err);
     res.status(500).json({ message: "Server error" });
@@ -610,14 +656,15 @@ router.get("/all_lead_task/:id", auth.authenticateToken, async (req, res) => {
       [jobIds, loggedInUserId, loggedInUserId, loggedInUserId]
     );
     await attachTaskImages(pool, rows);
-    res.status(200).json(rows);
+    const visible = await filterTasksForExpired(pool, loggedInUserId, rows);
+    res.status(200).json(visible);
   } catch (err) {
     logger.error("Error fetching lead tasks", err);
     res.status(500).json({ message: "Server error" });
   }
 });
 
-// Dashboard: today's tasks for the logged-in user 
+// Dashboard: today's tasks for the logged-in user
 router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
   let connection;
   try {
@@ -658,6 +705,7 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
         u.name AS createdBy,
         t.status,
         t.job_id,
+        t.task_type,
         COALESCE(j.name, 'No Job') AS jobName,
         t.user_id AS assignedTo,
         au.name AS assignedToName,
@@ -704,11 +752,15 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
     const [rows] = await connection.query(sql, params);
     await attachTaskImages(connection, rows);
 
-    if (!rows || rows.length === 0) {
+    // Expired free trial: hide the user's OWN job/lead tasks (and own no-job
+    // tasks); keep only tasks assigned to them on a FOREIGN GC's job (#4).
+    const visible = await filterTasksForExpired(connection, assigneeId, rows);
+
+    if (!visible || visible.length === 0) {
       return res.status(200).json([]);
     }
 
-    res.status(200).json(rows);
+    res.status(200).json(visible);
   } catch (err) {
     logger.error("Error fetching daily tasks", err);
     res.status(500).json({ message: "Server error" });
@@ -727,6 +779,17 @@ router.get("/:id", auth.authenticateToken, async (req, res) => {
       return res.status(404).json({ message: "Task not found" });
 
     const task = rows[0];
+    // Expired free trial: a task on the user's OWN job/lead is locked; a task
+    // assigned to them on a FOREIGN job stays readable (#4).
+    const userId = req.user && req.user.id ? req.user.id : res.locals && res.locals.id;
+    const visible = await filterTasksForExpired(pool, userId, [task]);
+    if (!visible.length) {
+      return res.status(403).json({
+        success: false,
+        code: "TRIAL_EXPIRED",
+        message: "Your free trial has ended. Your data is saved — upgrade to view or edit it again.",
+      });
+    }
     await attachTaskImages(pool, [task]);
 
     res.status(200).json(task);
@@ -1485,3 +1548,5 @@ router.patch("/:id/complete", auth.authenticateToken, async (req, res) => {
 
 
 module.exports = router;
+// Exposed for tests (expired-free own-vs-foreign task filtering).
+module.exports.filterTasksForExpired = filterTasksForExpired;

@@ -4,6 +4,7 @@ const pool = require('../config/connection');
 const auth = require('../services/authentication');
 const gcal = require('../services/googleCalendar');
 const logger = require('../common/logger');
+const { denyExpiredFreeWrites } = require('../utils/access');
 
 // GET /calendar/master-tasks
 router.get('/master-tasks', auth.authenticateToken, async (req, res) => {
@@ -24,7 +25,7 @@ router.get('/master-tasks', auth.authenticateToken, async (req, res) => {
 });
 
 // POST /calendar/master-tasks
-router.post('/master-tasks', auth.authenticateToken, async (req, res) => {
+router.post('/master-tasks', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const { title } = req.body || {};
   if (!title || !String(title).trim()) {
     return res.status(400).json({ success: false, message: 'Title is required' });
@@ -56,7 +57,7 @@ router.post('/master-tasks', auth.authenticateToken, async (req, res) => {
 });
 
 // PUT /calendar/master-tasks/:id
-router.put('/master-tasks/:id', auth.authenticateToken, async (req, res) => {
+router.put('/master-tasks/:id', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const id = Number(req.params.id);
   const { title, sort_order } = req.body || {};
   if (!id || isNaN(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
@@ -93,7 +94,7 @@ router.put('/master-tasks/:id', auth.authenticateToken, async (req, res) => {
 });
 
 // PUT /calendar/master-tasks/reorder
-router.put('/master-tasks/reorder', auth.authenticateToken, async (req, res) => {
+router.put('/master-tasks/reorder', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const { order } = req.body || {};
   if (!Array.isArray(order)) return res.status(400).json({ success: false, message: 'order must be an array' });
 
@@ -121,7 +122,7 @@ router.put('/master-tasks/reorder', auth.authenticateToken, async (req, res) => 
 });
 
 // DELETE /calendar/master-tasks/:id
-router.delete('/master-tasks/:id', auth.authenticateToken, async (req, res) => {
+router.delete('/master-tasks/:id', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const id = Number(req.params.id);
   if (!id || isNaN(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
   const connection = await pool.getConnection();

@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
+const { blockExpiredOwnJob, denyExpiredFreeWrites } = require("../utils/access");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -362,7 +363,7 @@ router.get("/get_jobs/:user_id", auth.authenticateToken, async (req, res) => {
 
 // ---------------- Change Order Manager (new) ----------------
 
-router.post('/change-orders', auth.authenticateToken, async (req, res) => {
+router.post('/change-orders', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;
@@ -972,7 +973,7 @@ router.delete('/change-orders/:id', auth.authenticateToken, async (req, res) => 
   }
 });
 
-router.post("/create", auth.authenticateToken, async (req, res) => {
+router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   try {
     const { job_id, items } = req.body;
@@ -1369,7 +1370,7 @@ router.get(
 //   }
 // });
 
-router.get("/details/:job_id", auth.authenticateToken, async (req, res) => {
+router.get("/details/:job_id", auth.authenticateToken, blockExpiredOwnJob((r) => r.params.job_id), async (req, res) => {
   let connection;
   try {
     const user_id = res.locals.id; // used for with_user checks

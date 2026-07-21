@@ -58,7 +58,7 @@ async function getChecklistAccess(connection, userId) {
     mode = 'paid'; // fail open, like the rest of the app
   }
 
-  return { role, allowed: true, canWrite: mode !== 'expired_free' };
+  return { role, allowed: true, canWrite: mode !== 'expired_free', expired: mode === 'expired_free' };
 }
 
  const VALID_CHECKLIST_TYPES = new Set(['task', 'shopping']);
@@ -435,7 +435,39 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
       // team this user belongs to. Without this clause a team member would
       // never see the GC's section (they don't own it / aren't shared with),
       // and the team-assigned items would be silently dropped at grouping.
-      const sectionParams = [signedin_user, signedin_user, signedin_user];
+      // Expired free trial: the user's OWN sections are locked. Only sections
+      // SHARED with them by another account, or containing an item assigned to a
+      // team they're on, stay visible (collaborator content — requirement #4).
+      // The owner-branch is dropped for expired users; paid/trial are unchanged.
+      const sectionParams = access.expired
+        ? [signedin_user, signedin_user]
+        : [signedin_user, signedin_user, signedin_user];
+      const sectionsWhere = access.expired
+        ? `(
+            s.shared_with_user_id = ?
+            OR s.id IN (
+              SELECT DISTINCT c.section_id
+              FROM check_list c
+              WHERE c.section_id IS NOT NULL AND c.created_by <> ${Number(signedin_user)}
+                AND EXISTS (
+                  SELECT 1 FROM team_user tu
+                  WHERE tu.team_id = c.assign_to AND tu.user_id = ?
+                )
+            )
+          )`
+        : `(
+            s.owner_user_id = ?
+            OR s.shared_with_user_id = ?
+            OR s.id IN (
+              SELECT DISTINCT c.section_id
+              FROM check_list c
+              WHERE c.section_id IS NOT NULL
+                AND EXISTS (
+                  SELECT 1 FROM team_user tu
+                  WHERE tu.team_id = c.assign_to AND tu.user_id = ?
+                )
+            )
+          )`;
       let sectionsSql = `
         SELECT
           s.id,
@@ -451,19 +483,7 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
         LEFT JOIN user owner ON owner.id = s.owner_user_id
         LEFT JOIN user shared ON shared.id = s.shared_with_user_id
         LEFT JOIN user assigned ON assigned.id = s.shared_with_user_id
-        WHERE (
-          s.owner_user_id = ?
-          OR s.shared_with_user_id = ?
-          OR s.id IN (
-            SELECT DISTINCT c.section_id
-            FROM check_list c
-            WHERE c.section_id IS NOT NULL
-              AND EXISTS (
-                SELECT 1 FROM team_user tu
-                WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-              )
-          )
-        )
+        WHERE ${sectionsWhere}
       `;
 
       if (requestedType && VALID_CHECKLIST_TYPES.has(String(requestedType))) {
@@ -477,7 +497,32 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
       // created_by, assign_to, team-user). A 6th param here would be wrongly
       // consumed by the appended "AND c.type = ?" clause, making it compare
       // c.type to a user id and return zero items.
-      const itemParams = [signedin_user, signedin_user, signedin_user, signedin_user, signedin_user];
+      // Expired: only collaborator items stay — an item in a section shared TO
+      // them, an item delegated to them BY SOMEONE ELSE (assign_to me, created by
+      // another), or a team item authored by another account. Their own items
+      // (self-created, incl. self-delegated) are locked. Paid/trial: unchanged.
+      const itemParams = access.expired
+        ? [signedin_user, signedin_user]
+        : [signedin_user, signedin_user, signedin_user, signedin_user, signedin_user];
+      const itemsWhere = access.expired
+        ? `(
+            (c.section_id IS NOT NULL AND s.shared_with_user_id = ?)
+            OR (c.assign_to = ? AND c.created_by <> ${Number(signedin_user)})
+            OR (
+              c.created_by <> ${Number(signedin_user)}
+              AND EXISTS (SELECT 1 FROM team_user tu WHERE tu.team_id = c.assign_to AND tu.user_id = ${Number(signedin_user)})
+            )
+          )`
+        : `(
+            (c.section_id IS NOT NULL AND (s.owner_user_id = ? OR s.shared_with_user_id = ?))
+            OR
+            (c.section_id IS NULL AND (c.created_by = ? OR c.assign_to = ?))
+            OR
+            EXISTS (
+              SELECT 1 FROM team_user tu
+              WHERE tu.team_id = c.assign_to AND tu.user_id = ?
+            )
+          )`;
       // tm.* is populated only when assign_to matches a teams.id, giving the
       // frontend a way to render the team chip without a dedicated column.
       let itemsSql = `
@@ -510,16 +555,7 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
         LEFT JOIN user u ON u.id = c.created_by
         LEFT JOIN checklist_sections s ON s.id = c.section_id
         LEFT JOIN teams tm ON tm.id = c.assign_to
-        WHERE (
-          (c.section_id IS NOT NULL AND (s.owner_user_id = ? OR s.shared_with_user_id = ?))
-          OR
-          (c.section_id IS NULL AND (c.created_by = ? OR c.assign_to = ?))
-          OR
-          EXISTS (
-            SELECT 1 FROM team_user tu
-            WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-          )
-        )
+        WHERE ${itemsWhere}
       `;
 
       if (requestedType && VALID_CHECKLIST_TYPES.has(String(requestedType))) {

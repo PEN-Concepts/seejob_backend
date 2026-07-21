@@ -213,10 +213,81 @@ async function canViewJob(userId, jobId, connection) {
     };
 
     const mode = await getAccessMode(userId, conn);
-    if (mode === "expired_free") return isAssigned();
+    if (mode === "expired_free") {
+      // Expired: their OWN account's jobs are fully locked (not even viewable)
+      // until they subscribe — even a job they self-assigned a task on. Only
+      // FOREIGN jobs they genuinely collaborate on stay visible (requirement #4).
+      // isSameAccount catches both the solo-contractor (created_by === self) and
+      // the employee-of-owner cases.
+      if (await isSameAccount(userId, jobRows[0].created_by, conn)) return false;
+      return isAssigned();
+    }
     if (await isSameAccount(userId, jobRows[0].created_by, conn)) return true;
     return isAssigned();
   });
+}
+
+/**
+ * True when an expired_free user is trying to reach data on a job their OWN
+ * account owns — the case the full-lockout closes. Returns FALSE for paid/trial
+ * users (zero behavior change) and FALSE for foreign jobs they merely collaborate
+ * on (requirement #4 — collaborator access preserved). FAILS OPEN (returns false)
+ * on missing/erroring data so a glitch can never lock out a legitimate user,
+ * consistent with the rest of the access model.
+ */
+async function isExpiredOwnJob(userId, jobId, connection) {
+  return withConnection(connection, async (conn) => {
+    try {
+      if (jobId == null) return false;
+      if ((await getAccessMode(userId, conn)) !== "expired_free") return false;
+      const [rows] = await conn.query(
+        "SELECT created_by FROM job WHERE id = ? LIMIT 1",
+        [jobId]
+      );
+      if (!rows.length) return false;
+      return await isSameAccount(userId, rows[0].created_by, conn);
+    } catch (err) {
+      logger.error("isExpiredOwnJob error: " + err.message);
+      return false;
+    }
+  });
+}
+
+/**
+ * Express middleware factory: block an expired_free user from reaching data on a
+ * job their OWN account owns (read OR write). Foreign collaborator jobs pass
+ * through untouched and paid/trial users are never affected. `getJobId(req)`
+ * pulls the job id from wherever the route carries it (param / query / body).
+ * Apply AFTER auth.authenticateToken. FAILS OPEN on any error.
+ */
+function blockExpiredOwnJob(getJobId) {
+  return async (req, res, next) => {
+    try {
+      const userId =
+        req.user && req.user.id ? req.user.id : res.locals && res.locals.id;
+      if (!userId) {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+      }
+      let jobId = null;
+      try {
+        jobId = getJobId(req);
+      } catch (e) {
+        jobId = null;
+      }
+      if (jobId != null && jobId !== "" && (await isExpiredOwnJob(userId, jobId))) {
+        return res.status(403).json({
+          success: false,
+          code: "TRIAL_EXPIRED",
+          message:
+            "Your free trial has ended. Your data is saved — upgrade to view or edit it again.",
+        });
+      }
+      return next();
+    } catch (err) {
+      logger.error("blockExpiredOwnJob error: " + err.message);
+      return next(); // fail open — never block a legitimate user on a glitch
+    }
+  };
 }
 
 /**
@@ -375,6 +446,8 @@ module.exports = {
   isExpiredFree,
   isSameAccount,
   canViewJob,
+  isExpiredOwnJob,
+  blockExpiredOwnJob,
   denyExpiredFreeWrites,
   PLAN_LEVELS,
   getActivePlanLevel,
