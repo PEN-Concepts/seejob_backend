@@ -2197,6 +2197,39 @@ router.post(
 );
 
 // ── Account delete (owner-only) ────────────────────────────────────────────────
+
+// Classify an Authorize.Net ARB *cancel* error as harmless for account deletion.
+// Returns true only when the subscription is confirmed to NOT be billing (so the
+// account is safe to delete); false for genuine failures where it might still be
+// active and must NOT be silently orphaned.
+//
+// We only ever call cancel on a row whose local status is 'active', and ARB cancel
+// on a genuinely active subscription returns OK — so a cancel *error* means one of:
+//   (a) the sub/profile doesn't exist on the live account (E00040/E00035 / "record
+//       not found") — nothing to cancel; or
+//   (b) it's already in a terminal, non-billing state (cancelled / terminated /
+//       expired / suspended) — also nothing left to cancel.
+// Either way it isn't charging, so deletion is safe. Everything else — auth failure
+// (E00007/E00008), connectivity, unknown codes — is REJECTED by the caller so the
+// delete transaction rolls back rather than leaving a live recurring charge behind.
+function isArbCancelHarmless(code, text) {
+  const c = String(code || "");
+  const t = String(text || "");
+  // (a) not found on the live account
+  if (
+    /\bE000(?:40|35)\b/i.test(c) ||
+    /not\s+be\s+found|\bnot\s+found\b|cannot\s+be\s+found|does\s+not\s+exist/i.test(t)
+  ) {
+    return true;
+  }
+  // (b) already in a terminal, non-billing state. Require BOTH a state word and a
+  // context signal so an incidental match (e.g. "credentials expired") can't slip
+  // through — ARB cancel only errors this way when the sub is already inactive.
+  const stateWord = /(cancell?ed|terminat(?:ed|ion)|expired|suspended)/i.test(t);
+  const context = /already|has\s+been|have\s+been|\bstatus\b|\bis\s|no\s+longer|currently|cannot\s+be\s+cancell?ed/i.test(t);
+  return stateWord && context;
+}
+
 // Cancel a live Authorize.Net subscription by its ARB id (reused by the cascade).
 async function cancelArbSubscription(remoteId) {
   if (!remoteId || !API_LOGIN_ID || !TRANSACTION_KEY) return;
@@ -2214,11 +2247,15 @@ async function cancelArbSubscription(remoteId) {
       if (!apiResponse) return reject(new Error("Empty response from Authorize.Net"));
       const response = new APIContracts.ARBCancelSubscriptionResponse(apiResponse);
       if (response.getMessages().getResultCode() === APIContracts.MessageTypeEnum.OK) return resolve(true);
-      const text = response.getMessages().getMessage()[0].getText() || "Unknown error";
-      // "record not found" (E00040) = the sandbox-era sub doesn't exist on the live
-      // account — nothing to cancel, so treat as success (idempotent for cleanup).
-      if (/E00040|not found|cannot be found/i.test(text)) return resolve(true);
-      return reject(new Error("Authorize.Net ARB cancel error: " + text));
+      const msg = (response.getMessages().getMessage() || [])[0] || {};
+      const code = msg.getCode ? msg.getCode() : "";
+      const text = (msg.getText ? msg.getText() : "") || "Unknown error";
+      // Safe to proceed only when the subscription is confirmed NOT billing (not
+      // found, or already cancelled/terminated/expired/suspended). Anything else
+      // might be a still-active sub we failed to cancel — reject so the caller's
+      // delete transaction rolls back instead of orphaning a live recurring charge.
+      if (isArbCancelHarmless(code, text)) return resolve(true);
+      return reject(new Error(`Authorize.Net ARB cancel error${code ? ` [${code}]` : ""}: ${text}`));
     });
   });
 }
@@ -2505,3 +2542,5 @@ router.get(
 );
 
 module.exports = router;
+// Exposed for unit tests (ARB cancel error classification — account-delete safety).
+module.exports.isArbCancelHarmless = isArbCancelHarmless;
