@@ -37,6 +37,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     request = require('supertest');
     access = require('../utils/access');
     tasksRouter = require('../routes/tasks'); // exposes filterTasksForExpired
+    const invitationsRouter = require('../routes/invitations'); // exposes filterAppointmentsForExpired
     conn = await pool.getConnection();
 
     // ---- schema ----
@@ -67,8 +68,11 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
 
     // ---- jobs ----
     await conn.query("INSERT INTO job (id,created_by,name,status) VALUES (1000,700,'E own job',1),(1010,710,'P own job',1),(1020,800,'F foreign job',1)");
-    // ---- leads (E owns a lead) ----
-    await conn.query("INSERT INTO leads (id,user_id,lead_name,status) VALUES (3000,700,'E own lead',1)");
+    // ---- leads: E(3000) own · P(3010) own · F(3020) foreign ----
+    await conn.query("INSERT INTO leads (id,user_id,lead_name,status) VALUES (3000,700,'E own lead',1),(3010,710,'P own lead',1),(3020,800,'F lead',1)");
+    // lead-owned stages/materials (owner_type='lead', id carried in job_id column)
+    await conn.query("INSERT INTO stages (job_id,owner_type,status,stage_name) VALUES (3000,'lead',1,'E lead stage'),(3010,'lead',1,'P lead stage')");
+    await conn.query("INSERT INTO materials (job_id,owner_type,name) VALUES (3000,'lead','E lead material')");
     // ---- tasks ----
     await conn.query(`INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,status,start_date,created_at) VALUES
       (2000,1000,700,700,'job','E own job task (self-assigned)',0, CURDATE(), NOW()),
@@ -114,6 +118,12 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       const res = { status(c) { statusCode = c; return this; }, json() { resolve({ statusCode, nextCalled }); return this; } };
       mw(req, res, () => { nextCalled = true; resolve({ statusCode: 200, nextCalled: true }); });
     });
+    const runMw2 = (getId, getOwnerType, req) => new Promise((resolve) => {
+      const mw = access.blockExpiredOwnRecord(getId, getOwnerType);
+      let statusCode = 200, nextCalled = false;
+      const res = { status(c) { statusCode = c; return this; }, json() { resolve({ statusCode, nextCalled }); return this; } };
+      mw(req, res, () => { nextCalled = true; resolve({ statusCode: 200, nextCalled: true }); });
+    });
     const reqFor = (uid, role, part) => ({ user: { id: uid, role }, params: part.params || {}, query: part.query || {}, body: part.body || {} });
     // stages (params.job_id)
     ok((await runMw((r) => r.params.job_id, reqFor(700, 14, { params: { job_id: 1000 } }))).statusCode === 403, 'A2: stages gate — E + own job -> 403');
@@ -144,6 +154,35 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok(pVisible.length === 1 && pVisible[0].id === 2010, 'B: paid P keeps their own job task (filter is a no-op for paid)');
 
     // =====================================================================
+    // E) LEADS — own lead data locked for expired; paid/trial + foreign unaffected
+    // =====================================================================
+    ok((await access.isExpiredOwnLead(700, 3000, conn)) === true, 'E: isExpiredOwnLead(E, own lead) = true');
+    ok((await access.isExpiredOwnLead(700, 3020, conn)) === false, 'E: isExpiredOwnLead(E, FOREIGN lead) = false');
+    ok((await access.isExpiredOwnLead(710, 3010, conn)) === false, 'E: isExpiredOwnLead(P, own lead) = false — paid unchanged');
+    // blockExpiredOwnRecord with owner_type=lead (stages/materials/budget/quote lead_details all use this)
+    ok((await runMw2((r) => r.params.job_id, (r) => r.query.owner_type, reqFor(700, 14, { params: { job_id: 3000 }, query: { owner_type: 'lead' } }))).statusCode === 403, 'E: lead gate — E + own lead -> 403 (stages/materials owner_type=lead)');
+    ok((await runMw2((r) => r.params.job_id, () => 'lead', reqFor(700, 14, { params: { job_id: 3000 } }))).statusCode === 403, 'E: lead gate — E + own lead -> 403 (quote lead_details)');
+    ok((await runMw2((r) => r.params.job_id, (r) => r.query.owner_type, reqFor(700, 14, { params: { job_id: 3020 }, query: { owner_type: 'lead' } }))).nextCalled === true, 'E: lead gate — E + FOREIGN lead -> passes');
+    ok((await runMw2((r) => r.params.job_id, (r) => r.query.owner_type, reqFor(710, 14, { params: { job_id: 3010 }, query: { owner_type: 'lead' } }))).nextCalled === true, 'E: lead gate — P + own lead -> passes (paid unchanged)');
+
+    // =====================================================================
+    // F) APPOINTMENTS — own locked; foreign-invited kept (filter unit)
+    // =====================================================================
+    const filterAppt = invitationsRouter.filterAppointmentsForExpired;
+    const apptRows = [
+      { id: 9000, created_by: 700, user_id: 700 },   // E's OWN appointment
+      { id: 9001, created_by: 800, user_id: 700 },   // F invited E (foreign)
+    ];
+    const apptE = await filterAppt(conn, 700, apptRows);
+    const apptEids = apptE.map((r) => r.id).sort();
+    ok(apptEids.length === 1 && apptEids[0] === 9001, 'F: expired E keeps ONLY the foreign-invited appointment (9001); own appointment 9000 hidden', JSON.stringify(apptEids));
+    const apptP = await filterAppt(conn, 710, [{ id: 9010, created_by: 710, user_id: 710 }]);
+    ok(apptP.length === 1 && apptP[0].id === 9010, 'F: paid P keeps their own appointment (filter no-op for paid)');
+    // POST /appointments create is gated by denyExpiredFreeWrites (source check).
+    const invSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'invitations.js'), 'utf8');
+    ok(/router\.post\('\/appointments',\s*auth\.authenticateToken,\s*denyExpiredFreeWrites/.test(invSrc), 'F: POST /appointments create is gated by denyExpiredFreeWrites (expired cannot create)');
+
+    // =====================================================================
     // C) + D) HTTP integration
     // =====================================================================
     const express = require('express');
@@ -165,6 +204,14 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // C2) materials: E blocked on own job
     const mE = await request(app).get('/api/jobs/materials?job_id=1000').set('Authorization', tok(700, 14));
     ok(mE.status === 403, 'C: GET materials?job_id=<E own> as E -> 403', mE.status);
+
+    // C2b) LEAD-owned stages/materials: E blocked on own lead; P sees own lead (HTTP)
+    const lsE = await request(app).get('/api/jobs/stages/3000?owner_type=lead').set('Authorization', tok(700, 14));
+    ok(lsE.status === 403, 'C: GET stages/<E own LEAD>?owner_type=lead as E -> 403', lsE.status);
+    const lmE = await request(app).get('/api/jobs/materials?job_id=3000&owner_type=lead').set('Authorization', tok(700, 14));
+    ok(lmE.status === 403, 'C: GET materials?job_id=<E own LEAD>&owner_type=lead as E -> 403', lmE.status);
+    const lsP = await request(app).get('/api/jobs/stages/3010?owner_type=lead').set('Authorization', tok(710, 14));
+    ok(lsP.status === 200 && Array.isArray(lsP.body) && lsP.body.length === 1, 'C: GET stages/<P own LEAD>?owner_type=lead as P -> 200 with data (paid unchanged)', lsP.status);
 
     // C3) all_job_task: own job filtered out; foreign job kept
     const ajE = await request(app).get('/api/tasks/all_job_task/1000').set('Authorization', tok(700, 14));

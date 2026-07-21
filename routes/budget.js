@@ -4,7 +4,7 @@ const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
 const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
-const { blockExpiredOwnJob } = require("../utils/access");
+const { blockExpiredOwnRecord } = require("../utils/access");
 
 // Normalize the job_type/owner_type param to the discriminator stored on
 // division_lineitems. Anything that isn't an explicit 'lead' is a job.
@@ -241,7 +241,7 @@ router.get("/divisions", auth.authenticateToken, requireJobBudgetFeature, async 
 });
 
 // GET /lineitems - fetch all division lineitems for a job or lead
-router.get("/lineitems", auth.authenticateToken, blockExpiredOwnJob((r) => r.query.job_id), requireJobBudgetFeature, async (req, res) => {
+router.get("/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, async (req, res) => {
   const { job_id, job_type } = req.query;
 
   if (!job_id) {
@@ -271,7 +271,7 @@ router.get("/lineitems", auth.authenticateToken, blockExpiredOwnJob((r) => r.que
 });
 
 // POST /contingency - update contingency percentage for all lineitems of a job
-router.post("/contingency", auth.authenticateToken, blockExpiredOwnJob((r) => r.body && r.body.job_id), requireJobBudgetFeature, async (req, res) => {
+router.post("/contingency", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, async (req, res) => {
   const { job_id, job_type, contingency } = req.body || {};
 
   if (!job_id) {
@@ -307,7 +307,7 @@ router.post("/contingency", auth.authenticateToken, blockExpiredOwnJob((r) => r.
 });
 
 // GET /divisions/:divisionId/lineitems
-router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpiredOwnJob((r) => r.query.job_id), requireJobBudgetFeature, async (req, res) => {
+router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, async (req, res) => {
   const { divisionId } = req.params;
   const { job_id, job_type } = req.query;
   let connection;
@@ -336,7 +336,7 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpi
 });
 
 // POST /divisions/:divisionId/lineitems 
-router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpiredOwnJob((r) => r.body && (r.body.job_id != null ? r.body.job_id : (r.body.items && r.body.items[0] && r.body.items[0].job_id))), requireJobBudgetFeature, async (req, res) => {
+router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && (r.body.job_id != null ? r.body.job_id : (r.body.items && r.body.items[0] && r.body.items[0].job_id)), (r) => r.body && r.body.job_type), requireJobBudgetFeature, async (req, res) => {
   const { divisionId } = req.params;
   const created_by = res.locals.id;
   let { job_id, job_type, items } = req.body || {};
@@ -606,7 +606,7 @@ router.get(
 );
 
 // DELETE /divisions/:divisionId/lineitems/:itemId
-router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken, blockExpiredOwnJob((r) => r.query.job_id), requireJobBudgetFeature, async (req, res) => {
+router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, async (req, res) => {
   const { divisionId, itemId } = req.params;
   const { job_id, job_type } = req.query;
 

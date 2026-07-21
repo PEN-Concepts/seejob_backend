@@ -291,6 +291,76 @@ function blockExpiredOwnJob(getJobId) {
 }
 
 /**
+ * Lead equivalent of isExpiredOwnJob. Leads are owned via `leads.user_id` (not
+ * created_by). Returns true only when an expired_free user is reaching data on a
+ * lead their OWN account owns; false for paid/trial and for foreign leads. Fails
+ * open. A solo contractor usually starts as a lead before it becomes a job, so
+ * their own lead's data must lock the same way their own job's does.
+ */
+async function isExpiredOwnLead(userId, leadId, connection) {
+  return withConnection(connection, async (conn) => {
+    try {
+      if (leadId == null) return false;
+      if ((await getAccessMode(userId, conn)) !== "expired_free") return false;
+      const [rows] = await conn.query(
+        "SELECT user_id FROM leads WHERE id = ? LIMIT 1",
+        [leadId]
+      );
+      if (!rows.length) return false;
+      return await isSameAccount(userId, rows[0].user_id, conn);
+    } catch (err) {
+      logger.error("isExpiredOwnLead error: " + err.message);
+      return false;
+    }
+  });
+}
+
+/**
+ * Express middleware factory covering BOTH jobs and leads. `getId(req)` yields the
+ * record id; `getOwnerType(req)` yields 'job' | 'lead' (anything else → 'job').
+ * Blocks an expired_free user from their OWN job/lead data; foreign records and
+ * paid/trial users pass through. Apply AFTER auth.authenticateToken. FAILS OPEN.
+ * (The job-child endpoints already carry an owner_type / job_type param, which is
+ * exactly what the handler uses to scope its own query — so the gate can't drift
+ * from the data it protects.)
+ */
+function blockExpiredOwnRecord(getId, getOwnerType) {
+  return async (req, res, next) => {
+    try {
+      const userId =
+        req.user && req.user.id ? req.user.id : res.locals && res.locals.id;
+      if (!userId) {
+        return res.status(401).json({ success: false, message: "Unauthorized" });
+      }
+      let id = null;
+      let ownerType = "job";
+      try { id = getId(req); } catch (e) { id = null; }
+      try {
+        const raw = getOwnerType ? getOwnerType(req) : "job";
+        ownerType = String(raw || "job").trim().toLowerCase() === "lead" ? "lead" : "job";
+      } catch (e) { ownerType = "job"; }
+      const blocked =
+        id != null && id !== "" &&
+        (ownerType === "lead"
+          ? await isExpiredOwnLead(userId, id)
+          : await isExpiredOwnJob(userId, id));
+      if (blocked) {
+        return res.status(403).json({
+          success: false,
+          code: "TRIAL_EXPIRED",
+          message:
+            "Your free trial has ended. Your data is saved — upgrade to view or edit it again.",
+        });
+      }
+      return next();
+    } catch (err) {
+      logger.error("blockExpiredOwnRecord error: " + err.message);
+      return next(); // fail open
+    }
+  };
+}
+
+/**
  * Cumulative plan-tier ladder (mirrors plans.level and the frontend RANK map in
  * m-access.service.ts). Higher number = more inclusive tier. Bid Pro is a separate
  * ADD-ON, not a rung here — it has no level and never satisfies a tier gate.
@@ -447,7 +517,9 @@ module.exports = {
   isSameAccount,
   canViewJob,
   isExpiredOwnJob,
+  isExpiredOwnLead,
   blockExpiredOwnJob,
+  blockExpiredOwnRecord,
   denyExpiredFreeWrites,
   PLAN_LEVELS,
   getActivePlanLevel,

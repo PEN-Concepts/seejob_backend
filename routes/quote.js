@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
-const { blockExpiredOwnJob, denyExpiredFreeWrites } = require("../utils/access");
+const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites } = require("../utils/access");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
 const multer = require("multer");
@@ -1510,7 +1510,7 @@ router.get("/details/:job_id/:change_quote_type", auth.authenticateToken, blockE
 });
 
 
-router.get("/lead_details/:job_id/:change_quote_type", auth.authenticateToken, blockExpiredOwnJob((r) => r.params.job_id), async (req, res) => {
+router.get("/lead_details/:job_id/:change_quote_type", auth.authenticateToken, blockExpiredOwnRecord((r) => r.params.job_id, () => "lead"), async (req, res) => {
   let connection;
   try {
     const changeorder_with = res.locals.id;

@@ -6,6 +6,34 @@ const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
+const { getAccessMode, resolveOwnerId, denyExpiredFreeWrites } = require("../utils/access");
+
+// For an expired_free user, keep ONLY appointments created by ANOTHER account
+// (i.e. ones they were invited to). Their OWN account's appointments are locked
+// until they subscribe. No-op for paid/trial users. Fails OPEN on error.
+async function filterAppointmentsForExpired(connection, userId, rows) {
+  if (!rows || !rows.length || !userId) return rows;
+  let mode = "paid";
+  try {
+    mode = await getAccessMode(userId, connection);
+  } catch (e) {
+    return rows; // fail open
+  }
+  if (mode !== "expired_free") return rows;
+  try {
+    const acct = await resolveOwnerId(userId, connection);
+    const [own] = await connection.query(
+      "SELECT id FROM `user` WHERE id = ? OR (created_by = ? AND category = 1)",
+      [acct, acct]
+    );
+    const ownIds = new Set(own.map((r) => Number(r.id)));
+    // Drop appointments created by the user's OWN account; keep foreign-invited
+    // ones (created_by a different account, with the user as user_id/invitee).
+    return rows.filter((r) => !ownIds.has(Number(r.created_by)));
+  } catch (e) {
+    return rows; // fail open
+  }
+}
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -844,7 +872,7 @@ router.post('/get-employees-by-user', auth.authenticateToken, async (req, res) =
 });
 
 // POST /api/appointments
-router.post('/appointments', auth.authenticateToken, async (req, res) => {
+router.post('/appointments', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const {
     task_id,
     job_id,
@@ -1232,7 +1260,10 @@ router.get('/appointments', auth.authenticateToken, async (req, res) => {
     ];
 
     const [rows] = await connection.query(query, params);
-    res.json(rows);
+    // Expired free trial: hide the user's OWN appointments; keep ones a FOREIGN
+    // account invited them to (mirrors the job/task collaborator rule).
+    const visible = await filterAppointmentsForExpired(connection, normalizedAuthUserId, rows);
+    res.json(visible);
   } catch (err) {
     console.error('Error fetching appointments:', err);
     res.status(500).json({ message: 'Internal Server Error' });
@@ -2550,3 +2581,5 @@ router.get('/check-licenses', auth.authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+// Exposed for tests (expired-free own-vs-foreign appointment filtering).
+module.exports.filterAppointmentsForExpired = filterAppointmentsForExpired;
