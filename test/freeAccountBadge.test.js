@@ -46,8 +46,10 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       (301,'Self Employed','selfemp@x.com',2,2, NOW() - INTERVAL 10 DAY),
       (302,'Owner','poul@oakcoast.net',14,2,NULL),
       (303,'Paying Contractor','payer@x.com',2,2, NOW() - INTERVAL 200 DAY),
-      (304,'Former Payer','former@x.com',2,2, NOW() - INTERVAL 200 DAY)`);
-    await conn.query(`INSERT INTO job (id,created_by) VALUES (900,301)`); // only 301 owns a job
+      (304,'Former Payer','former@x.com',2,2, NOW() - INTERVAL 200 DAY),
+      (305,'Self Emp Expired','selfexp@x.com',2,2, NOW() - INTERVAL 200 DAY)`);
+    // 301 (still in trial) and 305 (trial expired) each own a job of their own.
+    await conn.query(`INSERT INTO job (id,created_by) VALUES (900,301),(901,305)`);
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,authorize_subscription_id) VALUES
       (303,4,99.00,'monthly','active','ARBPAY'),
       (304,4,99.00,'monthly','canceled','ARBOLD')`);
@@ -77,6 +79,13 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
 
     const former = byId.get(304);
     ok(former && former.free_collaborator === false, 'former payer (canceled sub on file, 0 jobs) -> NOT free_collaborator (has a subscription record)', JSON.stringify(former));
+
+    // NEW: never-subscribed self-employed contractor whose OWN trial has expired
+    // (locked out of their own job) -> re-shows as "Free Account", NOT "Expired".
+    const seExp = byId.get(305);
+    ok(seExp && seExp.access_mode === 'expired_free', 'expired self-employed -> underlying access_mode is expired_free (locked out)', seExp && seExp.access_mode);
+    ok(seExp && seExp.free_collaborator === true, 'expired self-employed (no sub EVER, owns a job, trial expired) -> free_collaborator=true ("Free Account", NOT "Expired")', JSON.stringify(seExp));
+    ok(seExp && seExp.is_paying === false, 'expired self-employed -> is_paying=false', seExp && seExp.is_paying);
 
   } catch (err) {
     ok(false, 'suite threw', String(err && err.stack ? err.stack.split('\n').slice(0, 4).join(' | ') : err));

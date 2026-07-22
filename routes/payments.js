@@ -2014,17 +2014,24 @@ router.get(
         // Pure collaborator: no subscription of their own AND has never created a
         // job → an invited-and-accepted contractor/client who was never billed.
         // Labeled "Free Account" (frontend) rather than the misleading "Paying".
-        // An account that owns ≥1 job is running its own business, so its real
-        // trial/paid/expired status stands (never relabeled) — per the access audit.
         // Employees inherit the owner's account, so they're excluded here.
-        // "No subscription record" means NO sub at all — active OR past — so a
-        // grace-period / former payer is never mislabeled a free collaborator.
+        //
+        // "No subscription record" means NO sub at ALL — active OR past — so a
+        // grace-period / former payer (even a canceled sub) is NEVER a free
+        // collaborator: their real status genuinely needs the owner's attention.
+        //
+        // Among never-subscribed accounts, "free" applies when they have nothing
+        // usable of their own: EITHER they own zero jobs, OR their own trial has
+        // expired (expired_free) so whatever job(s) they created are now fully
+        // locked/inaccessible (per the expired-lockout fix) — functionally the same
+        // as owning nothing. A never-subscribed account still IN trial with a job of
+        // its own is running its business, so its real Trial status stands.
         const hasAnySubscription =
           hasActiveSubscription || (pastByUser.get(effectiveId) || 0) > 0;
         const ownsJobs = ownsJobsSet.has(Number(u.id));
         const freeCollaborator =
           jobDataOk && !isEmployee && !ownerExempt && !NEVER_GATED_ROLES.has(effRole) &&
-          !hasAnySubscription && !ownsJobs;
+          !hasAnySubscription && (!ownsJobs || accessMode === "expired_free");
 
         return {
           id: Number(u.id),
