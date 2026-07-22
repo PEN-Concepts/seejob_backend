@@ -145,6 +145,30 @@ function daysOf(g) {
     ok(!anyNonTueMatch, 'navigator: Tuesday goal never shows on the surrounding Mon/Wed at any distance');
     ok(appliesOnDay(gt, at(firstTueOffset)) && !appliesOnDay(gt, base), 'navigator: shows on next Tuesday, NOT on today (Wed)');
 
+    // ---- APPOINTMENT viewed-day matching: an appointment dated a specific day
+    //      shows on the moment feed only when THAT day is viewed (today OR a
+    //      navigated future day), never on adjacent days. Regression guard for
+    //      the "appointments only show today" scoping. Mirrors each component's
+    //      day-match: web compares local-midnight(appt) === selected; mobile
+    //      compares Y/M/D (isSameDay). Both must agree (parity). ----
+    const midnight = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const webApptShows = (appt, sel) => midnight(appt).getTime() === midnight(sel).getTime();
+    const mobileApptShows = (appt, sel) =>
+      appt.getFullYear() === sel.getFullYear() && appt.getMonth() === sel.getMonth() && appt.getDate() === sel.getDate();
+    const apptDate = new Date(2026, 6, 28, 10, 0, 0); // next Tuesday 10:00, with a time set
+    ok(apptDate.getDay() === 2, 'appt: fixture appointment is on a Tuesday', String(apptDate.getDay()));
+    const selTue = at(firstTueOffset), selMon = at(firstTueOffset - 1), selWed = at(firstTueOffset + 1), selToday = base;
+    ok(webApptShows(apptDate, selTue) && mobileApptShows(apptDate, selTue), 'appt: future appointment shows when navigating to its day (Tue)');
+    ok(!webApptShows(apptDate, selMon) && !mobileApptShows(apptDate, selMon), 'appt: does NOT show on the day before (Mon)');
+    ok(!webApptShows(apptDate, selWed) && !mobileApptShows(apptDate, selWed), 'appt: does NOT show on the day after (Wed)');
+    ok(!webApptShows(apptDate, selToday) && !mobileApptShows(apptDate, selToday), 'appt: future appointment does NOT show on today');
+    const todayAppt = new Date(2026, 6, 22, 9, 0, 0); // today 09:00
+    ok(webApptShows(todayAppt, selToday) && mobileApptShows(todayAppt, selToday), "appt: today's appointment still shows on today's view (no regression)");
+    ok(!webApptShows(todayAppt, selTue) && !mobileApptShows(todayAppt, selTue), "appt: today's appointment does NOT bleed into a future day");
+    let apptParity = true;
+    for (let k = -2; k <= 10; k++) { const s = at(firstTueOffset + k); if (webApptShows(apptDate, s) !== mobileApptShows(apptDate, s)) apptParity = false; }
+    ok(apptParity, 'appt: web (midnight) and mobile (Y/M/D) day-matching agree across the range (parity)');
+
     // ---- MALFORMED/LEGACY guard: a 'custom' goal with NO day_of_week must NOT
     //      expand to every day. This is the exact shape of pre-server-switch
     //      localStorage goals that made single-day goals appear daily. ----
