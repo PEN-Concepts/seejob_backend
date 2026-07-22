@@ -1937,6 +1937,25 @@ router.get(
       );
       const graceByUser = new Map(graceRows.map((r) => [Number(r.user_id), r.due]));
 
+      // Owned-job counts — distinguish a PURE collaborator (an invited
+      // contractor/client who never created a job of their own) from a
+      // self-employed contractor running their own business. Keyed by the
+      // account's OWN id (a collaborator owns their jobs under their own id).
+      let ownsJobsSet = new Set();
+      let jobDataOk = false;
+      try {
+        const [jobOwnerRows] = await connection.query(
+          `SELECT created_by AS uid, COUNT(*) AS c
+             FROM job WHERE created_by IS NOT NULL GROUP BY created_by`
+        );
+        ownsJobsSet = new Set(jobOwnerRows.map((r) => Number(r.uid)));
+        jobDataOk = true;
+      } catch (jobErr) {
+        // If ownership can't be determined, DON'T relabel anyone (fail toward the
+        // existing behavior rather than mislabeling a self-employed contractor).
+        logger.warn("overview: job-owner count unavailable: " + jobErr.message);
+      }
+
       const usersById = new Map();
       users.forEach((u) => usersById.set(Number(u.id), u));
 
@@ -1992,6 +2011,21 @@ router.get(
           accessMode = "paid";
         }
 
+        // Pure collaborator: no subscription of their own AND has never created a
+        // job → an invited-and-accepted contractor/client who was never billed.
+        // Labeled "Free Account" (frontend) rather than the misleading "Paying".
+        // An account that owns ≥1 job is running its own business, so its real
+        // trial/paid/expired status stands (never relabeled) — per the access audit.
+        // Employees inherit the owner's account, so they're excluded here.
+        // "No subscription record" means NO sub at all — active OR past — so a
+        // grace-period / former payer is never mislabeled a free collaborator.
+        const hasAnySubscription =
+          hasActiveSubscription || (pastByUser.get(effectiveId) || 0) > 0;
+        const ownsJobs = ownsJobsSet.has(Number(u.id));
+        const freeCollaborator =
+          jobDataOk && !isEmployee && !ownerExempt && !NEVER_GATED_ROLES.has(effRole) &&
+          !hasAnySubscription && !ownsJobs;
+
         return {
           id: Number(u.id),
           name: u.name,
@@ -2017,7 +2051,9 @@ router.get(
           // (Access-mode computation above still uses the effUser-based ownerExempt.)
           owner_exempt: ownerExempt && !isEmployee,
           access_mode: accessMode,
-          is_paying: accessMode === "paid" && (hasActiveSubscription || (!ownerExempt && !NEVER_GATED_ROLES.has(effRole))),
+          // Pure collaborators are NOT payers — keep them out of the paying counter.
+          free_collaborator: freeCollaborator,
+          is_paying: accessMode === "paid" && (hasActiveSubscription || (!ownerExempt && !NEVER_GATED_ROLES.has(effRole))) && !freeCollaborator,
           trial_ends_at: trialEndsAt,
           trial_days_left: daysLeft,
           plan: tierSub
