@@ -2307,27 +2307,30 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
         const phone = info.phone || null;
         const now = getTimeStamp();
 
-        // Skip when this license already coincides with an existing record —
-        // by license number, by our placeholder email, or by mobile number
-        // (user.mobile is UNIQUE, so a shared phone means it's already a
-        // contact, often the user's own profile).
-        const dupeConds = ['license_number = ?', 'email = ?'];
-        const dupeParams = [cleaned, email];
-        if (phone) { dupeConds.push("(mobile IS NOT NULL AND mobile <> '' AND mobile = ?)"); dupeParams.push(phone); }
+        // A license is a duplicate ONLY when it matches an existing record by
+        // its unique license identity: the license number itself, or our
+        // license-derived placeholder email (lic-<num>@no-email.invalid).
+        // Phone/mobile is deliberately NOT a dedup key — two different
+        // contractors legitimately share an office phone, and two distinct
+        // license numbers must never be collapsed into one contact.
         const [[dupe]] = await connection.query(
-          `SELECT id, name FROM \`user\` WHERE ${dupeConds.join(' OR ')} LIMIT 1`,
-          dupeParams
+          `SELECT id, name FROM \`user\` WHERE license_number = ? OR email = ? LIMIT 1`,
+          [cleaned, email]
         );
         if (dupe) {
           skipped.push({ license_number: cleaned, name: dupe.name || name, reason: 'Already a contact' });
           continue;
         }
 
+        // mobile is left NULL on purpose: user.mobile is UNIQUE, and the CSLB
+        // phone (kept below in cslb_phone) is frequently shared across licenses
+        // at the same office. Writing it here would make the 2nd such license
+        // fail ER_DUP_ENTRY and be wrongly reported as "Already a contact".
         const [ins] = await connection.query(
           `INSERT INTO user
            (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
-           VALUES (?, ?, '', 12, ?, 2, 12, ?, '', '', 1, ?, '', 0, '', ?, 0)`,
-          [name, email, phone, name, now, userId]
+           VALUES (?, ?, '', 12, NULL, 2, 12, ?, '', '', 1, ?, '', 0, '', ?, 0)`,
+          [name, email, name, now, userId]
         );
         const contactUserId = ins.insertId;
 
