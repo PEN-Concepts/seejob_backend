@@ -9,6 +9,7 @@ const { getAccessMode, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { requireAdmin } = require("../utils/adminGate");
 const { sendEmail, isRealEmail } = require("../services/notify");
 const { previewAccountDeletion, cascadeDeleteAccount } = require("../services/accountDelete");
+const { ensureWebhookEventsTable } = require("../services/dbMigrations");
 
 // Authorize.Net SDK
 const { APIControllers, APIContracts } = require("authorizenet");
@@ -1714,16 +1715,23 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
 // (suspended/terminated/expired/cancelled) means "not billing", so it maps to
 // 'canceled'. The admin page surfaces the richer live ARB status separately.
 // Returns null for events we don't act on.
-function localStatusForArbEvent(eventType) {
+function classifyArbEvent(eventType) {
   const t = String(eventType || "").toLowerCase();
-  if (!t.includes("subscription")) return null;
-  if (t.includes("cancel") || t.includes("terminat") || t.includes("suspend") || t.includes("expir")) {
-    return "canceled";
-  }
-  if (t.includes("created") || t.includes("updated") || t.includes("renew")) {
-    return "active";
-  }
-  return null;
+  // Recurring-billing payment captured (a real charge succeeded).
+  if (t.includes("payment") && (t.includes("authcapture") || t.includes("capture"))) return "payment";
+  if (!t.includes("subscription")) return "ignore"; // non-subscription, non-payment: ack + no-op
+  // "expiring" is a WARNING that a sub will END SOON — NOT an end. Checked BEFORE
+  // "expired" and must NEVER change status. (This is the exact string that caused
+  // the incident.)
+  if (t.includes("expiring")) return "ignore";
+  // Genuine end of the subscription — the only events allowed to cancel.
+  if (t.includes("cancel") || t.includes("terminat") || t.includes("expired")) return "cancel";
+  // Payment problem — retryable. Past-due grace preserves access; never hard-cancel.
+  if (t.includes("suspend") || t.includes("fail")) return "past_due";
+  // (Re)activation.
+  if (t.includes("created") || t.includes("renew")) return "activate";
+  // Anything else (e.g. ...subscription.updated) is informational — never touch status.
+  return "ignore";
 }
 
 // Timing-safe, case-insensitive comparison of the received signature against the
@@ -1772,53 +1780,158 @@ router.post("/webhook", async (req, res) => {
     return res.status(401).send("Invalid signature");
   }
 
-  // 2) Parse + map the event.
+  // 2) Parse + classify the event.
   const event = req.body || {};
   const eventType = event.eventType || "";
   const payload = event.payload || {};
-  const subscriptionId =
-    payload.id || payload.subscriptionId || payload.subscription_id || null;
+  const kind = classifyArbEvent(eventType);
 
-  const newStatus = localStatusForArbEvent(eventType);
+  // ARB subscription id: nested under the transaction for a payment capture, the
+  // payload id for a lifecycle event.
+  const paySub = payload.subscription || {};
+  let paymentArbId = paySub.id || paySub.subscriptionId || null;
+  let payNum = Number(paySub.payNum) || null;
+  const subscriptionId = payload.id || payload.subscriptionId || payload.subscription_id || null;
 
-  // Verified, but not an event we act on (or no subscription reference) — ack so
-  // Authorize.Net stops retrying. This is a legitimate 200, not a swallowed error.
-  if (!subscriptionId || !newStatus) {
+  // FALLBACK linkage — an authcapture payload commonly omits the `subscription`
+  // object (per ARB's own docs), leaving only the transaction id (payload.id). In
+  // that case resolve the subscription via the Transaction Reporting API before
+  // giving up, so paid_count can still advance. (No-op / null when ARB unconfigured.)
+  if (kind === "payment" && !paymentArbId) {
+    const transId = payload.id || payload.transId || null;
+    const resolved = await getTransactionSubscription(transId);
+    if (resolved) {
+      paymentArbId = resolved.subscriptionId;
+      if (resolved.payNum) payNum = resolved.payNum;
+      logger.info(`/payments/webhook resolved subscription ${paymentArbId} for transaction ${transId} via getTransactionDetails`);
+    } else {
+      logger.warn(`/payments/webhook: authcapture ${transId} has no subscription id and could not be resolved — no paid_count change`);
+    }
+  }
+  const arbId = String((kind === "payment" ? paymentArbId : subscriptionId) || "");
+
+  // Idempotency key — ARB assigns a unique notificationId per delivery and RETRIES
+  // deliveries, so the same event can legitimately arrive more than once.
+  const notificationId = String(
+    event.notificationId || event.notification_id || `${eventType}:${arbId}:${event.eventDate || ""}`
+  );
+
+  // ALWAYS log the raw event BEFORE any mutation — the 2026-07-20 incident had no
+  // such record, making the cause hard to pin down. (Body is already signature-verified.)
+  logger.info(
+    `/payments/webhook received: type="${eventType}" kind=${kind} arbId=${arbId || "-"} notif=${notificationId} raw=${rawBody.slice(0, 400)}`
+  );
+
+  // Verified but not actionable (informational events like updated/expiring, or a
+  // payment/lifecycle event with no subscription reference) — ack, do NOT mutate.
+  if (kind === "ignore" || !kind) {
+    logger.info(`/payments/webhook informational, no status change: "${eventType}"`);
+    return res.status(200).send("Ignored");
+  }
+  if (!arbId) {
+    logger.info(`/payments/webhook has no subscription id, ignored: "${eventType}"`);
     return res.status(200).send("Ignored");
   }
 
-  // 3) Persist. A genuine DB failure here returns 500 (logged + retried), never a
-  // silent 200.
+  // 3) Persist inside a transaction so the idempotency row and the mutation commit
+  // together — a mid-way failure rolls BOTH back, leaving the event cleanly retryable
+  // (never a ledger row that would swallow the retry). DB failure → 500 (ARB retries).
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureWebhookEventsTable(connection); // DDL auto-commits; safe before the tx
 
-    await connection.query(
-      "UPDATE subscriptions SET status = ? WHERE authorize_subscription_id = ?",
-      [newStatus, String(subscriptionId)]
-    );
+    await connection.beginTransaction();
+    try {
+      // Idempotency — the unique notification_id makes a re-delivery a no-op.
+      try {
+        await connection.query(
+          "INSERT INTO webhook_events (notification_id, event_type, subscription_ref, received_at) VALUES (?, ?, ?, NOW())",
+          [notificationId, eventType, arbId]
+        );
+      } catch (dupErr) {
+        if (dupErr && dupErr.code === "ER_DUP_ENTRY") {
+          await connection.rollback();
+          logger.info(`/payments/webhook duplicate delivery ignored: notif=${notificationId}`);
+          return res.status(200).send("Duplicate");
+        }
+        throw dupErr;
+      }
 
-    const [subRows] = await connection.query(
-      "SELECT user_id, plan_id FROM subscriptions WHERE authorize_subscription_id = ? ORDER BY created_at DESC LIMIT 1",
-      [String(subscriptionId)]
-    );
+      // The subscription MUST exist locally — never blind-write by arbId. An event for
+      // an unknown subscription is logged + acked, and its ledger row rolled back so a
+      // later create+re-delivery can still apply.
+      const [subRows] = await connection.query(
+        "SELECT id, user_id, plan_id, status FROM subscriptions WHERE authorize_subscription_id = ? ORDER BY created_at DESC LIMIT 1",
+        [arbId]
+      );
+      if (!subRows.length) {
+        await connection.rollback();
+        logger.warn(`/payments/webhook: no local subscription for ARB id ${arbId} ("${eventType}") — acked, no change`);
+        return res.status(200).send("Unknown subscription");
+      }
+      const sub = subRows[0];
 
-    if (subRows.length) {
-      const subscription = subRows[0];
+      // Apply — status decided by the EVENT'S SEMANTICS ONLY, never by paid_count.
+      let effectiveStatus;
+      if (kind === "payment") {
+        // A real charge landed: (re)activate, clear past-due, bump paid_count. payNum
+        // is ARB's payment sequence number (authoritative + idempotent via GREATEST).
+        if (payNum) {
+          await connection.query(
+            "UPDATE subscriptions SET paid_count = GREATEST(paid_count, ?), last_payment_at = NOW(), past_due_since = NULL, status = 'active' WHERE authorize_subscription_id = ?",
+            [payNum, arbId]
+          );
+        } else {
+          await connection.query(
+            "UPDATE subscriptions SET paid_count = paid_count + 1, last_payment_at = NOW(), past_due_since = NULL, status = 'active' WHERE authorize_subscription_id = ?",
+            [arbId]
+          );
+        }
+        effectiveStatus = "active";
+      } else if (kind === "activate") {
+        await connection.query(
+          "UPDATE subscriptions SET status = 'active', past_due_since = NULL WHERE authorize_subscription_id = ?",
+          [arbId]
+        );
+        effectiveStatus = "active";
+      } else if (kind === "past_due") {
+        // Payment problem (suspended/failed) → past-due GRACE, regardless of paid_count.
+        // Never a hard cancel — grace preserves access; a genuine end arrives separately.
+        await connection.query(
+          "UPDATE subscriptions SET status = 'past_due', past_due_since = COALESCE(past_due_since, NOW()) WHERE authorize_subscription_id = ?",
+          [arbId]
+        );
+        effectiveStatus = "past_due";
+      } else {
+        // kind === 'cancel' — the ONLY path that cancels, and only for a genuine end
+        // (cancelled / terminated / expired). paid_count is irrelevant here.
+        await connection.query(
+          "UPDATE subscriptions SET status = 'canceled', past_due_since = NULL WHERE authorize_subscription_id = ?",
+          [arbId]
+        );
+        effectiveStatus = "canceled";
+      }
+
+      // Keep entitlements while active OR in the past-due grace window; drop on cancel.
+      const keepRights = effectiveStatus === "active" || effectiveStatus === "past_due";
       await syncSubcontractorRole12Rights({
         connection,
-        userId: subscription.user_id,
-        planId: newStatus === "active" ? subscription.plan_id : null,
+        userId: sub.user_id,
+        planId: keepRights ? sub.plan_id : null,
       });
-    }
 
-    logger.info(
-      `/payments/webhook applied ${eventType} -> ${newStatus} for ARB subscription ${subscriptionId}`
-    );
-    return res.status(200).send("OK");
+      await connection.commit();
+      logger.info(
+        `/payments/webhook applied "${eventType}" (${kind}) ${sub.status} -> ${effectiveStatus} for ARB subscription ${arbId} (user ${sub.user_id})`
+      );
+      return res.status(200).send("OK");
+    } catch (txErr) {
+      await connection.rollback();
+      throw txErr;
+    }
   } catch (dbErr) {
     logger.error("/payments/webhook DB error: " + dbErr.message);
-    // Surface the failure so it is retried/noticed rather than lost.
     return res.status(500).send("Processing failed");
   } finally {
     if (connection) connection.release();
@@ -1866,6 +1979,50 @@ async function getArbSubscriptionStatus(remoteId) {
       }
     });
   });
+}
+
+// Resolve which ARB subscription a captured transaction belongs to — the FALLBACK
+// for payment webhooks whose payload omits the nested `subscription` object.
+// Authorize.Net's own authcapture.created example carries only transId/authAmount/
+// entityName/etc. (no subscription.id), so without this, paid_count could never
+// advance for real recurring charges. Uses the Transaction Reporting API
+// (getTransactionDetails, keyed by the transaction id) — its response DOES include
+// a `subscription` element (id + payNum) for ARB-originated transactions.
+// NEVER throws — resolves null on any error / when ARB isn't configured, so a
+// reporting-API hiccup degrades to "unresolved, no bump" rather than failing the
+// webhook (which would make ARB retry a benign event forever).
+async function getTransactionSubscription(transId) {
+  if (!transId || !API_LOGIN_ID || !TRANSACTION_KEY) return null;
+  try {
+    const merchantAuthentication = new APIContracts.MerchantAuthenticationType();
+    merchantAuthentication.setName(API_LOGIN_ID);
+    merchantAuthentication.setTransactionKey(TRANSACTION_KEY);
+    const request = new APIContracts.GetTransactionDetailsRequest();
+    request.setMerchantAuthentication(merchantAuthentication);
+    request.setTransId(String(transId));
+    const ctrl = new APIControllers.GetTransactionDetailsController(request.getJSON());
+    ctrl.setEnvironment(getApiEnvironment());
+    return await new Promise((resolve) => {
+      ctrl.execute(() => {
+        try {
+          const apiResponse = ctrl.getResponse();
+          if (!apiResponse) return resolve(null);
+          const response = new APIContracts.GetTransactionDetailsResponse(apiResponse);
+          if (response.getMessages().getResultCode() !== APIContracts.MessageTypeEnum.OK) return resolve(null);
+          const txn = response.getTransaction && response.getTransaction();
+          const sub = txn && txn.getSubscription ? txn.getSubscription() : null;
+          const id = sub && sub.getId ? sub.getId() : null;
+          if (!id) return resolve(null);
+          const pn = sub.getPayNum ? Number(sub.getPayNum()) : null;
+          resolve({ subscriptionId: String(id), payNum: Number.isFinite(pn) ? pn : null });
+        } catch (e) {
+          resolve(null);
+        }
+      });
+    });
+  } catch (e) {
+    return null;
+  }
 }
 
 // Map a live ARB status to the local {active|canceled} value set (see the webhook

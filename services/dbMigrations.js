@@ -472,6 +472,23 @@ async function ensureReverifyEmailLogTable(connection) {
   reverifyEmailLogEnsured = true;
 }
 
+// Idempotency ledger for the ARB webhook: one row per Authorize.Net
+// notificationId so a redelivered event is a no-op (safe on redelivery).
+// Self-bootstrapped from the webhook handler (DDL is idempotent + cached).
+let webhookEventsEnsured = false;
+async function ensureWebhookEventsTable(connection) {
+  if (webhookEventsEnsured) return;
+  await connection.query(
+    `CREATE TABLE IF NOT EXISTS webhook_events (
+       notification_id VARCHAR(120) PRIMARY KEY,
+       event_type VARCHAR(120) NULL,
+       subscription_ref VARCHAR(60) NULL,
+       received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB`
+  );
+  webhookEventsEnsured = true;
+}
+
 module.exports = {
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,
@@ -482,4 +499,5 @@ module.exports = {
   ensureUserTimezoneColumn,
   ensureSubscriptionReverifyColumn,
   ensureReverifyEmailLogTable,
+  ensureWebhookEventsTable,
 };
