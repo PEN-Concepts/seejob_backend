@@ -74,6 +74,24 @@ router.post('/start', auth.authenticateToken, async (req, res) => {
   const start_time = now.toTimeString().split(' ')[0];
   const start_date = formatLocalDate(now);
   try {
+    // Only ONE active timer per user. If one is already running, reject with 409
+    // + the running timer's details so the UI can prompt the user to stop/resolve
+    // it first — never silently allow two concurrent timers.
+    const [activeRows] = await pool.query(
+      `SELECT c.id, c.job_id, j.name AS job_name, c.start_time, c.start_date
+         FROM clockin c LEFT JOIN job j ON j.id = c.job_id
+        WHERE c.created_by = ? AND c.is_task_active = TRUE
+        LIMIT 1`,
+      [userId]
+    );
+    if (activeRows.length) {
+      return res.status(409).json({
+        message: "You already have a running timer. Stop it before starting a new one.",
+        code: "ACTIVE_TIMER_EXISTS",
+        active: activeRows[0],
+      });
+    }
+
     const [result] = await pool.query(
       `INSERT INTO clockin (job_id, task_id, start_time, start_date, created_by,is_task_active)
        VALUES (?, ?, ?, ?, ?, TRUE)`,
@@ -664,6 +682,68 @@ let connection;
   }
   finally {
     if (connection) connection.release();
+  }
+});
+
+// GET /clockin/report — job-based time report for the logged-in user.
+// Filters (all optional): ?job_id= &from=YYYY-MM-DD &to=YYYY-MM-DD. Returns the
+// completed time entries + totals per job and per day + grand total. Self-scoped
+// (created_by = requester) so no cross-user leakage; owner/admin cross-user
+// filtering ("filter by user") should layer on the existing timecard-approval
+// account/role scoping as a follow-up.
+router.get('/report', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const { job_id, from, to } = req.query;
+  const ymd = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+  const fromYmd = ymd(from), toYmd = ymd(to);
+  try {
+    const where = ['c.created_by = ?', 'c.is_task_active = FALSE'];
+    const params = [userId];
+    if (job_id != null && /^\d+$/.test(String(job_id))) { where.push('c.job_id = ?'); params.push(Number(job_id)); }
+    if (fromYmd) { where.push('DATE(COALESCE(c.stop_date, c.start_date)) >= ?'); params.push(fromYmd); }
+    if (toYmd) { where.push('DATE(COALESCE(c.stop_date, c.start_date)) <= ?'); params.push(toYmd); }
+
+    const [entries] = await pool.query(
+      `SELECT c.id, c.job_id, j.name AS job_name, c.task_id,
+              c.start_date, c.start_time, c.stop_date, c.stop_time,
+              c.task_duration, c.additional_notes AS notes,
+              DATE(COALESCE(c.stop_date, c.start_date)) AS work_date,
+              COALESCE(TIME_TO_SEC(c.task_duration), 0) AS duration_sec
+         FROM clockin c
+         LEFT JOIN job j ON j.id = c.job_id
+        WHERE ${where.join(' AND ')}
+        ORDER BY work_date DESC, c.stop_time DESC`,
+      params
+    );
+
+    const secToHms = (t) => {
+      const s = Number.isFinite(t) ? Math.max(0, Math.floor(t)) : 0;
+      const p = (n) => String(n).padStart(2, '0');
+      return `${p(Math.floor(s / 3600))}:${p(Math.floor((s % 3600) / 60))}:${p(s % 60)}`;
+    };
+    const dayKey = (v) => (v instanceof Date ? formatLocalDate(v) : String(v || ''));
+
+    const jobMap = new Map(); const dayMap = new Map(); let totalSec = 0;
+    for (const e of entries) {
+      const sec = Number(e.duration_sec) || 0;
+      totalSec += sec;
+      const jk = e.job_id == null ? 'none' : String(e.job_id);
+      const j = jobMap.get(jk) || { job_id: e.job_id ?? null, job_name: e.job_name || 'No Job', seconds: 0 };
+      j.seconds += sec; jobMap.set(jk, j);
+      const dk = dayKey(e.work_date);
+      const d = dayMap.get(dk) || { date: dk, seconds: 0 };
+      d.seconds += sec; dayMap.set(dk, d);
+    }
+    res.status(200).json({
+      entries,
+      totalsPerJob: [...jobMap.values()].map((x) => ({ ...x, hms: secToHms(x.seconds) })).sort((a, b) => b.seconds - a.seconds),
+      totalsPerDay: [...dayMap.values()].map((x) => ({ ...x, hms: secToHms(x.seconds) })).sort((a, b) => (a.date < b.date ? 1 : -1)),
+      totalSeconds: totalSec,
+      totalHms: secToHms(totalSec),
+    });
+  } catch (err) {
+    logger.error('Clock-in report error:', err);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
