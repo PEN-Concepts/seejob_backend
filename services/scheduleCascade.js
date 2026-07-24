@@ -110,14 +110,18 @@ async function applyTemplateToJob(conn, opts) {
     skipSaturday = false,
     skipSunday = false,
     assignments = [],
+    onHold = false,
     actorId = null,
   } = opts;
   const ot = ownerType === 'lead' ? 'lead' : 'job';
-  const now = getTimeStamp();
+  // On hold = applied with NO start date: persist the plan (items/deps/durations/
+  // assignees) but DON'T compute dates or push any tasks to the Master Calendar
+  // until a start date is set later (via startHeldSchedule).
+  const held = onHold || !startDate;
 
-  // 1. Archive any existing ACTIVE schedule for this job (re-apply rule).
+  // 1. Archive any existing active/held schedule for this job (re-apply rule).
   const [activeRows] = await conn.query(
-    "SELECT id FROM job_schedules WHERE job_id = ? AND owner_type = ? AND status = 'active'",
+    "SELECT id FROM job_schedules WHERE job_id = ? AND owner_type = ? AND status IN ('active', 'on_hold')",
     [jobId, ot]
   );
   for (const a of activeRows) await archiveSchedule(conn, a.id);
@@ -137,13 +141,13 @@ async function applyTemplateToJob(conn, opts) {
   const [[tpl]] = await conn.query('SELECT name FROM schedule_templates WHERE id = ? LIMIT 1', [templateId]);
   const tplName = tpl ? tpl.name : 'Schedule';
 
-  // 3. Create the job_schedules row.
-  const startYMD = engine.fmtYMD(engine.parseYMD(startDate) || new Date());
+  // 3. Create the job_schedules row (held → NULL start date + 'on_hold' status).
+  const startYMD = held ? null : engine.fmtYMD(engine.parseYMD(startDate) || new Date());
   const [js] = await conn.query(
     `INSERT INTO job_schedules
        (job_id, owner_type, source_template_id, name, start_date, skip_saturday, skip_sunday, status, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)`,
-    [jobId, ot, templateId, tplName, startYMD, skipSaturday ? 1 : 0, skipSunday ? 1 : 0, actorId]
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [jobId, ot, templateId, tplName, startYMD, skipSaturday ? 1 : 0, skipSunday ? 1 : 0, held ? 'on_hold' : 'active', actorId]
   );
   const scheduleId = js.insertId;
 
@@ -181,8 +185,27 @@ async function applyTemplateToJob(conn, opts) {
     }
   }
 
-  // 6. Compute dates.
+  // 6. Held → stop here: no dates, no calendar tasks (nothing on the Master
+  //    Calendar). Otherwise push it: compute + create a task/stage per item.
+  if (held) return { scheduleId, notifPayloads: [] };
+  const notifPayloads = await pushScheduleToCalendar(conn, scheduleId, { actorId });
+  return { scheduleId, notifPayloads };
+}
+
+/**
+ * PUSH a schedule to the Master Calendar. Computes dates from the schedule's own
+ * start_date + weekend flags, then for each item WITHOUT a linked task creates a
+ * calendar task + stage and stores the computed dates + linkage. Returns the
+ * batched per-assignee notification payloads. Throws { cycle } on a dependency
+ * loop. Shared by apply-with-a-date and taking a held schedule off hold.
+ */
+async function pushScheduleToCalendar(conn, scheduleId, { actorId = null } = {}) {
+  const now = getTimeStamp();
   const graph = await loadScheduleGraph(conn, scheduleId);
+  if (!graph.schedule) return [];
+  const s = graph.schedule;
+  const ot = s.owner_type === 'lead' ? 'lead' : 'job';
+  const startYMD = engine.fmtYMD(engine.parseYMD(s.start_date) || new Date());
   const comp = engine.computeSchedule({
     items: graph.items.map((it) => ({
       id: it.id, name: it.name, duration_days: it.duration_days,
@@ -190,8 +213,8 @@ async function applyTemplateToJob(conn, opts) {
     })),
     deps: graph.deps,
     startDate: startYMD,
-    skipSaturday,
-    skipSunday,
+    skipSaturday: !!s.skip_saturday,
+    skipSunday: !!s.skip_sunday,
   });
   if (!comp.ok) {
     const err = new Error('Template contains a dependency cycle');
@@ -200,28 +223,32 @@ async function applyTemplateToJob(conn, opts) {
   }
   const conflictSet = new Map(comp.conflicts.map((c) => [c.itemId, c.reason]));
 
-  // 7. Per item: create task + stage, store the computed dates + linkage.
-  const jobName = await getJobName(conn, jobId, ot);
+  const jobName = await getJobName(conn, s.job_id, ot);
   for (const it of graph.items) {
     const r = comp.results[it.id];
     if (!r) continue;
     const conflictReason = conflictSet.get(it.id) || null;
+    let taskId = it.task_id;
+    let stageId = it.stage_id;
 
-    const [taskR] = await conn.query(
-      `INSERT INTO tasks
-         (task_name, user_id, team_id, duration_days, start_date, end_date, description,
-          job_id, created_at, created_by, task_type, is_calendar_task, is_appointment_task, priority)
-       VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, 1, 0, 'low')`,
-      [it.name, it.assignee_user_id || null, r.duration, tsStart(r.start), tsStart(r.end), jobId, now, actorId, ot]
-    );
-    const taskId = taskR.insertId;
-
-    const [stageR] = await conn.query(
-      `INSERT INTO stages (user_id, name, csi_code, job_id, owner_type, status, progress_status, created_at)
-       VALUES (?, ?, '', ?, ?, 1, 0, ?)`,
-      [actorId || null, it.name, jobId, ot, now]
-    );
-    const stageId = stageR.insertId;
+    if (!taskId) {
+      const [taskR] = await conn.query(
+        `INSERT INTO tasks
+           (task_name, user_id, team_id, duration_days, start_date, end_date, description,
+            job_id, created_at, created_by, task_type, is_calendar_task, is_appointment_task, priority)
+         VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, 1, 0, 'low')`,
+        [it.name, it.assignee_user_id || null, r.duration, tsStart(r.start), tsStart(r.end), s.job_id, now, actorId, ot]
+      );
+      taskId = taskR.insertId;
+    }
+    if (!stageId) {
+      const [stageR] = await conn.query(
+        `INSERT INTO stages (user_id, name, csi_code, job_id, owner_type, status, progress_status, created_at)
+         VALUES (?, ?, '', ?, ?, 1, 0, ?)`,
+        [actorId || null, it.name, s.job_id, ot, now]
+      );
+      stageId = stageR.insertId;
+    }
 
     await conn.query(
       `UPDATE job_schedule_items
@@ -232,7 +259,6 @@ async function applyTemplateToJob(conn, opts) {
     );
   }
 
-  // 8. Batch the apply notification: one payload per assignee with all their trades.
   const assignedItems = graph.items
     .filter((it) => it.assignee_user_id)
     .map((it) => ({
@@ -241,9 +267,26 @@ async function applyTemplateToJob(conn, opts) {
       newStartDate: comp.results[it.id].start,
       durationDays: comp.results[it.id].duration,
     }));
-  const notifPayloads = groupByAssignee(assignedItems, jobName, actorId);
+  return groupByAssignee(assignedItems, jobName, actorId);
+}
 
-  return { scheduleId, notifPayloads };
+/**
+ * Take a HELD schedule off hold: set its start date (+ optional weekend flags),
+ * mark it active, then push it to the Master Calendar (cascade + create tasks).
+ * Returns the batched notification payloads. Throws { cycle } on a loop,
+ * { notFound } if the schedule id is unknown.
+ */
+async function startHeldSchedule(conn, scheduleId, { startDate, skipSaturday, skipSunday, actorId = null } = {}) {
+  const [[sched]] = await conn.query('SELECT skip_saturday, skip_sunday FROM job_schedules WHERE id = ? LIMIT 1', [scheduleId]);
+  if (!sched) { const e = new Error('Schedule not found'); e.notFound = true; throw e; }
+  const startYMD = engine.fmtYMD(engine.parseYMD(startDate) || new Date());
+  const sat = skipSaturday != null ? (skipSaturday ? 1 : 0) : sched.skip_saturday;
+  const sun = skipSunday != null ? (skipSunday ? 1 : 0) : sched.skip_sunday;
+  await conn.query(
+    "UPDATE job_schedules SET start_date = ?, status = 'active', skip_saturday = ?, skip_sunday = ? WHERE id = ?",
+    [startYMD, sat, sun, scheduleId]
+  );
+  return await pushScheduleToCalendar(conn, scheduleId, { actorId });
 }
 
 /**
@@ -331,6 +374,8 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
 
 module.exports = {
   applyTemplateToJob,
+  pushScheduleToCalendar,
+  startHeldSchedule,
   recomputeSchedule,
   loadScheduleGraph,
   archiveSchedule,

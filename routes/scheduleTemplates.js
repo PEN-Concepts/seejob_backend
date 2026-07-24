@@ -548,9 +548,11 @@ router.post('/:id/apply', async (req, res) => {
   const b = req.body || {};
   const jobId = Number(b.job_id);
   const ownerType = b.owner_type === 'lead' ? 'lead' : 'job';
-  const startDate = b.start_date;
+  const onHold = !!b.on_hold || !b.start_date;
+  const startDate = onHold ? null : b.start_date;
   if (!jobId) return res.status(400).json({ success: false, message: 'job_id is required' });
-  if (!startDate) return res.status(400).json({ success: false, message: 'start_date is required' });
+  // On hold is allowed WITHOUT a start date; only a non-hold apply requires one.
+  if (!onHold && !startDate) return res.status(400).json({ success: false, message: 'start_date is required' });
 
   let connection;
   try {
@@ -575,6 +577,7 @@ router.post('/:id/apply', async (req, res) => {
         skipSaturday: !!b.skip_saturday,
         skipSunday: !!b.skip_sunday,
         assignments: Array.isArray(b.assignments) ? b.assignments : [],
+        onHold,
         actorId: req.user.id,
       });
       await connection.commit();

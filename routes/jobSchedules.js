@@ -70,7 +70,7 @@ router.get('/:jobId', async (req, res) => {
   try {
     connection = await pool.getConnection();
     const [[schedule]] = await connection.query(
-      "SELECT * FROM job_schedules WHERE job_id = ? AND owner_type = ? AND status = 'active' ORDER BY id DESC LIMIT 1",
+      "SELECT * FROM job_schedules WHERE job_id = ? AND owner_type = ? AND status IN ('active', 'on_hold') ORDER BY id DESC LIMIT 1",
       [jobId, ownerType]
     );
     if (!schedule) return res.json({ success: true, data: null });
@@ -352,6 +352,44 @@ router.post('/:sid/items', async (req, res) => {
     if (connection) { try { await connection.rollback(); } catch (_) {} }
     if (respondScheduleReject(res, err)) return;
     logger.error('[job-schedules] add item: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST /job-schedules/:sid/start — take a HELD schedule off hold: set its start
+// date, cascade dates through the dependency chain, and push tasks to the Master
+// Calendar (the same result as applying with a date up front).
+router.post('/:sid/start', async (req, res) => {
+  const sid = Number(req.params.sid);
+  const b = req.body || {};
+  if (!b.start_date) return res.status(400).json({ success: false, message: 'start_date is required' });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    let payloads;
+    try {
+      payloads = await cascade.startHeldSchedule(connection, sid, {
+        startDate: b.start_date,
+        skipSaturday: b.skip_saturday,
+        skipSunday: b.skip_sunday,
+        actorId: req.user.id,
+      });
+      await connection.commit();
+    } catch (e) {
+      try { await connection.rollback(); } catch (_) {}
+      if (e && e.notFound) return res.status(404).json({ success: false, message: 'Schedule not found' });
+      if (respondScheduleReject(res, e)) return;
+      throw e;
+    }
+    dispatchAll(payloads);
+    const graph = await cascade.loadScheduleGraph(connection, sid);
+    res.json({ success: true, data: graph });
+  } catch (err) {
+    if (connection) { try { await connection.rollback(); } catch (_) {} }
+    logger.error('[job-schedules] start held: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   } finally {
     if (connection) connection.release();
