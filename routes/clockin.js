@@ -704,7 +704,7 @@ router.get('/report', auth.authenticateToken, async (req, res) => {
     if (toYmd) { where.push('DATE(COALESCE(c.stop_date, c.start_date)) <= ?'); params.push(toYmd); }
 
     const [entries] = await pool.query(
-      `SELECT c.id, c.job_id, j.name AS job_name, c.task_id,
+      `SELECT c.id, c.job_id, j.name AS job_name, j.address AS job_address, c.task_id,
               c.start_date, c.start_time, c.stop_date, c.stop_time,
               c.task_duration, c.additional_notes AS notes,
               DATE(COALESCE(c.stop_date, c.start_date)) AS work_date,
@@ -728,7 +728,7 @@ router.get('/report', auth.authenticateToken, async (req, res) => {
       const sec = Number(e.duration_sec) || 0;
       totalSec += sec;
       const jk = e.job_id == null ? 'none' : String(e.job_id);
-      const j = jobMap.get(jk) || { job_id: e.job_id ?? null, job_name: e.job_name || 'No Job', seconds: 0 };
+      const j = jobMap.get(jk) || { job_id: e.job_id ?? null, job_name: e.job_name || 'No Job', address: e.job_address || '', seconds: 0 };
       j.seconds += sec; jobMap.set(jk, j);
       const dk = dayKey(e.work_date);
       const d = dayMap.get(dk) || { date: dk, seconds: 0 };
