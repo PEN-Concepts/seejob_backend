@@ -396,6 +396,34 @@ router.post('/:sid/start', async (req, res) => {
   }
 });
 
+// POST /job-schedules/:sid/hold — put an ACTIVE schedule back ON HOLD: pull its
+// tasks off the Master Calendar and clear its dates, keeping the plan intact so a
+// start date can re-schedule it later.
+router.post('/:sid/hold', async (req, res) => {
+  const sid = Number(req.params.sid);
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    try {
+      await cascade.holdSchedule(connection, sid);
+      await connection.commit();
+    } catch (e) {
+      try { await connection.rollback(); } catch (_) {}
+      if (e && e.notFound) return res.status(404).json({ success: false, message: 'Schedule not found' });
+      throw e;
+    }
+    const graph = await cascade.loadScheduleGraph(connection, sid);
+    res.json({ success: true, data: graph });
+  } catch (err) {
+    if (connection) { try { await connection.rollback(); } catch (_) {} }
+    logger.error('[job-schedules] hold: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // DELETE /job-schedules/:sid — delete an ENTIRE applied schedule. Archives its
 // tasks (archived_at + status_note — the job-deletion convention) and soft-deletes
 // its stages (status=0), then hard-deletes the schedule + items + deps. The job

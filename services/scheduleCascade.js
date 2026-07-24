@@ -240,6 +240,13 @@ async function pushScheduleToCalendar(conn, scheduleId, { actorId = null } = {})
         [it.name, it.assignee_user_id || null, r.duration, tsStart(r.start), tsStart(r.end), s.job_id, now, actorId, ot]
       );
       taskId = taskR.insertId;
+    } else {
+      // Item already on the calendar (e.g. changing the start date of an active
+      // schedule) → move the linked task's dates instead of creating a new one.
+      await conn.query(
+        'UPDATE tasks SET duration_days = ?, start_date = ?, end_date = ? WHERE id = ?',
+        [r.duration, tsStart(r.start), tsStart(r.end), taskId]
+      );
     }
     if (!stageId) {
       const [stageR] = await conn.query(
@@ -287,6 +294,41 @@ async function startHeldSchedule(conn, scheduleId, { startDate, skipSaturday, sk
     [startYMD, sat, sun, scheduleId]
   );
   return await pushScheduleToCalendar(conn, scheduleId, { actorId });
+}
+
+/**
+ * Put an ACTIVE schedule back ON HOLD: pull its tasks off the Master Calendar
+ * (archive the linked tasks + soft-delete the linked stages, same convention as
+ * re-apply), unlink + clear the computed dates on every item, and set the
+ * schedule status='on_hold' with a NULL start_date. The plan (items/deps/
+ * durations/assignees) is kept intact so a start date can re-schedule it later.
+ * Throws { notFound } if the schedule id is unknown.
+ */
+async function holdSchedule(conn, scheduleId) {
+  const [[sched]] = await conn.query('SELECT id FROM job_schedules WHERE id = ? LIMIT 1', [scheduleId]);
+  if (!sched) { const e = new Error('Schedule not found'); e.notFound = true; throw e; }
+  const [items] = await conn.query('SELECT task_id, stage_id FROM job_schedule_items WHERE schedule_id = ?', [scheduleId]);
+  const taskIds = items.map((i) => i.task_id).filter(Boolean);
+  const stageIds = items.map((i) => i.stage_id).filter(Boolean);
+  if (taskIds.length) {
+    await conn.query(
+      `UPDATE tasks SET archived_at = NOW(),
+              status_note = COALESCE(NULLIF(status_note, ''), 'Archived: schedule put on hold')
+        WHERE id IN (?) AND archived_at IS NULL`,
+      [taskIds]
+    );
+  }
+  if (stageIds.length) {
+    await conn.query('UPDATE stages SET status = 0, updated_at = NOW() WHERE id IN (?)', [stageIds]);
+  }
+  await conn.query(
+    `UPDATE job_schedule_items
+        SET computed_start_date = NULL, computed_end_date = NULL, has_conflict = 0,
+            conflict_reason = NULL, task_id = NULL, stage_id = NULL
+      WHERE schedule_id = ?`,
+    [scheduleId]
+  );
+  await conn.query("UPDATE job_schedules SET status = 'on_hold', start_date = NULL, updated_at = NOW() WHERE id = ?", [scheduleId]);
 }
 
 /**
@@ -376,6 +418,7 @@ module.exports = {
   applyTemplateToJob,
   pushScheduleToCalendar,
   startHeldSchedule,
+  holdSchedule,
   recomputeSchedule,
   loadScheduleGraph,
   archiveSchedule,
