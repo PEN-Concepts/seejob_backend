@@ -12,7 +12,8 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { ensureContactStatusColumn, ensureOwnerTypeColumns } = require("../services/dbMigrations");
+const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn } = require("../services/dbMigrations");
+const { pickJobColor } = require("../services/jobColorPalette");
 
 // Normalize an owner_type/job_type param: anything but 'lead' is a job. Lets the
 // stages/materials tables distinguish lead-owned rows from job-owned ones even
@@ -560,6 +561,7 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
 
   try {
     connection = await pool.getConnection();
+    await ensureJobColorColumn(connection); // so j.color is always selectable
 
     const loggedInUserId = req.user.id;
 
@@ -592,7 +594,8 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
           j.zipcode,
           j.contract_status,
           j.type,
-          j.status
+          j.status,
+          j.color
         FROM job j
         WHERE
           (
@@ -645,6 +648,7 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
         name: normalize(j.name),
         type: normalize(j.type),
         status: j.status,
+        color: j.color || null,
         contract_status: normalize(j.contract_status),
         address: normalize(j.address),
         city: normalize(j.city),
@@ -763,6 +767,16 @@ const [result] = await connection.execute(
   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   safeValues
 );
+
+    // Assign a persisted pool colour to the new job (never rotates; released
+    // back to the pool when the job is completed/archived).
+    try {
+      await ensureJobColorColumn(connection);
+      const jobColor = await pickJobColor(connection, created_by);
+      await connection.query("UPDATE job SET color = ? WHERE id = ?", [jobColor, result.insertId]);
+    } catch (colorErr) {
+      logger.error("Job create colour assign failed:", colorErr);
+    }
 
     // Typed-in client info becomes a Saved contact automatically
     try {
@@ -1433,10 +1447,23 @@ router.patch("/jobs/:id/status", auth.authenticateToken, denyExpiredFreeWrites, 
       });
     }
 
-    const [result] = await connection.execute(
-      `UPDATE job SET status = ?, updated_by = ? WHERE id = ?`,
-      [status, updatedBy, jobId]
-    );
+    await ensureJobColorColumn(connection);
+    let result;
+    if (status === 1) {
+      // Reactivated → keep its colour, or draw a fresh one from the pool if it
+      // was released while completed/archived.
+      const jobColor = await pickJobColor(connection, ownRows[0].created_by);
+      [result] = await connection.execute(
+        `UPDATE job SET status = ?, updated_by = ?, color = COALESCE(color, ?) WHERE id = ?`,
+        [status, updatedBy, jobColor, jobId]
+      );
+    } else {
+      // Completed (0) or archived (2) → release the colour back to the pool.
+      [result] = await connection.execute(
+        `UPDATE job SET status = ?, updated_by = ?, color = NULL WHERE id = ?`,
+        [status, updatedBy, jobId]
+      );
+    }
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ message: "Job not found" });

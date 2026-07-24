@@ -489,7 +489,20 @@ async function ensureWebhookEventsTable(connection) {
   webhookEventsEnsured = true;
 }
 
+// job.color — persisted pool colour for a job (NULL = unassigned / released).
+let jobColorEnsured = false;
+async function ensureJobColorColumn(connection) {
+  if (jobColorEnsured) return;
+  const [[row]] = await connection.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'job' AND COLUMN_NAME = 'color'`
+  );
+  if (!row) await connection.query('ALTER TABLE `job` ADD COLUMN `color` VARCHAR(9) DEFAULT NULL');
+  jobColorEnsured = true;
+}
+
 module.exports = {
+  ensureJobColorColumn,
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,
   ensureOwnerTypeColumns,

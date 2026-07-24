@@ -5,6 +5,8 @@ const Joi = require("joi");
 const logger = require("../common/logger");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
+const { ensureJobColorColumn } = require("../services/dbMigrations");
+const { pickJobColor } = require("../services/jobColorPalette");
 const { upload } = require("../services/fileUpload");
 const path = require("path");
 const fs = require("fs");
@@ -602,6 +604,7 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) 
     // Ensure the is_shared column on BOTH tables BEFORE the transaction — ALTER
     // is DDL and auto-commits in MySQL, so it must not run inside a transaction.
     await ensureLeadDocShareColumn(connection);
+    await ensureJobColorColumn(connection);
     try {
       await connection.query(
         "ALTER TABLE job_documents ADD COLUMN is_shared TINYINT(1) NOT NULL DEFAULT 0"
@@ -647,6 +650,13 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) 
     );
 
     const newJobId = result.insertId;
+
+    // Assign a pool colour to the new job so it has a stable, distinct colour
+    // that never rotates (released back to the pool when completed/archived).
+    try {
+      const jobColor = await pickJobColor(connection, userId);
+      await connection.query('UPDATE job SET color = ? WHERE id = ?', [jobColor, newJobId]);
+    } catch (e) { logger.error('convert-to-job colour assign failed:', e); }
 
     // Carry the lead's documents/photos over to the new job (same file paths,
     // preserving type + the shared-with-subs flag) so plans/photos aren't
