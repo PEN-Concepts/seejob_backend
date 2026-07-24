@@ -389,8 +389,9 @@ function planNameToLevel(name) {
  * The HIGHEST tier level among a user's active subscriptions (0 if none).
  * Employees resolve to their account owner (the plan lives on the owner's
  * account), matching getAccessInfo. Uses the highest, not the latest, so an
- * add-on like Bid Pro (no level) can never mask the base tier. Deliberately NOT
- * owner-exempt and trial-agnostic — plan-gated features are governed purely by
+ * add-on like Bid Pro (no level) can never mask the base tier. Owner/internal
+ * emails (OWNER_EXEMPT_EMAILS) are exempted to the top tier so the platform
+ * owner always has plan-locked features; everyone else is governed purely by
  * the plan. Reads plans.level; if that column isn't migrated yet, falls back to
  * ranking by plan name so gating still works.
  */
@@ -398,6 +399,17 @@ async function getActivePlanLevel(userId, connection) {
   return withConnection(connection, async (conn) => {
     try {
       const effectiveId = await resolveOwnerId(userId, conn);
+      // Owner/internal accounts get the top tier regardless of subscription, so
+      // the platform owner is never gated out of plan-locked features (Schedule
+      // Builder, etc.) — mirrors the trial-guard owner exemption. This drives
+      // BOTH /users/my-rights planLevel (the UI button) AND requirePlan().
+      try {
+        const [[u]] = await conn.query('SELECT email FROM `user` WHERE id = ? LIMIT 1', [effectiveId]);
+        const email = String((u && u.email) || '').trim().toLowerCase();
+        if (OWNER_EXEMPT_EMAILS.has(email)) return PLAN_LEVELS.platinum;
+      } catch (ownerErr) {
+        // fall through to the subscription-based tier on any lookup error
+      }
       let rows;
       try {
         [rows] = await conn.query(
@@ -447,8 +459,9 @@ async function getActivePlanLevel(userId, connection) {
  * PLAN_LEVELS) or a numeric level directly.
  *
  * This is a genuine SERVER-SIDE tier gate (a 403, not just a hidden UI button).
- * Unlike the trial guard it is NOT owner-exempt — the owner's own plan decides
- * access. FAILS CLOSED: if the tier can't be verified (no active sub, unknown
+ * Owner/internal accounts are exempted (via getActivePlanLevel returning the top
+ * tier); every other account's own plan decides access. FAILS CLOSED: if the
+ * tier can't be verified (no active sub, unknown
  * minimum, or a DB error) access is denied — a premium feature must never leak.
  */
 function requirePlan(min = "gold") {
