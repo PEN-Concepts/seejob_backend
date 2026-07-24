@@ -747,5 +747,44 @@ router.get('/report', auth.authenticateToken, async (req, res) => {
   }
 });
 
+// DELETE /clockin/entry/:id — remove a single completed time entry.
+// Self-scoped (created_by = requester) so a user can only delete their own
+// rows; an active/running timer is never deletable through this path.
+router.delete('/entry/:id', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const id = req.params.id;
+  if (!/^\d+$/.test(String(id))) return res.status(400).json({ message: 'Invalid entry id' });
+  try {
+    const [result] = await pool.query(
+      'DELETE FROM clockin WHERE id = ? AND created_by = ? AND is_task_active = FALSE',
+      [Number(id), userId]
+    );
+    if (!result.affectedRows) return res.status(404).json({ message: 'Entry not found' });
+    res.status(200).json({ deleted: result.affectedRows });
+  } catch (err) {
+    logger.error('Clock-in entry delete error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// DELETE /clockin/job/:jobId/entries — remove ALL of the requester's completed
+// time entries for one job. Self-scoped; a running timer on the job is left
+// untouched (is_task_active = FALSE) so an in-progress session survives.
+router.delete('/job/:jobId/entries', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const jobId = req.params.jobId;
+  if (!/^\d+$/.test(String(jobId))) return res.status(400).json({ message: 'Invalid job id' });
+  try {
+    const [result] = await pool.query(
+      'DELETE FROM clockin WHERE job_id = ? AND created_by = ? AND is_task_active = FALSE',
+      [Number(jobId), userId]
+    );
+    res.status(200).json({ deleted: result.affectedRows });
+  } catch (err) {
+    logger.error('Clock-in job entries delete error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 module.exports = router;
 
