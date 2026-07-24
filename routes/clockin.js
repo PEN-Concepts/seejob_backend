@@ -747,6 +747,68 @@ router.get('/report', auth.authenticateToken, async (req, res) => {
   }
 });
 
+// PUT /clockin/entry/:id — edit a single completed time entry after the fact:
+// its Details-of-work notes and/or its time (date + start/stop, from which the
+// duration is recomputed). Self-scoped (created_by) and only for completed rows
+// (is_task_active = FALSE) so a running timer is never edited out from under.
+router.put('/entry/:id', auth.authenticateToken, async (req, res) => {
+  const userId = req.user.id;
+  const id = req.params.id;
+  if (!/^\d+$/.test(String(id))) return res.status(400).json({ message: 'Invalid entry id' });
+  const { work_date, start_time, stop_time, notes } = req.body || {};
+
+  const normTime = (t) => {
+    if (t == null || t === '') return null;
+    const p = String(t).split(':').map((x) => x.trim());
+    if (p.length < 2 || p.some((x) => x === '' || isNaN(Number(x)))) return null;
+    const pad = (n) => String(Number(n)).padStart(2, '0');
+    return `${pad(p[0])}:${pad(p[1])}:${pad(p[2] || 0)}`;
+  };
+  const ymd = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+  const secToHms = (t) => {
+    const s = Number.isFinite(t) ? Math.max(0, Math.floor(t)) : 0;
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+  };
+
+  try {
+    const [[row]] = await pool.query(
+      'SELECT id, start_date FROM clockin WHERE id = ? AND created_by = ? AND is_task_active = FALSE',
+      [Number(id), userId]
+    );
+    if (!row) return res.status(404).json({ message: 'Entry not found' });
+
+    const sets = [];
+    const params = [];
+    if (notes !== undefined) { sets.push('additional_notes = ?'); params.push(notes == null ? null : String(notes)); }
+
+    const st = normTime(start_time), sp = normTime(stop_time);
+    if (st && sp) {
+      const day = ymd(work_date) || ymd(String(row.start_date)) || null;
+      if (!day) return res.status(400).json({ message: 'A valid work_date is required to edit the time' });
+      const start = new Date(`${day}T${st}`);
+      const stop = new Date(`${day}T${sp}`);
+      if (isNaN(start.getTime()) || isNaN(stop.getTime())) return res.status(400).json({ message: 'Invalid start/stop time' });
+      let elapsed = Math.floor((stop - start) / 1000);
+      if (elapsed < 0) elapsed += 86400; // stop before start → treat as crossing midnight
+      sets.push('start_date = ?', 'start_time = ?', 'stop_date = ?', 'stop_time = ?', 'task_duration = ?');
+      params.push(day, st, day, sp, secToHms(elapsed));
+    } else if (ymd(work_date)) {
+      // date-only move (keep existing times/duration)
+      sets.push('start_date = ?', 'stop_date = ?');
+      params.push(ymd(work_date), ymd(work_date));
+    }
+
+    if (!sets.length) return res.status(400).json({ message: 'Nothing to update' });
+    params.push(Number(id), userId);
+    await pool.query(`UPDATE clockin SET ${sets.join(', ')} WHERE id = ? AND created_by = ?`, params);
+    res.status(200).json({ updated: 1 });
+  } catch (err) {
+    logger.error('Clock-in entry update error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // DELETE /clockin/entry/:id — remove a single completed time entry.
 // Self-scoped (created_by = requester) so a user can only delete their own
 // rows; an active/running timer is never deletable through this path.
