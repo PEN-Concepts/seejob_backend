@@ -310,16 +310,32 @@ router.post('/:sid/items', async (req, res) => {
     );
     const dur = engine.normalizeDuration(b.duration_days != null && b.duration_days !== '' ? b.duration_days : 1);
     const isInsp = b.is_inspection ? 1 : 0;
+    const assignee = b.assignee_user_id != null && b.assignee_user_id !== '' ? Number(b.assignee_user_id) : null;
 
     const [ins] = await connection.query(
       `INSERT INTO job_schedule_items
          (schedule_id, name, duration_days, sort_order, assignee_user_id, template_item_id, depends_on_all, is_inspection)
-       VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)`,
-      [sid, name, dur, mx.so, isInsp]
+       VALUES (?, ?, ?, ?, ?, NULL, 0, ?)`,
+      [sid, name, dur, mx.so, assignee, isInsp]
     );
     const iid = ins.insertId;
 
-    // Recompute so the new item gets computed dates (no deps → appends cleanly).
+    // "Depends on" from the add-trade row: only accept ids that belong to THIS
+    // schedule and aren't the new item itself; insert before recompute so the
+    // new item's dates reflect its dependencies. A cycle/conflict is caught by
+    // recomputeSchedule and rolls the whole transaction back.
+    const [validRows] = await connection.query('SELECT id FROM job_schedule_items WHERE schedule_id = ?', [sid]);
+    const valid = new Set(validRows.map((r) => Number(r.id)));
+    const deps = Array.isArray(b.deps) ? b.deps.map(Number).filter((x) => valid.has(x) && x !== iid) : [];
+    for (const d of deps) {
+      await connection.query(
+        'INSERT IGNORE INTO job_schedule_deps (schedule_id, item_id, depends_on_item_id) VALUES (?, ?, ?)',
+        [sid, iid, d]
+      );
+    }
+
+    // Recompute so the new item gets computed dates from its deps (or appends
+    // cleanly when it has none).
     const payloads = await cascade.recomputeSchedule(connection, sid, { changedItemId: iid });
 
     // Materialize the task + stage for the new item (recompute won't create them).
@@ -332,8 +348,8 @@ router.post('/:sid/items', async (req, res) => {
       `INSERT INTO tasks
          (task_name, user_id, team_id, duration_days, start_date, end_date, description,
           job_id, created_at, created_by, task_type, is_calendar_task, is_appointment_task, priority)
-       VALUES (?, NULL, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, 1, 0, 'low')`,
-      [item.name, item.duration_days, startTs, endTs, sched.job_id, now, req.user.id, sched.owner_type]
+       VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, 1, 0, 'low')`,
+      [item.name, item.assignee_user_id || null, item.duration_days, startTs, endTs, sched.job_id, now, req.user.id, sched.owner_type]
     );
     const [stageR] = await connection.query(
       `INSERT INTO stages (user_id, name, csi_code, job_id, owner_type, status, progress_status, created_at)

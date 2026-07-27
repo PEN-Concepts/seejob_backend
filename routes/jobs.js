@@ -1981,7 +1981,9 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
 
     if (jobIds.length) {
       const [jobTasks] = await connection.query(
-        `SELECT t.*, u.name AS created_by_name FROM tasks t
+        `SELECT t.*, u.name AS created_by_name,
+                (SELECT jsi.id FROM job_schedule_items jsi WHERE jsi.task_id = t.id LIMIT 1) AS schedule_item_id
+         FROM tasks t
          LEFT JOIN user u ON u.id = t.created_by
          WHERE LOWER(t.task_type) = 'job'
            AND t.job_id IN (?)
@@ -2007,7 +2009,9 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
 
     if (leadIds.length) {
       const [leadTasks] = await connection.query(
-        `SELECT t.*, u.name AS created_by_name FROM tasks t
+        `SELECT t.*, u.name AS created_by_name,
+                (SELECT jsi.id FROM job_schedule_items jsi WHERE jsi.task_id = t.id LIMIT 1) AS schedule_item_id
+         FROM tasks t
          LEFT JOIN user u ON u.id = t.created_by
          WHERE LOWER(t.task_type) = 'lead'
            AND t.job_id IN (?)
