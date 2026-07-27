@@ -310,34 +310,16 @@ router.post('/:sid/items', async (req, res) => {
     );
     const dur = engine.normalizeDuration(b.duration_days != null && b.duration_days !== '' ? b.duration_days : 1);
     const isInsp = b.is_inspection ? 1 : 0;
-    const assignee = b.assignee_user_id != null ? Number(b.assignee_user_id) : null;
 
     const [ins] = await connection.query(
       `INSERT INTO job_schedule_items
          (schedule_id, name, duration_days, sort_order, assignee_user_id, template_item_id, depends_on_all, is_inspection)
-       VALUES (?, ?, ?, ?, ?, NULL, 0, ?)`,
-      [sid, name, dur, mx.so, assignee, isInsp]
+       VALUES (?, ?, ?, ?, NULL, NULL, 0, ?)`,
+      [sid, name, dur, mx.so, isInsp]
     );
     const iid = ins.insertId;
 
-    // Place the new trade in the dependency chain (from the Task-list "Add trade"
-    // flow): it depends on `deps` (starts after they finish); each id in
-    // `dependents` is made to depend on it (they shift downstream). Only ids that
-    // belong to THIS schedule are honored.
-    const [validRows] = await connection.query('SELECT id FROM job_schedule_items WHERE schedule_id = ?', [sid]);
-    const valid = new Set(validRows.map((r) => Number(r.id)));
-    const deps = Array.isArray(b.deps) ? b.deps.map(Number).filter((x) => valid.has(x) && x !== iid) : [];
-    const dependents = Array.isArray(b.dependents) ? b.dependents.map(Number).filter((x) => valid.has(x) && x !== iid) : [];
-    for (const d of deps) {
-      await connection.query('INSERT IGNORE INTO job_schedule_deps (schedule_id, item_id, depends_on_item_id) VALUES (?, ?, ?)', [sid, iid, d]);
-    }
-    for (const dep of dependents) {
-      await connection.query('INSERT IGNORE INTO job_schedule_deps (schedule_id, item_id, depends_on_item_id) VALUES (?, ?, ?)', [sid, dep, iid]);
-    }
-
-    // Recompute — cascades the new trade + shifts any downstream trades; a cycle
-    // or dependency bust throws (CYCLE / SCHEDULE_CONFLICT) so the whole add rolls
-    // back (409). With no deps the trade simply appends at the schedule anchor.
+    // Recompute so the new item gets computed dates (no deps → appends cleanly).
     const payloads = await cascade.recomputeSchedule(connection, sid, { changedItemId: iid });
 
     // Materialize the task + stage for the new item (recompute won't create them).
@@ -350,8 +332,8 @@ router.post('/:sid/items', async (req, res) => {
       `INSERT INTO tasks
          (task_name, user_id, team_id, duration_days, start_date, end_date, description,
           job_id, created_at, created_by, task_type, is_calendar_task, is_appointment_task, priority)
-       VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, 1, 0, 'low')`,
-      [item.name, item.assignee_user_id || null, item.duration_days, startTs, endTs, sched.job_id, now, req.user.id, sched.owner_type]
+       VALUES (?, NULL, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, 1, 0, 'low')`,
+      [item.name, item.duration_days, startTs, endTs, sched.job_id, now, req.user.id, sched.owner_type]
     );
     const [stageR] = await connection.query(
       `INSERT INTO stages (user_id, name, csi_code, job_id, owner_type, status, progress_status, created_at)
