@@ -216,7 +216,10 @@ async function cascadeDeleteAccount(conn, targetId, opts = {}) {
   // ── 8. Cross-user references — strip the target's side, keep the other party's ──
   tally("contact", await run(conn, "DELETE FROM contact WHERE request_by = ? OR request_to = ? OR request_user1 = ? OR request_user2 = ?", [id, id, id, id]));
   tally("notifications_inbox", await run(conn, "DELETE FROM notifications WHERE receiver_id = ?", [id]));
-  tally("notifications_sent", await run(conn, "UPDATE notifications SET sender_id = NULL WHERE sender_id = ?", [id]));
+  // Notifications this user SENT: sender_id is NOT NULL, so nulling it errors
+  // (ER_BAD_NULL_ERROR) and rolls back the whole delete. Delete them instead —
+  // the sender no longer exists, mirroring the receiver_id delete above.
+  tally("notifications_sent", await run(conn, "DELETE FROM notifications WHERE sender_id = ?", [id]));
   tally("task_assignee_stripped", await run(conn, "UPDATE tasks SET user_id = NULL WHERE user_id = ? AND (created_by IS NULL OR created_by <> ?)", [id, id]));
   tally("appt_assignee_stripped", await run(conn, "UPDATE appointments SET user_id = NULL WHERE user_id = ? AND (created_by IS NULL OR created_by <> ?)", [id, id]));
   tally("checklist_assignee_stripped", await run(conn, "UPDATE check_list SET assign_to = NULL WHERE assign_to = ? AND (created_by IS NULL OR created_by <> ?)", [id, id]));
