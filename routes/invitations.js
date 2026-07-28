@@ -2114,6 +2114,12 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
     res.json({ message: 'Contact updated successfully' });
   } catch (err) {
     logger.error('update-contact-info error:', err);
+    if (err && err.code === 'ER_DUP_ENTRY') {
+      const field = /email/i.test(err.sqlMessage || '') ? 'email address'
+        : /mobile/i.test(err.sqlMessage || '') ? 'phone number'
+        : 'value';
+      return res.status(409).json({ message: `That ${field} is already used by another contact.` });
+    }
     res.status(500).json({ message: 'Failed to update contact', error: err.message });
   } finally {
     if (connection) connection.release();
@@ -2259,6 +2265,12 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
     res.json({ contact_user_id: contactUserId, status: targetStatus, email_sent: !!send_invite });
   } catch (err) {
     logger.error('save-contact error:', err);
+    if (err && err.code === 'ER_DUP_ENTRY') {
+      const field = /email/i.test(err.sqlMessage || '') ? 'email address'
+        : /mobile/i.test(err.sqlMessage || '') ? 'phone number'
+        : 'value';
+      return res.status(409).json({ message: `That ${field} is already used by another contact.` });
+    }
     res.status(500).json({ message: 'Failed to save contact', error: err.message });
   } finally {
     if (connection) connection.release();

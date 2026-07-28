@@ -501,7 +501,38 @@ async function ensureJobColorColumn(connection) {
   jobColorEnsured = true;
 }
 
+// The `user.mobile` column carried a UNIQUE index, which forbade two users from
+// sharing a phone number. That broke saving legitimate contacts (two subs, a
+// company + its owner, or a license-lookup placeholder + a manual entry, sharing
+// one line) with a raw "Duplicate entry … for key 'user.mobile_UNIQUE'" 500.
+// Phone numbers are not an identity here (login is by email/OTP), so drop any
+// SINGLE-COLUMN unique index on user.mobile. Idempotent — a second run finds none.
+let mobileUniqueDropped = false;
+async function dropUserMobileUniqueIndex(connection) {
+  if (mobileUniqueDropped) return;
+  const [idx] = await connection.query(
+    "SHOW INDEX FROM `user` WHERE Column_name = 'mobile' AND Non_unique = 0"
+  );
+  const names = [...new Set(idx.map((r) => r.Key_name))].filter(
+    (n) => n && n.toUpperCase() !== 'PRIMARY'
+  );
+  for (const name of names) {
+    // Only drop it if it's a single-column index on `mobile` (never touch a
+    // composite unique that happens to include the mobile column).
+    const [[{ cols }]] = await connection.query(
+      `SELECT COUNT(*) AS cols FROM information_schema.STATISTICS
+        WHERE table_schema = DATABASE() AND table_name = 'user' AND index_name = ?`,
+      [name]
+    );
+    if (Number(cols) === 1) {
+      await connection.query('ALTER TABLE `user` DROP INDEX `' + name.replace(/`/g, '') + '`');
+    }
+  }
+  mobileUniqueDropped = true;
+}
+
 module.exports = {
+  dropUserMobileUniqueIndex,
   ensureJobColorColumn,
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,

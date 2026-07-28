@@ -157,17 +157,13 @@ async function assertUniqueEmail(connection, email) {
   }
 }
 
-async function assertUniqueMobile(connection, mobile) {
-  if (!mobile) return;
-  const [rows] = await connection.query(
-    "SELECT id FROM user WHERE mobile = ? LIMIT 1",
-    [mobile],
-  );
-  if (rows.length > 0) {
-    const err = new Error("Phone number already exists");
-    err.status = 400;
-    throw err;
-  }
+// Phone numbers are intentionally NOT unique (see dropUserMobileUniqueIndex):
+// two contacts can legitimately share a line (a company + its owner, two subs,
+// a license-lookup placeholder + a manual entry). Kept as a no-op so callers
+// don't change and to document that the old "Phone number already exists" block
+// was removed on purpose. Email uniqueness (assertUniqueEmail) still applies.
+async function assertUniqueMobile(/* connection, mobile */) {
+  return;
 }
 
 async function createInvitedUser(connection, params) {
