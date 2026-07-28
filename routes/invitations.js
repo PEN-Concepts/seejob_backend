@@ -2070,6 +2070,73 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
 
     await ensureCslbColumns(connection);
 
+    // ── "Link, don't duplicate" ────────────────────────────────────────────
+    // Email must stay globally unique — login is email+OTP, so two rows sharing
+    // an email would make login ambiguous (an OTP could land on the wrong row).
+    // So if the email being saved already belongs to a DIFFERENT user, we can't
+    // move it onto the edited row. Instead: link this account to that existing
+    // person, fill in any details they're missing (never overwriting theirs),
+    // and drop the duplicate placeholder — the contact list then shows one real
+    // record instead of a dead-end "email already used by another contact" error.
+    if (email && String(email).trim()) {
+      const [[emailOwner]] = await connection.query(
+        'SELECT id, name FROM `user` WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) AND id <> ? LIMIT 1',
+        [email, contact_user_id]
+      );
+      if (emailOwner) {
+        const targetId = Number(emailOwner.id);
+        await ensureContactStatusColumn(connection);
+        // 1) enrich the existing person ADDITIVELY — never overwrite their data
+        await connection.query(
+          `UPDATE \`user\`
+             SET name = IF(name IS NULL OR name = '', COALESCE(?, name), name),
+                 first_name = IF(first_name IS NULL OR first_name = '', COALESCE(?, first_name), first_name),
+                 last_name = IF(last_name IS NULL OR last_name = '', COALESCE(?, last_name), last_name),
+                 mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
+                 business = IF(business IS NULL OR business = '', COALESCE(?, business), business),
+                 organization_name = IF(organization_name IS NULL OR organization_name = '', COALESCE(?, organization_name), organization_name),
+                 license_number = COALESCE(license_number, ?),
+                 license_state = COALESCE(license_state, ?),
+                 address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
+           WHERE id = ?`,
+          [name || null,
+           first_name != null ? (first_name || '') : null,
+           last_name != null ? (last_name || '') : null,
+           mobile || null, business_name || null, business_name || null,
+           license_number || null, license_state || null, address || null, targetId]
+        );
+        // 2) ensure this account is linked to the existing person
+        const [[link]] = await connection.query(
+          `SELECT id FROM contact
+             WHERE (request_by IN ${ACCOUNT} AND request_to = ?)
+                OR (request_to IN ${ACCOUNT} AND request_by = ?)
+             LIMIT 1`,
+          [ownerId, ownerId, targetId, ownerId, ownerId, targetId]
+        );
+        if (!link) {
+          await connection.query(
+            `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
+             VALUES (?, ?, 'Saved', NOW(), NOW())`,
+            [ownerId, targetId]
+          );
+        }
+        // 3) drop this account's link to the old placeholder row (swap it out)
+        if (Number(contact_user_id) !== targetId) {
+          await connection.query(
+            `DELETE FROM contact
+               WHERE (request_by IN ${ACCOUNT} AND request_to = ?)
+                  OR (request_to IN ${ACCOUNT} AND request_by = ?)`,
+            [ownerId, ownerId, contact_user_id, ownerId, ownerId, contact_user_id]
+          );
+        }
+        return res.json({
+          merged: true,
+          linked_user_id: targetId,
+          message: `That email already belongs to "${emailOwner.name || 'an existing contact'}", so that record was linked to your contacts and the details filled in.`,
+        });
+      }
+    }
+
     // Out-of-state licenses have no auto-checker; the status is set manually
     const stateUpper = (license_state || 'CA').toUpperCase();
     let sql = `UPDATE \`user\`
