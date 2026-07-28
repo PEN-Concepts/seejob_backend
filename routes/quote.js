@@ -1303,7 +1303,10 @@ router.get("/get_all_users", auth.authenticateToken, async (req, res) => {
 
     const [rows] = await connection.execute(
       `SELECT u.id, u.name, u.email, u.mobile, u.subcategory, u.category,
-              s.name AS subcategory_name, c.name AS role
+              s.name AS subcategory_name, c.name AS role,
+              (SELECT j.address FROM job j
+                 WHERE j.client_id = u.id AND j.address IS NOT NULL AND j.address <> ''
+                 ORDER BY j.id DESC LIMIT 1) AS job_address
        FROM user u
        LEFT JOIN subcategory s ON u.subcategory = s.id
        LEFT JOIN category c ON u.category = c.id
