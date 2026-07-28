@@ -2535,7 +2535,14 @@ router.delete(
       return res.json({ success: true, deleted_user_id: targetId, ...result });
     } catch (err) {
       logger.error("/payments/admin/account delete error: " + err.message);
-      return res.status(500).json({ success: false, message: "Unable to delete the account. Nothing was deleted." });
+      // TEMP DIAGNOSTIC (owner-only endpoint): surface the SQL constraint that
+      // blocks the delete so the cascade can be patched. Safe — exposes only the
+      // table/constraint name, no row data. Remove after the cascade fix lands.
+      return res.status(500).json({
+        success: false,
+        message: "Unable to delete the account. Nothing was deleted.",
+        _diag: { code: err.code, errno: err.errno, sqlMessage: err.sqlMessage },
+      });
     } finally {
       if (connection) connection.release();
     }
