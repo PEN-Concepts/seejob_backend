@@ -501,6 +501,20 @@ async function ensureJobColorColumn(connection) {
   jobColorEnsured = true;
 }
 
+// appointments.all_day — 1 = all-day event (no meaningful time/countdown). The
+// appointment dialogs had an "All-day" toggle that was never persisted; this
+// column lets it stick so the Spartan dashboard can render the all-day card.
+let apptAllDayEnsured = false;
+async function ensureAppointmentAllDayColumn(connection) {
+  if (apptAllDayEnsured) return;
+  const [[row]] = await connection.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'appointments' AND COLUMN_NAME = 'all_day'`
+  );
+  if (!row) await connection.query('ALTER TABLE appointments ADD COLUMN all_day TINYINT NOT NULL DEFAULT 0');
+  apptAllDayEnsured = true;
+}
+
 // The `user.mobile` column carried a UNIQUE index, which forbade two users from
 // sharing a phone number. That broke saving legitimate contacts (two subs, a
 // company + its owner, or a license-lookup placeholder + a manual entry, sharing
@@ -534,6 +548,7 @@ async function dropUserMobileUniqueIndex(connection) {
 module.exports = {
   dropUserMobileUniqueIndex,
   ensureJobColorColumn,
+  ensureAppointmentAllDayColumn,
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,
   ensureOwnerTypeColumns,

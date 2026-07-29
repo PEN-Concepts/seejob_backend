@@ -887,7 +887,8 @@ router.post('/appointments', auth.authenticateToken, denyExpiredFreeWrites, asyn
     appointment_type,
     zoom_link,
     job_address,
-    meeting_location
+    meeting_location,
+    all_day
   } = req.body;
 
   let connection;
@@ -903,6 +904,16 @@ router.post('/appointments', auth.authenticateToken, denyExpiredFreeWrites, asyn
          AND COLUMN_NAME = 'task_id'
        LIMIT 1;`,
     );
+    const [[allDayCol]] = await connection.query(
+      `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'appointments'
+         AND COLUMN_NAME = 'all_day'
+       LIMIT 1;`,
+    );
+    const hasAllDayColumn = !!allDayCol;
+    const allDayVal = (all_day === 1 || all_day === '1' || all_day === true) ? 1 : 0;
     const hasTaskIdColumn = !!taskIdCol;
 
     const [[endDateCol]] = await connection.query(
@@ -1025,9 +1036,9 @@ router.post('/appointments', auth.authenticateToken, denyExpiredFreeWrites, asyn
     let values;
     if (hasTaskIdColumn) {
       query = `
-        INSERT INTO appointments 
-        (task_id, job_id, user_id, description, subject, doa, time_of_appointment${hasEndDateColumn ? ', end_date' : ''}${hasEndTimeColumn ? ', end_time' : ''}, appointment_type, zoom_link, created_by, created_at, address, meeting_location)
-        VALUES (?, ?, ?, ?, ?, ?, ?${hasEndDateColumn ? ', ?' : ''}${hasEndTimeColumn ? ', ?' : ''}, ?, ?, ?, NOW(), ?, ?)
+        INSERT INTO appointments
+        (task_id, job_id, user_id, description, subject, doa, time_of_appointment${hasEndDateColumn ? ', end_date' : ''}${hasEndTimeColumn ? ', end_time' : ''}, appointment_type, zoom_link, created_by, created_at, address, meeting_location${hasAllDayColumn ? ', all_day' : ''})
+        VALUES (?, ?, ?, ?, ?, ?, ?${hasEndDateColumn ? ', ?' : ''}${hasEndTimeColumn ? ', ?' : ''}, ?, ?, ?, NOW(), ?, ?${hasAllDayColumn ? ', ?' : ''})
       `;
       values = [
         normalizedTaskId,
@@ -1044,12 +1055,13 @@ router.post('/appointments', auth.authenticateToken, denyExpiredFreeWrites, asyn
         createdBy,
         job_address,
         meeting_location || null,
+        ...(hasAllDayColumn ? [allDayVal] : []),
       ];
     } else {
       query = `
-        INSERT INTO appointments 
-        (job_id, user_id, description, subject, doa, time_of_appointment${hasEndDateColumn ? ', end_date' : ''}${hasEndTimeColumn ? ', end_time' : ''}, appointment_type, zoom_link, created_by, created_at, address, meeting_location)
-        VALUES (?, ?, ?, ?, ?, ?${hasEndDateColumn ? ', ?' : ''}${hasEndTimeColumn ? ', ?' : ''}, ?, ?, ?, NOW(), ?, ?)
+        INSERT INTO appointments
+        (job_id, user_id, description, subject, doa, time_of_appointment${hasEndDateColumn ? ', end_date' : ''}${hasEndTimeColumn ? ', end_time' : ''}, appointment_type, zoom_link, created_by, created_at, address, meeting_location${hasAllDayColumn ? ', all_day' : ''})
+        VALUES (?, ?, ?, ?, ?, ?${hasEndDateColumn ? ', ?' : ''}${hasEndTimeColumn ? ', ?' : ''}, ?, ?, ?, NOW(), ?, ?${hasAllDayColumn ? ', ?' : ''})
       `;
       values = [
         job_id || null,
@@ -1065,6 +1077,7 @@ router.post('/appointments', auth.authenticateToken, denyExpiredFreeWrites, asyn
         createdBy,
         job_address,
         meeting_location || null,
+        ...(hasAllDayColumn ? [allDayVal] : []),
       ];
     }
 
@@ -1207,8 +1220,17 @@ router.get('/appointments', auth.authenticateToken, async (req, res) => {
          AND COLUMN_NAME = 'end_time'
        LIMIT 1;`,
     );
+    const [[allDayCol]] = await connection.query(
+      `SELECT COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'appointments'
+         AND COLUMN_NAME = 'all_day'
+       LIMIT 1;`,
+    );
     const hasEndDateColumn = !!endDateCol;
     const hasEndTimeColumn = !!endTimeCol;
+    const hasAllDayColumn = !!allDayCol;
 
     // Backwards compatible fields:
     // - keep returning `task_id` as the appointment id (older UI relies on this)
@@ -1233,7 +1255,8 @@ router.get('/appointments', auth.authenticateToken, async (req, res) => {
         a.zoom_link,
         a.meeting_location,
         ${hasEndDateColumn ? 'a.end_date AS end_date' : 'NULL AS end_date'},
-        ${hasEndTimeColumn ? 'a.end_time AS end_time' : 'NULL AS end_time'}
+        ${hasEndTimeColumn ? 'a.end_time AS end_time' : 'NULL AS end_time'},
+        ${hasAllDayColumn ? 'a.all_day AS all_day' : '0 AS all_day'}
 
       FROM appointments a
       left JOIN job j ON a.job_id = j.id
@@ -1387,6 +1410,7 @@ router.put('/update_appointments/:id', async (req, res) => {
     appointment_type,
     zoom_link,
     meeting_location,
+    all_day,
   } = req.body;
 
   if (!id) {
@@ -1457,20 +1481,27 @@ router.put('/update_appointments/:id', async (req, res) => {
   try {
     connection = await pool.getConnection();
 
+    const [[allDayCol]] = await connection.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'appointments' AND COLUMN_NAME = 'all_day' LIMIT 1;`,
+    );
+    const hasAllDayColumn = !!allDayCol;
+    const allDayVal = (all_day === 1 || all_day === '1' || all_day === true) ? 1 : 0;
+
     const query = `
       UPDATE appointments
-      SET 
-        subject = ?, 
-        description = ?, 
-        doa = ?, 
-        time_of_appointment = ?, 
+      SET
+        subject = ?,
+        description = ?,
+        doa = ?,
+        time_of_appointment = ?,
         end_date = ?,
         end_time = ?,
-        job_id = ?, 
-        user_id = ?, 
-        appointment_type = ?, 
+        job_id = ?,
+        user_id = ?,
+        appointment_type = ?,
         zoom_link = ?,
-        meeting_location = ?
+        meeting_location = ?${hasAllDayColumn ? ',\n        all_day = ?' : ''}
       WHERE id = ?
     `;
 
@@ -1486,6 +1517,7 @@ router.put('/update_appointments/:id', async (req, res) => {
       appointment_type || null,
       zoom_link || null,
       meeting_location || null,
+      ...(hasAllDayColumn ? [allDayVal] : []),
       id,
     ]);
 
