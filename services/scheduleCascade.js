@@ -231,7 +231,8 @@ async function pushScheduleToCalendar(conn, scheduleId, { actorId = null } = {})
     let taskId = it.task_id;
     let stageId = it.stage_id;
 
-    if (!taskId) {
+    // Create a fresh calendar task (is_calendar_task=1) for this item.
+    const createCalTask = async () => {
       const [taskR] = await conn.query(
         `INSERT INTO tasks
            (task_name, user_id, team_id, duration_days, start_date, end_date, description,
@@ -239,14 +240,23 @@ async function pushScheduleToCalendar(conn, scheduleId, { actorId = null } = {})
          VALUES (?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, 1, 0, 'low')`,
         [it.name, it.assignee_user_id || null, r.duration, tsStart(r.start), tsStart(r.end), s.job_id, now, actorId, ot]
       );
-      taskId = taskR.insertId;
+      return taskR.insertId;
+    };
+
+    if (!taskId) {
+      taskId = await createCalTask();
     } else {
-      // Item already on the calendar (e.g. changing the start date of an active
-      // schedule) → move the linked task's dates instead of creating a new one.
-      await conn.query(
-        'UPDATE tasks SET duration_days = ?, start_date = ?, end_date = ? WHERE id = ?',
+      // Item already linked to a calendar task → move its dates. But if that task
+      // no longer exists (deleted) or was archived, the UPDATE affects 0 rows and
+      // the item would be left dangling with NOTHING on the Master Calendar — so
+      // in that case recreate the task and relink. Keeps the push self-healing.
+      const [upd] = await conn.query(
+        'UPDATE tasks SET duration_days = ?, start_date = ?, end_date = ? WHERE id = ? AND archived_at IS NULL',
         [r.duration, tsStart(r.start), tsStart(r.end), taskId]
       );
+      if (!upd || upd.affectedRows === 0) {
+        taskId = await createCalTask();
+      }
     }
     if (!stageId) {
       const [stageR] = await conn.query(
