@@ -104,7 +104,8 @@ router.get("/safety-records/:courseId", async (req, res) => {
     tr.created_by,
     u2.name AS Instructor,
     COUNT(u1.id) AS total_attendees,
-    GROUP_CONCAT(u1.name SEPARATOR ', ') AS Attendees
+    GROUP_CONCAT(u1.name SEPARATOR ', ') AS Attendees,
+    GROUP_CONCAT(u1.id SEPARATOR ',') AS AttendeeIds
 FROM safety_traning_records tr
 JOIN safety_training_attendees ta 
     ON tr.safety_course_id = ta.safety_course_id
