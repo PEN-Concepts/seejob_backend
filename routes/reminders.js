@@ -87,4 +87,28 @@ router.delete("/", auth.authenticateToken, async (req, res) => {
   }
 });
 
+// List the logged-in user's still-PENDING reminders (sent_at IS NULL) so the UI
+// can show a "reminder set" indicator that reflects the REAL, cross-device backend
+// state (not just this device's local reminders). Optional ?source_type= filter.
+router.get("/", auth.authenticateToken, async (req, res) => {
+  const userId = Number(req.user.id);
+  const type = req.query.source_type ? String(req.query.source_type).slice(0, 20) : null;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureRemindersTable(connection);
+    const params = [userId];
+    let sql =
+      "SELECT source_type, source_id, fire_at FROM reminders WHERE user_id = ? AND sent_at IS NULL";
+    if (type) { sql += " AND source_type = ?"; params.push(type); }
+    const [rows] = await connection.query(sql, params);
+    res.json({ success: true, reminders: rows });
+  } catch (err) {
+    logger.error("reminders GET error: " + err.message);
+    res.status(500).json({ message: "Failed to load reminders", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 module.exports = router;
