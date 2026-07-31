@@ -72,9 +72,11 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       (306,'PastDue GC','pastdue@x.com','$2a$hash',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
       (307,'CSLB With Sub','lic-999@no-email.invalid','',12,2,12,100, NOW() - INTERVAL 10 DAY),
       (308,'Seed Owner','seedowner@x.com','$2a$hash',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY)`);
-    // Logins (user_devices row => has logged in). 300/301/302/307 never logged in.
+    // Logins (user_devices row => has logged in). 301/302/307 never logged in.
+    // 300 gets a STRAY device row (contaminated first_login) to prove an artifact is
+    // STILL excluded by account_source regardless of a noisy login signal.
     await conn.query(`INSERT INTO user_devices (user_id,device_token,user_agent) VALUES
-      (303,'t1','ua'),(304,'t2','ua'),(305,'t3','ua'),(306,'t4','ua'),(308,'t5','ua')`);
+      (300,'t0','ua'),(303,'t1','ua'),(304,'t2','ua'),(305,'t3','ua'),(306,'t4','ua'),(308,'t5','ua')`);
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,next_billing_at,authorize_subscription_id,created_at) VALUES
       (305,4,175.00,'monthly','active', NOW() + INTERVAL 20 DAY, 'ARBPAY', NOW() - INTERVAL 60 DAY),
       (306,4,99.00,'monthly','past_due', NOW() + INTERVAL 5 DAY, 'ARBPD', NOW() - INTERVAL 40 DAY),
@@ -131,7 +133,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const byId = new Map(users.map((u) => [u.id, u]));
 
     // Part 1: exclusion
-    ok(!byId.has(300), 'EXCLUDE: CSLB artifact (300) not in list');
+    ok(!byId.has(300), 'EXCLUDE: CSLB artifact (300) excluded even WITH a stray login/first_login');
     ok(!byId.has(301), 'EXCLUDE: placeholder client (301) not in list');
     ok(byId.has(302) && byId.has(303) && byId.has(305), 'KEEP: real invited/trial/paying present');
     // Part 1.3: artifact WITH a subscription is kept + flagged (money never hidden)

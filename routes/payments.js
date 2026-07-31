@@ -2238,10 +2238,14 @@ router.get(
         const acctSource = String(u.account_source || "").toLowerCase();
         const isArtifact = acctSource === "cslb_lookup" || acctSource === "placeholder_client";
         const hasLoggedIn = !!u.first_login_at;
-        // Exclude a CSLB/placeholder row that never became a real user (never logged
-        // in AND no subscription ever). If one somehow HAS a subscription, keep it and
-        // FLAG the anomaly rather than hiding real money (Part 1.3).
-        const excludeArtifact = isArtifact && !hasLoggedIn && !hasAnySubscription;
+        // account_source is the AUTHORITATIVE "created as a non-app-user artifact"
+        // signal (CSLB license import / job-creation placeholder client). Exclude it
+        // outright — a CSLB lookup has nothing to do with app usage and must never show
+        // in ANY status (Part 1). The only reason to keep one is a real subscription
+        // (money), in which case surface it FLAGGED (Part 1.3), never hidden.
+        // (We do NOT gate on first_login_at: some artifacts carry a stray user_devices
+        // row, so that login proxy is unreliable for them — account_source is not.)
+        const excludeArtifact = isArtifact && !hasAnySubscription;
         const artifactWithPayment = isArtifact && hasAnySubscription;
 
         // ---- Part 3: four-state status ----
