@@ -2249,24 +2249,39 @@ router.get(
         const artifactWithPayment = isArtifact && hasAnySubscription;
 
         // ---- Part 3: four-state status ----
-        // Trial clock runs from FIRST LOGIN (display-only; real access-gating clock in
-        // access.js is unchanged). paying = active/past-due sub; invited = never logged
-        // in; else trial (≤60d from first login) / free (past 60d).
-        const firstLoginMs = hasLoggedIn ? new Date(u.first_login_at).getTime() : NaN;
+        // status is DISPLAYED for the EFFECTIVE account — an employee MIRRORS the
+        // owning GC's status (they use the app under the owner's plan), keeping the
+        // `emp` tag. hasActiveSubscription already uses effSubs (owner's subs), so
+        // the trial/invited clock must likewise key off the OWNER's first login for
+        // an employee. Trial clock runs from FIRST LOGIN (display-only; the real
+        // access-gating clock in access.js is unchanged).
+        const statusFirstLogin = effUser.first_login_at; // owner's for employees, own otherwise
+        const statusHasLoggedIn = !!statusFirstLogin;
+        const statusFirstLoginMs = statusHasLoggedIn ? new Date(statusFirstLogin).getTime() : NaN;
         let trialDaysLeftFromLogin = 0;
-        if (!isNaN(firstLoginMs)) {
-          trialDaysLeftFromLogin = Math.max(0, Math.ceil((firstLoginMs + TRIAL_DAYS * DAY_MS - Date.now()) / DAY_MS));
+        if (!isNaN(statusFirstLoginMs)) {
+          trialDaysLeftFromLogin = Math.max(0, Math.ceil((statusFirstLoginMs + TRIAL_DAYS * DAY_MS - Date.now()) / DAY_MS));
         }
         const pastDueSub = effSubs.find((s) => s.status === "past_due") || null;
         let status4;
         if (hasActiveSubscription) status4 = "paying";
-        else if (!hasLoggedIn) status4 = "invited";
+        else if (!statusHasLoggedIn) status4 = "invited";
         else status4 = trialDaysLeftFromLogin > 0 ? "trial" : "free";
+
+        // The Users/Paying/Active-Subs counters stay keyed to REAL own-subscription
+        // rows (never an employee's inherited/mirrored status). own_sub_status is this
+        // account's OWN tier subscription state ('active' | 'past_due' | null); an
+        // employee has no own sub → null → not counted, even though it DISPLAYS paying.
+        const ownSubs = activeByUser.get(Number(u.id)) || [];
+        const ownTierSub = ownSubs.find((s) => !isBidProPlan(s.plan_name, s.plan_level)) || null;
+        const ownSubStatus = ownTierSub ? ownTierSub.status : null;
 
         return {
           _excludeArtifact: excludeArtifact, // internal — stripped before responding
           account_source: u.account_source || null,
           first_login_at: u.first_login_at || null,
+          own_sub_status: ownSubStatus, // this account's OWN tier sub — drives the counters
+          status_inherited: isEmployee && status4 === "paying" && !ownSubStatus, // displays owner's paying, not a payer itself
           status4,
           past_due: !!pastDueSub,
           trial_days_left_from_login: trialDaysLeftFromLogin,

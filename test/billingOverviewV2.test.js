@@ -71,12 +71,14 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       (305,'Paying GC','payer@x.com','$2a$hash',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
       (306,'PastDue GC','pastdue@x.com','$2a$hash',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
       (307,'CSLB With Sub','lic-999@no-email.invalid','',12,2,12,100, NOW() - INTERVAL 10 DAY),
-      (308,'Seed Owner','seedowner@x.com','$2a$hash',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY)`);
+      (308,'Seed Owner','seedowner@x.com','$2a$hash',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
+      (310,'Emp Of Payer','emp-payer@x.com','$2a$hash',5,1,NULL,305, NOW() - INTERVAL 3 DAY),
+      (311,'Emp Of Trial','emp-trial@x.com','$2a$hash',5,1,NULL,303, NOW() - INTERVAL 2 DAY)`);
     // Logins (user_devices row => has logged in). 301/302/307 never logged in.
     // 300 gets a STRAY device row (contaminated first_login) to prove an artifact is
     // STILL excluded by account_source regardless of a noisy login signal.
     await conn.query(`INSERT INTO user_devices (user_id,device_token,user_agent) VALUES
-      (300,'t0','ua'),(303,'t1','ua'),(304,'t2','ua'),(305,'t3','ua'),(306,'t4','ua'),(308,'t5','ua')`);
+      (300,'t0','ua'),(303,'t1','ua'),(304,'t2','ua'),(305,'t3','ua'),(306,'t4','ua'),(308,'t5','ua'),(310,'t6','ua'),(311,'t7','ua')`);
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,next_billing_at,authorize_subscription_id,created_at) VALUES
       (305,4,175.00,'monthly','active', NOW() + INTERVAL 20 DAY, 'ARBPAY', NOW() - INTERVAL 60 DAY),
       (306,4,99.00,'monthly','past_due', NOW() + INTERVAL 5 DAY, 'ARBPD', NOW() - INTERVAL 40 DAY),
@@ -148,6 +150,16 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok(byId.get(306) && byId.get(306).status4 === 'paying' && byId.get(306).past_due === true, 'STATUS: past_due sub -> paying + past_due flag', JSON.stringify(byId.get(306) && [byId.get(306).status4, byId.get(306).past_due]));
     // Paying shows plan + start date
     ok(byId.get(305) && byId.get(305).plan && byId.get(305).plan.name === 'Gold' && !!byId.get(305).plan.started_at, 'PAYING: shows plan name + started_at', JSON.stringify(byId.get(305) && byId.get(305).plan));
+
+    // Employee status MIRRORS the owner, but is NOT counted as a payer.
+    ok(byId.get(310) && byId.get(310).status4 === 'paying' && byId.get(310).status_inherited === true && byId.get(310).own_sub_status == null,
+      'EMPLOYEE: emp of a paying owner MIRRORS paying + inherited flag + no own sub', JSON.stringify(byId.get(310) && [byId.get(310).status4, byId.get(310).status_inherited, byId.get(310).own_sub_status]));
+    ok(byId.get(311) && byId.get(311).status4 === 'trial' && byId.get(311).own_sub_status == null,
+      'EMPLOYEE: emp of a trial owner MIRRORS trial (own clock not used)', JSON.stringify(byId.get(311) && [byId.get(311).status4, byId.get(311).own_sub_status]));
+    // Counters keyed to own subscriptions: payers = 305(active),306(past_due),307(active),308(active) = 4; NOT the 2 employees.
+    const ownPayers = users.filter((u) => u.own_sub_status === 'active' || u.own_sub_status === 'past_due');
+    ok(ownPayers.length === 4, 'COUNT: paying counter keyed to own subs = 4 (employees NOT counted)', 'got ' + ownPayers.length + ' -> ' + ownPayers.map(u => u.id).join(','));
+    ok(byId.get(305) && byId.get(305).own_sub_status === 'active' && byId.get(306) && byId.get(306).own_sub_status === 'past_due', 'COUNT: own_sub_status active/past_due set on real payers');
 
     // Part 2: Total Received per customer + grand total
     ok(byId.get(305) && Number(byId.get(305).total_received) === 350, 'TOTAL: 305 total_received = 350 (2x175)', String(byId.get(305) && byId.get(305).total_received));
