@@ -9,7 +9,7 @@ const { getAccessMode, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { requireAdmin } = require("../utils/adminGate");
 const { sendEmail, isRealEmail } = require("../services/notify");
 const { previewAccountDeletion, cascadeDeleteAccount } = require("../services/accountDelete");
-const { ensureWebhookEventsTable } = require("../services/dbMigrations");
+const { ensureWebhookEventsTable, ensurePaymentReceiptsTable } = require("../services/dbMigrations");
 
 // Authorize.Net SDK
 const { APIControllers, APIContracts } = require("authorizenet");
@@ -1793,6 +1793,12 @@ router.post("/webhook", async (req, res) => {
   let payNum = Number(paySub.payNum) || null;
   const subscriptionId = payload.id || payload.subscriptionId || payload.subscription_id || null;
 
+  // Settled dollar amount + transaction id for the payment_receipts ledger
+  // (Part 2 "Total Received"). authcapture payloads carry authAmount; the id is
+  // the transaction id. Amount may be filled from the reporting-API fallback below.
+  let paymentAmount = Number(payload.authAmount || payload.settleAmount || payload.amount) || null;
+  const paymentTransId = payload.id || payload.transId || null;
+
   // FALLBACK linkage — an authcapture payload commonly omits the `subscription`
   // object (per ARB's own docs), leaving only the transaction id (payload.id). In
   // that case resolve the subscription via the Transaction Reporting API before
@@ -1803,6 +1809,7 @@ router.post("/webhook", async (req, res) => {
     if (resolved) {
       paymentArbId = resolved.subscriptionId;
       if (resolved.payNum) payNum = resolved.payNum;
+      if (!paymentAmount && resolved.amount) paymentAmount = resolved.amount;
       logger.info(`/payments/webhook resolved subscription ${paymentArbId} for transaction ${transId} via getTransactionDetails`);
     } else {
       logger.warn(`/payments/webhook: authcapture ${transId} has no subscription id and could not be resolved — no paid_count change`);
@@ -1840,6 +1847,7 @@ router.post("/webhook", async (req, res) => {
   try {
     connection = await pool.getConnection();
     await ensureWebhookEventsTable(connection); // DDL auto-commits; safe before the tx
+    await ensurePaymentReceiptsTable(connection); // ditto — before beginTransaction
 
     await connection.beginTransaction();
     try {
@@ -1888,6 +1896,16 @@ router.post("/webhook", async (req, res) => {
             [arbId]
           );
         }
+        // Ledger: record the ACTUAL settled dollar amount for this charge (Part 2
+        // "Total Received"). INSERT IGNORE (UNIQUE transaction_id) keeps it idempotent
+        // even beyond the webhook_events dedupe. amount may be null if ARB is
+        // unconfigured — record the charge with 0 rather than dropping it silently.
+        await connection.query(
+          `INSERT IGNORE INTO payment_receipts
+             (user_id, subscription_id, authorize_subscription_id, amount, transaction_id, notification_id, source, settled_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'webhook', NOW())`,
+          [sub.user_id, sub.id, arbId, paymentAmount || 0, paymentTransId || null, notificationId]
+        );
         effectiveStatus = "active";
       } else if (kind === "activate") {
         await connection.query(
@@ -2014,7 +2032,15 @@ async function getTransactionSubscription(transId) {
           const id = sub && sub.getId ? sub.getId() : null;
           if (!id) return resolve(null);
           const pn = sub.getPayNum ? Number(sub.getPayNum()) : null;
-          resolve({ subscriptionId: String(id), payNum: Number.isFinite(pn) ? pn : null });
+          // Also pull the settled dollar amount for the payment ledger (settle
+          // amount preferred, auth amount as fallback).
+          let amt = null;
+          try {
+            const s = txn.getSettleAmount ? Number(txn.getSettleAmount()) : NaN;
+            const a = txn.getAuthAmount ? Number(txn.getAuthAmount()) : NaN;
+            amt = Number.isFinite(s) && s > 0 ? s : (Number.isFinite(a) && a > 0 ? a : null);
+          } catch (e) { /* amount optional */ }
+          resolve({ subscriptionId: String(id), payNum: Number.isFinite(pn) ? pn : null, amount: amt });
         } catch (e) {
           resolve(null);
         }
@@ -2050,6 +2076,7 @@ router.get(
 
       const [users] = await connection.query(
         `SELECT u.id, u.name, u.email, u.role, u.category, u.subcategory, u.created_by, u.created_at,
+                u.account_source, u.first_login_at,
                 r.name AS role_name, c.name AS category_name, sc.name AS subcategory_name
            FROM \`user\` u
            LEFT JOIN role r ON r.id = u.role
@@ -2060,19 +2087,36 @@ router.get(
 
       const [activeSubs] = await connection.query(
         `SELECT s.id AS sub_id, s.user_id, s.amount, s.billing_interval, s.status,
-                s.next_billing_at, s.authorize_subscription_id,
+                s.next_billing_at, s.authorize_subscription_id, s.created_at AS started_at,
                 p.name AS plan_name, p.level AS plan_level
            FROM subscriptions s
            JOIN plans p ON p.id = s.plan_id
-          WHERE s.status = 'active'`
+          WHERE s.status IN ('active', 'past_due')`
       );
 
       const [pastCounts] = await connection.query(
         `SELECT user_id, COUNT(*) AS c
            FROM subscriptions
-          WHERE status <> 'active'
+          WHERE status NOT IN ('active', 'past_due')
           GROUP BY user_id`
       );
+
+      // Total Received — sum of REAL settled payments per payer from the ledger
+      // (Part 2). Best-effort: if the table isn't there yet, everyone shows $0.
+      const totalByUser = new Map();
+      let grandTotalReceived = 0;
+      try {
+        const [receiptRows] = await connection.query(
+          `SELECT user_id, SUM(amount) AS total FROM payment_receipts GROUP BY user_id`
+        );
+        receiptRows.forEach((r) => {
+          const amt = Number(r.total) || 0;
+          totalByUser.set(Number(r.user_id), amt);
+          grandTotalReceived += amt;
+        });
+      } catch (e) {
+        logger.warn("overview: payment_receipts unavailable: " + e.message);
+      }
 
       const [reverifyRows] = await connection.query(
         `SELECT DISTINCT user_id FROM subscriptions WHERE needs_reverification = 1`
@@ -2190,7 +2234,40 @@ router.get(
           jobDataOk && !isEmployee && !ownerExempt && !NEVER_GATED_ROLES.has(effRole) &&
           !hasAnySubscription && (!ownsJobs || accessMode === "expired_free");
 
+        // ---- Part 1: non-app-user artifact to EXCLUDE? ----
+        const acctSource = String(u.account_source || "").toLowerCase();
+        const isArtifact = acctSource === "cslb_lookup" || acctSource === "placeholder_client";
+        const hasLoggedIn = !!u.first_login_at;
+        // Exclude a CSLB/placeholder row that never became a real user (never logged
+        // in AND no subscription ever). If one somehow HAS a subscription, keep it and
+        // FLAG the anomaly rather than hiding real money (Part 1.3).
+        const excludeArtifact = isArtifact && !hasLoggedIn && !hasAnySubscription;
+        const artifactWithPayment = isArtifact && hasAnySubscription;
+
+        // ---- Part 3: four-state status ----
+        // Trial clock runs from FIRST LOGIN (display-only; real access-gating clock in
+        // access.js is unchanged). paying = active/past-due sub; invited = never logged
+        // in; else trial (≤60d from first login) / free (past 60d).
+        const firstLoginMs = hasLoggedIn ? new Date(u.first_login_at).getTime() : NaN;
+        let trialDaysLeftFromLogin = 0;
+        if (!isNaN(firstLoginMs)) {
+          trialDaysLeftFromLogin = Math.max(0, Math.ceil((firstLoginMs + TRIAL_DAYS * DAY_MS - Date.now()) / DAY_MS));
+        }
+        const pastDueSub = effSubs.find((s) => s.status === "past_due") || null;
+        let status4;
+        if (hasActiveSubscription) status4 = "paying";
+        else if (!hasLoggedIn) status4 = "invited";
+        else status4 = trialDaysLeftFromLogin > 0 ? "trial" : "free";
+
         return {
+          _excludeArtifact: excludeArtifact, // internal — stripped before responding
+          account_source: u.account_source || null,
+          first_login_at: u.first_login_at || null,
+          status4,
+          past_due: !!pastDueSub,
+          trial_days_left_from_login: trialDaysLeftFromLogin,
+          total_received: totalByUser.get(Number(u.id)) || 0,
+          artifact_with_payment: artifactWithPayment,
           id: Number(u.id),
           name: u.name,
           email: u.email,
@@ -2229,6 +2306,8 @@ router.get(
                 interval: tierSub.billing_interval,
                 status: tierSub.status,
                 next_billing_at: tierSub.next_billing_at,
+                // "Date started the plan" = when they started their CURRENT plan/row.
+                started_at: tierSub.started_at || null,
                 authorize_subscription_id: tierSub.authorize_subscription_id,
               }
             : null,
@@ -2249,7 +2328,17 @@ router.get(
         };
       });
 
-      return res.status(200).json({ success: true, count: rows.length, users: rows });
+      // Part 1: drop non-app-user artifacts entirely (not a row, not in any tile).
+      const visible = rows.filter((r) => !r._excludeArtifact);
+      visible.forEach((r) => { delete r._excludeArtifact; });
+
+      return res.status(200).json({
+        success: true,
+        count: visible.length,
+        users: visible,
+        // Part 2: grand total of REAL settled payments across every customer.
+        grand_total_received: Math.round(grandTotalReceived * 100) / 100,
+      });
     } catch (err) {
       logger.error("/payments/admin/subscriptions-overview error: " + err.message);
       return res.status(500).json({ success: false, message: "Unable to load billing overview." });

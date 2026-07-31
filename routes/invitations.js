@@ -2289,8 +2289,8 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       const newUserSubcategory = user_type === 'client' ? 11 : 12;
       const [insertResult] = await connection.query(
         `INSERT INTO user
-         (name, first_name, last_name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
-         VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, '', '', 1, ?, '', 0, '', ?, 0)`,
+         (name, first_name, last_name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password, account_source)
+         VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, '', '', 1, ?, '', 0, '', ?, 0, 'invite')`,
         [name, (first_name || '').trim() || null, (last_name || '').trim() || null,
          email, newUserRole, mobile || null, newUserCategory, newUserSubcategory,
          business_name || '', now, userId]
@@ -2439,8 +2439,8 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
         // fail ER_DUP_ENTRY and be wrongly reported as "Already a contact".
         const [ins] = await connection.query(
           `INSERT INTO user
-           (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
-           VALUES (?, ?, '', 12, NULL, 2, 12, ?, '', '', 1, ?, '', 0, '', ?, 0)`,
+           (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password, account_source)
+           VALUES (?, ?, '', 12, NULL, 2, 12, ?, '', '', 1, ?, '', 0, '', ?, 0, 'cslb_lookup')`,
           [name, email, name, now, userId]
         );
         const contactUserId = ins.insertId;

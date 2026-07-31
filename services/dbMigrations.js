@@ -545,8 +545,147 @@ async function dropUserMobileUniqueIndex(connection) {
   mobileUniqueDropped = true;
 }
 
+// `user.account_source` — how this user row was created, so the admin billing
+// page can EXCLUDE non-app-user artifacts (CSLB license-lookup imports,
+// placeholder clients auto-created during job creation) exactly, instead of
+// sniffing the email string. Values: 'signup' | 'invite' | 'cslb_lookup' |
+// 'placeholder_client'. Additive + idempotent; new rows are stamped at their
+// insert site, existing rows are backfilled once from the strongest signal.
+let accountSourceEnsured = false;
+async function ensureUserAccountSourceColumn(connection) {
+  if (accountSourceEnsured) return;
+  const [cols] = await connection.query(
+    "SHOW COLUMNS FROM `user` LIKE 'account_source'"
+  );
+  if (!cols.length) {
+    await connection.query(
+      "ALTER TABLE `user` ADD COLUMN account_source VARCHAR(20) NULL"
+    );
+    // One-time backfill for existing rows (NULL only), most-specific first:
+    // CSLB imports → cslb_lookup; other @no-email.invalid placeholders (clients
+    // auto-created on job creation) → placeholder_client; rows with a real
+    // password → signup; everything else (real email, no password) → invite.
+    // Best-effort: a schema variant (e.g. no password column) must not abort boot.
+    try {
+      await connection.query(
+        "UPDATE `user` SET account_source = 'cslb_lookup' WHERE account_source IS NULL AND email LIKE 'lic-%@no-email.invalid'"
+      );
+      await connection.query(
+        "UPDATE `user` SET account_source = 'placeholder_client' WHERE account_source IS NULL AND email LIKE '%@no-email.invalid'"
+      );
+      await connection.query(
+        "UPDATE `user` SET account_source = 'signup' WHERE account_source IS NULL AND password IS NOT NULL AND password <> ''"
+      );
+      await connection.query(
+        "UPDATE `user` SET account_source = 'invite' WHERE account_source IS NULL"
+      );
+    } catch (e) { /* backfill best-effort; the column exists either way */ }
+  }
+  accountSourceEnsured = true;
+}
+
+// `user.first_login_at` — the first time this user actually logged into the app.
+// Stamped once (guarded IF NULL) on the first successful password/OTP login.
+// DISPLAY-ONLY for the admin billing page's four-state status (Invited vs Trial):
+// deliberately NOT wired into utils/access.js, so the real access-gating trial
+// clock stays created_at-based (avoids the 2026-07-20 lockout class of change).
+// Additive + idempotent. Backfill is best-effort: any user who already has a
+// user_devices row has logged in, so approximate their first login as created_at.
+let firstLoginEnsured = false;
+async function ensureUserFirstLoginColumn(connection) {
+  if (firstLoginEnsured) return;
+  const [cols] = await connection.query(
+    "SHOW COLUMNS FROM `user` LIKE 'first_login_at'"
+  );
+  if (!cols.length) {
+    await connection.query(
+      "ALTER TABLE `user` ADD COLUMN first_login_at DATETIME NULL"
+    );
+    try {
+      await connection.query(
+        `UPDATE \`user\` u SET u.first_login_at = u.created_at
+          WHERE u.first_login_at IS NULL
+            AND EXISTS (SELECT 1 FROM user_devices ud WHERE ud.user_id = u.id)`
+      );
+    } catch (e) { /* user_devices absent (e.g. test DB) → leave NULL, non-fatal */ }
+  }
+  firstLoginEnsured = true;
+}
+
+// `subscriptions` payment-tracking columns the webhook writes (paid_count,
+// last_payment_at, past_due_since) but that no migration created on main. Add
+// them so the authcapture branch can't hit ER_BAD_FIELD_ERROR once the payment
+// webhook events are subscribed. Additive + idempotent.
+let subPaymentColsEnsured = false;
+async function ensureSubscriptionPaymentColumns(connection) {
+  if (subPaymentColsEnsured) return;
+  const adds = [
+    ["paid_count", "ALTER TABLE subscriptions ADD COLUMN paid_count INT NOT NULL DEFAULT 0"],
+    ["last_payment_at", "ALTER TABLE subscriptions ADD COLUMN last_payment_at DATETIME NULL"],
+    ["past_due_since", "ALTER TABLE subscriptions ADD COLUMN past_due_since DATETIME NULL"],
+  ];
+  for (const [col, ddl] of adds) {
+    const [c] = await connection.query(
+      "SHOW COLUMNS FROM subscriptions LIKE ?",
+      [col]
+    );
+    if (!c.length) await connection.query(ddl);
+  }
+  subPaymentColsEnsured = true;
+}
+
+// `payment_receipts` — a per-charge dollar-amount ledger. One row per real
+// settled payment (Authcapture webhook), recording the ACTUAL settled amount as
+// it happens (never paid_count × current price, which would misstate history for
+// grandfathered/plan-changed customers). Total Received per customer = SUM(amount)
+// for their rows; grand total = SUM across all. Idempotent on transaction_id.
+// Seeds the one confirmed historical charge (owner's Gold $175, txn 121727692015,
+// settled 2026-07-18) so the totals are accurate on day one.
+let paymentReceiptsEnsured = false;
+async function ensurePaymentReceiptsTable(connection) {
+  if (paymentReceiptsEnsured) return;
+  await connection.query(
+    `CREATE TABLE IF NOT EXISTS payment_receipts (
+       id INT PRIMARY KEY AUTO_INCREMENT,
+       user_id INT NULL,
+       subscription_id INT NULL,
+       authorize_subscription_id VARCHAR(60) NULL,
+       amount DECIMAL(12,2) NOT NULL DEFAULT 0,
+       transaction_id VARCHAR(60) NULL,
+       notification_id VARCHAR(120) NULL,
+       source VARCHAR(20) NOT NULL DEFAULT 'webhook',
+       settled_at DATETIME NULL,
+       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       UNIQUE KEY uq_txn (transaction_id),
+       KEY idx_user (user_id)
+     ) ENGINE=InnoDB`
+  );
+  // One-time seed of the single confirmed real settled payment.
+  try {
+    const [[seedSub]] = await connection.query(
+      "SELECT id, user_id FROM subscriptions WHERE authorize_subscription_id = '73729730' ORDER BY created_at DESC LIMIT 1"
+    );
+    const [[existing]] = await connection.query(
+      "SELECT id FROM payment_receipts WHERE transaction_id = '121727692015' LIMIT 1"
+    );
+    if (seedSub && !existing) {
+      await connection.query(
+        `INSERT INTO payment_receipts
+           (user_id, subscription_id, authorize_subscription_id, amount, transaction_id, notification_id, source, settled_at)
+         VALUES (?, ?, '73729730', 175.00, '121727692015', NULL, 'seed', '2026-07-18 17:13:00')`,
+        [seedSub.user_id, seedSub.id]
+      );
+    }
+  } catch (e) { /* subscriptions/seed absent (e.g. test DB) → skip, non-fatal */ }
+  paymentReceiptsEnsured = true;
+}
+
 module.exports = {
   dropUserMobileUniqueIndex,
+  ensureUserAccountSourceColumn,
+  ensureUserFirstLoginColumn,
+  ensureSubscriptionPaymentColumns,
+  ensurePaymentReceiptsTable,
   ensureJobColorColumn,
   ensureAppointmentAllDayColumn,
   ensureContactStatusColumn,

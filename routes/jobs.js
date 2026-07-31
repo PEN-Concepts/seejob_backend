@@ -326,8 +326,8 @@ async function ensureClientContact(connection, { createdBy, name, email, mobile 
       `client-${cleanName.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40)}-${Date.now()}@no-email.invalid`;
     const [ins] = await connection.query(
       `INSERT INTO user
-       (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
-       VALUES (?, ?, '', 3, ?, 3, 11, '', '', '', 1, ?, '', 0, '', ?, 0)`,
+       (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password, account_source)
+       VALUES (?, ?, '', 3, ?, 3, 11, '', '', '', 1, ?, '', 0, '', ?, 0, 'placeholder_client')`,
       [cleanName || cleanEmail, insertEmail, mobile || null, getTimeStamp(), createdBy]
     );
     clientUserId = ins.insertId;

@@ -59,9 +59,10 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     await conn.query(`CREATE TABLE category (id INT PRIMARY KEY, name VARCHAR(80))`);
     await conn.query(`CREATE TABLE subcategory (id INT PRIMARY KEY, name VARCHAR(80))`);
     await conn.query(`CREATE TABLE \`user\` (
-      id INT PRIMARY KEY, name VARCHAR(150), email VARCHAR(190),
+      id INT PRIMARY KEY, name VARCHAR(150), email VARCHAR(190), password VARCHAR(200) NULL,
       role INT, category INT, subcategory INT NULL, created_by INT NULL, created_at DATETIME NULL
     ) ENGINE=InnoDB`);
+    await conn.query(`CREATE TABLE user_devices (id INT PRIMARY KEY AUTO_INCREMENT, user_id INT, device_token VARCHAR(80), user_agent VARCHAR(200))`);
     await conn.query(`CREATE TABLE plans (
       id INT PRIMARY KEY, name VARCHAR(80), amount DECIMAL(10,2), \`interval\` VARCHAR(20),
       is_active TINYINT DEFAULT 1, description VARCHAR(255) NULL, level INT NULL
@@ -128,6 +129,12 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,needs_reverification,reverification_due_at) VALUES
       (112,4,99.00,'monthly','canceled',1, NOW() + INTERVAL 14 DAY),
       (113,4,99.00,'monthly','canceled',1, NOW() - INTERVAL 1 DAY)`);
+    // New billing-overview v2 columns/tables (prod adds these at boot).
+    const _mig = require('../services/dbMigrations');
+    await _mig.ensureUserAccountSourceColumn(conn);
+    await _mig.ensureUserFirstLoginColumn(conn);
+    await _mig.ensureSubscriptionPaymentColumns(conn);
+    await _mig.ensurePaymentReceiptsTable(conn);
     const { ensureReverifyEmailLogTable } = require('../services/dbMigrations');
     await ensureReverifyEmailLogTable(conn);
     const [logTbl] = await conn.query("SHOW TABLES LIKE 'reverification_email_log'");

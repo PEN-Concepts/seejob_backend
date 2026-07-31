@@ -729,6 +729,16 @@ router.post("/login", async (req, res) => {
       [id, deviceToken, req.headers["user-agent"]]
     );
 
+    // Stamp the first real login once (admin billing "Trial from first login").
+    // Guarded IF NULL → set only on the very first login. Display-only; the real
+    // access-gating trial clock (utils/access.js) stays created_at-based.
+    try {
+      await connection.query(
+        "UPDATE `user` SET first_login_at = NOW() WHERE id = ? AND first_login_at IS NULL",
+        [id]
+      );
+    } catch (e) { /* column not yet migrated → non-fatal */ }
+
     // ===============================
     // Set Cookie
     // ===============================
@@ -954,6 +964,14 @@ router.post("/login-otp-verify", async (req, res) => {
       "INSERT INTO user_devices (user_id, device_token, user_agent) VALUES (?, ?, ?)",
       [id, deviceToken, req.headers["user-agent"]]
     );
+
+    // Stamp first real login once (admin billing display-only; see /login path).
+    try {
+      await connection.query(
+        "UPDATE `user` SET first_login_at = NOW() WHERE id = ? AND first_login_at IS NULL",
+        [id]
+      );
+    } catch (e) { /* column not yet migrated → non-fatal */ }
 
     res.cookie("device_token", deviceToken, {
       httpOnly: true,
