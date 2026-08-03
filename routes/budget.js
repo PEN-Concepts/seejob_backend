@@ -4,7 +4,7 @@ const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
 const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
-const { blockExpiredOwnRecord } = require("../utils/access");
+const { blockExpiredOwnRecord, requirePlan } = require("../utils/access");
 
 // Normalize the job_type/owner_type param to the discriminator stored on
 // division_lineitems. Anything that isn't an explicit 'lead' is a job.
@@ -117,6 +117,11 @@ function requirePlanFeatures(allowedKeys) {
 
 const requireJobBudgetFeature = requirePlanFeatures(["job_budget", "budget"]);
 
+// Budget is now PLATINUM-ONLY (task #84). Tier gate on the whole router, in
+// addition to the per-route plan-feature check below. Owner-exempt accounts are
+// level 5 so they pass; Gold accounts (even with the job_budget feature) are 403.
+// authenticateToken runs here so requirePlan can read req.user.
+router.use(auth.authenticateToken, requirePlan("platinum"));
 
 
 router.get(
