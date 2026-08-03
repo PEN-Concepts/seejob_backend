@@ -126,20 +126,28 @@ async function applyTemplateToJob(conn, opts) {
   );
   for (const a of activeRows) await archiveSchedule(conn, a.id);
 
-  // 2. Load the template.
-  const [tItems] = await conn.query(
-    `SELECT id, name, default_duration_days, depends_on_all, is_inspection, sort_order
-       FROM schedule_template_items WHERE template_id = ? ORDER BY sort_order ASC, id ASC`,
-    [templateId]
-  );
-  if (!tItems.length) throw new Error('Template has no items');
-  const tItemIds = tItems.map((i) => i.id);
-  const [tDeps] = await conn.query(
-    'SELECT item_id, depends_on_item_id FROM schedule_template_deps WHERE item_id IN (?)',
-    [tItemIds]
-  );
-  const [[tpl]] = await conn.query('SELECT name FROM schedule_templates WHERE id = ? LIMIT 1', [templateId]);
-  const tplName = tpl ? tpl.name : 'Schedule';
+  // 2. Load the template. A null templateId OR a 0-item template means "Start
+  //    blank" — create an EMPTY schedule (no trades) the user fills in. Only the
+  //    date-computing (non-held) path needs items; a blank is always held.
+  let tItems = [];
+  let tDeps = [];
+  let tplName = 'Blank Schedule';
+  if (templateId) {
+    [tItems] = await conn.query(
+      `SELECT id, name, default_duration_days, depends_on_all, is_inspection, sort_order
+         FROM schedule_template_items WHERE template_id = ? ORDER BY sort_order ASC, id ASC`,
+      [templateId]
+    );
+    const tItemIds = tItems.map((i) => i.id);
+    if (tItemIds.length) {
+      [tDeps] = await conn.query(
+        'SELECT item_id, depends_on_item_id FROM schedule_template_deps WHERE item_id IN (?)',
+        [tItemIds]
+      );
+    }
+    const [[tpl]] = await conn.query('SELECT name FROM schedule_templates WHERE id = ? LIMIT 1', [templateId]);
+    tplName = tpl ? tpl.name : 'Schedule';
+  }
 
   // 3. Create the job_schedules row (held → NULL start date + 'on_hold' status).
   const startYMD = held ? null : engine.fmtYMD(engine.parseYMD(startDate) || new Date());

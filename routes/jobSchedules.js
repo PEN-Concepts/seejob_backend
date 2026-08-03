@@ -62,6 +62,36 @@ async function loadScheduleRow(connection, sid) {
   return s || null;
 }
 
+// POST /job-schedules/blank — "Start blank": create an EMPTY on_hold schedule for
+// a job, with NO template involved (nothing is saved to "Your templates"). The user
+// then adds trades on the combined page.
+router.post('/blank', async (req, res) => {
+  const jobId = Number(req.body && req.body.job_id);
+  const ownerType = req.body && req.body.owner_type === 'lead' ? 'lead' : 'job';
+  if (!jobId) return res.status(400).json({ success: false, message: 'job_id is required' });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+    let result;
+    try {
+      result = await cascade.applyTemplateToJob(connection, {
+        templateId: null, jobId, ownerType,
+        startDate: null, onHold: true,
+        skipSaturday: false, skipSunday: false, assignments: [],
+        actorId: req.user.id,
+      });
+      await connection.commit();
+    } catch (e) { await connection.rollback(); throw e; }
+    res.status(201).json({ success: true, schedule_id: result.scheduleId });
+  } catch (err) {
+    logger.error('[job-schedules] blank: ' + err.message);
+    res.status(500).json({ success: false, message: err.message || 'Server error' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // GET /job-schedules/:jobId?owner_type= — the job's CURRENT active schedule.
 router.get('/:jobId', async (req, res) => {
   const jobId = Number(req.params.jobId);
