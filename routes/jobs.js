@@ -13,7 +13,7 @@ const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn } = require("../services/dbMigrations");
-const { pickJobColor } = require("../services/jobColorPalette");
+const { pickJobColor, backfillJobColors } = require("../services/jobColorPalette");
 
 // Normalize an owner_type/job_type param: anything but 'lead' is a job. Lets the
 // stages/materials tables distinguish lead-owned rows from job-owned ones even
@@ -23,7 +23,7 @@ function ownerTypeOf(v) {
 }
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
-const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord } = require("../utils/access");
+const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const jobSchema = Joi.object({
   type: Joi.string().valid("Residential", "Commercial").required(),
   name: Joi.string().max(100).required(),
@@ -1885,6 +1885,33 @@ router.post(
 );
 
 // Bulk fetch for Task Manager: jobs, leads, and their tasks for the authenticated user
+// Owner-only maintenance: backfill persisted colors for LEGACY null-color jobs,
+// drawing from the SAME 30-colour pool (pickJobColor rule). Dry-run by default
+// (READ-ONLY — returns the plan only); ?apply=1 writes. Guarded to
+// OWNER_EXEMPT_EMAILS so no regular account can trigger it.
+router.get("/admin/backfill-colors", auth.authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [urows] = await connection.query(
+      "SELECT email FROM `user` WHERE id = ? LIMIT 1",
+      [req.user.id]
+    );
+    const email = String((urows && urows[0] && urows[0].email) || "").toLowerCase();
+    if (!OWNER_EXEMPT_EMAILS.has(email)) {
+      return res.status(403).json({ code: "FORBIDDEN", message: "Owner only." });
+    }
+    const apply = String(req.query.apply || "") === "1";
+    const result = await backfillJobColors(connection, { apply });
+    return res.status(200).json(result);
+  } catch (err) {
+    logger.error("backfill-colors error:", err);
+    return res.status(500).json({ code: "BACKFILL_ERROR", message: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
   const loggedInUserId = req.user.id;
   // "Show Archived" toggle — by default, archived (end-of-day) tasks are hidden.
@@ -1915,6 +1942,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
          j.name,
          j.job_address AS address,
          j.status,
+         j.color,
          j.created_by,
          uj.name AS created_by_name
        FROM job j

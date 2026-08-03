@@ -32,4 +32,52 @@ async function pickJobColor(connection, createdBy) {
   return JOB_COLORS[used.size % JOB_COLORS.length];
 }
 
-module.exports = { JOB_COLORS, pickJobColor };
+/**
+ * One-time BACKFILL for legacy jobs created before the pool system shipped
+ * (active jobs with a NULL/empty color). Assigns from the SAME 30-colour pool
+ * using the exact pickJobColor rule — per creator, first colour not already held
+ * by that creator's active jobs, cycling when all 30 are taken. Non-destructive:
+ * jobs that already have a colour are never changed, and completed/archived jobs
+ * are left NULL (they intentionally released their colour back to the pool).
+ *
+ * The "used" set is tracked in memory and updated per assignment, so a DRY RUN
+ * (apply=false) produces EXACTLY the colours a real apply would — no duplicates
+ * within one creator. Returns { apply, scanned, filled, plan[] }.
+ */
+async function backfillJobColors(connection, opts = {}) {
+  const apply = opts.apply === true;
+  // All ACTIVE jobs (color released on complete/archive, so only status=1 holds).
+  const [rows] = await connection.query(
+    "SELECT id, created_by, color FROM job WHERE status = 1 ORDER BY created_by ASC, id ASC"
+  );
+
+  // Seed each creator's used-colour set from jobs that ALREADY have a colour.
+  const usedByCreator = new Map();
+  for (const r of rows) {
+    const c = String(r.color || '').trim().toLowerCase();
+    if (!c) continue;
+    if (!usedByCreator.has(r.created_by)) usedByCreator.set(r.created_by, new Set());
+    usedByCreator.get(r.created_by).add(c);
+  }
+
+  const plan = [];
+  let filled = 0;
+  for (const r of rows) {
+    if (String(r.color || '').trim()) continue; // keep existing colour
+    if (!usedByCreator.has(r.created_by)) usedByCreator.set(r.created_by, new Set());
+    const used = usedByCreator.get(r.created_by);
+    const color =
+      JOB_COLORS.find((c) => !used.has(c.toLowerCase())) ||
+      JOB_COLORS[used.size % JOB_COLORS.length];
+    used.add(color.toLowerCase());
+    plan.push({ jobId: r.id, createdBy: r.created_by, to: color });
+    if (apply) {
+      await connection.query("UPDATE job SET color = ? WHERE id = ?", [color, r.id]);
+    }
+    filled++;
+  }
+
+  return { apply, scanned: rows.length, filled, plan };
+}
+
+module.exports = { JOB_COLORS, pickJobColor, backfillJobColors };
