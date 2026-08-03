@@ -31,9 +31,9 @@ router.use(async (req, res, next) => {
   }
 });
 
-// GOLD-ONLY GATE: every job-schedule operation requires the Gold plan (server-side
+// PLATINUM-ONLY GATE: every job-schedule operation requires the Platinum plan (server-side
 // 403). authenticateToken runs first so requirePlan can read req.user.
-router.use(auth.authenticateToken, requirePlan('gold'));
+router.use(auth.authenticateToken, requirePlan('platinum'));
 
 function dispatchAll(payloads) {
   for (const p of payloads || []) {

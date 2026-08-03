@@ -36,10 +36,10 @@ router.use(async (req, res, next) => {
   }
 });
 
-// GOLD-ONLY GATE: the entire Schedule Template feature (browse/edit/apply) requires
+// PLATINUM-ONLY GATE: the entire Schedule Template feature (browse/edit/apply) requires
 // the Gold plan. Server-side 403 — not just a hidden UI button. authenticateToken
 // runs first so requirePlan can read req.user; it replaces the per-route auth.
-router.use(auth.authenticateToken, requirePlan('gold'));
+router.use(auth.authenticateToken, requirePlan('platinum'));
 
 // Load a template the caller is allowed to EDIT (must own it — not the shared seed).
 async function loadOwnedTemplate(connection, id, accountId) {

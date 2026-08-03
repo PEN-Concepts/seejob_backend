@@ -475,10 +475,13 @@ function requirePlan(min = "gold") {
     try {
       const level = await getActivePlanLevel(userId);
       if (minLevel > 0 && level >= minLevel) return next();
+      const planName = typeof min === "string"
+        ? min.charAt(0).toUpperCase() + min.slice(1).toLowerCase()
+        : "required";
       return res.status(403).json({
         success: false,
         code: "PLAN_UPGRADE_REQUIRED",
-        message: "This feature requires the Gold plan. Please upgrade to use Schedule Templates.",
+        message: `This feature requires the ${planName} plan. Please upgrade to use it.`,
       });
     } catch (err) {
       logger.error("requirePlan error: " + err.message);
