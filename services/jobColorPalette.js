@@ -30,25 +30,48 @@ const JOB_COLORS = [
   '#6b3b9b', '#7a3d6b', '#a83e7a', '#b5788a', '#aa91b6', '#926ca4', '#60294d',
 ];
 
-/** First palette colour not held by this creator's active jobs; cycles when full. */
+// Family index ranges within JOB_COLORS (the verbatim list above is NOT changed).
+const FAMILIES = [[0, 4], [5, 10], [11, 15], [16, 22], [23, 31], [32, 39], [40, 46]];
+
+// PICK_ORDER: the SAME 47 colours, but walked round-robin across families so
+// consecutive assignments land in different families (orange → gold → brown →
+// tan → green → blue → purple → next orange …). This keeps the approved list
+// verbatim yet spreads an account's first several jobs across the spectrum, so
+// they stay visually distinct instead of clustering in one family.
+const PICK_ORDER = (() => {
+  const buckets = FAMILIES.map(([a, b]) => {
+    const arr = [];
+    for (let i = a; i <= b; i++) arr.push(i);
+    return arr;
+  });
+  const maxLen = Math.max(...buckets.map((b) => b.length));
+  const order = [];
+  for (let k = 0; k < maxLen; k++) {
+    for (const bk of buckets) if (k < bk.length) order.push(JOB_COLORS[bk[k]]);
+  }
+  return order;
+})();
+
+/** First palette colour not held by this creator's active jobs, in family-spread
+ *  PICK_ORDER; cycles when full. */
 async function pickJobColor(connection, createdBy) {
   const [rows] = await connection.query(
     'SELECT color FROM job WHERE created_by = ? AND status = 1 AND color IS NOT NULL',
     [createdBy]
   );
   const used = new Set((rows || []).map((r) => String(r.color || '').toLowerCase()));
-  for (const c of JOB_COLORS) {
+  for (const c of PICK_ORDER) {
     if (!used.has(c.toLowerCase())) return c;
   }
-  return JOB_COLORS[used.size % JOB_COLORS.length];
+  return PICK_ORDER[used.size % PICK_ORDER.length];
 }
 
 /**
  * One-time BACKFILL for legacy jobs created before the pool system shipped
- * (active jobs with a NULL/empty color). Assigns from the SAME 30-colour pool,
- * but scoped PER ACCOUNT so an account's jobs stay visually distinct on its
- * shared calendar/Task Manager — each null job takes the first pool colour not
- * already held by ANY active job on that account, cycling when all 30 are taken.
+ * (active jobs with a NULL/empty color). Assigns from the SAME 47-colour pool in
+ * family-spread PICK_ORDER, scoped PER ACCOUNT so an account's jobs stay visually
+ * distinct on its shared calendar/Task Manager — each job takes the first pool
+ * colour not already held by ANY active job on that account, cycling when full.
  * Non-destructive: jobs that already have a colour are never changed, and
  * completed/archived jobs are left NULL (they released their colour by design).
  *
@@ -102,8 +125,8 @@ async function backfillJobColors(connection, opts = {}) {
     for (const j of jobs) {
       if (!reassign && String(j.color || '').trim()) continue; // fill mode keeps existing
       const color =
-        JOB_COLORS.find((c) => !used.has(c.toLowerCase())) ||
-        JOB_COLORS[used.size % JOB_COLORS.length];
+        PICK_ORDER.find((c) => !used.has(c.toLowerCase())) ||
+        PICK_ORDER[used.size % PICK_ORDER.length];
       used.add(color.toLowerCase());
       plan.push({ jobId: j.id, account: owner, from: j.color || null, to: color });
       if (apply) {
