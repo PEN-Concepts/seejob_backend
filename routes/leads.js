@@ -808,6 +808,7 @@ async function enforcePlanFeatureForJobFileType(req, res, next) {
 router.post(
   "/upload-files",
   auth.authenticateToken,
+  enforcePlanFeatureForJobFileType, // D3: gate lead uploads by plan feature, same as the jobs path
   upload.array("files", 10),
   async (req, res) => {
     const { job_id, file_name, type } = req.body;

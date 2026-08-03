@@ -68,6 +68,12 @@ const ymd = (v) => (v == null ? null : String(v).slice(0, 10));
     ok((await liveTasks()) === 0, 'hold: ZERO live calendar tasks (pulled off)', String(await liveTasks()));
     ok((await archivedTasks()) === 3, 'hold: the 3 tasks are archived (not deleted)', String(await archivedTasks()));
 
+    // ── on_hold must NEVER notify a sub — even an edit that recomputes item dates ──
+    await conn.query('UPDATE job_schedule_items SET assignee_user_id = 101 WHERE schedule_id = ?', [sid]);
+    const holdEditPayloads = await cascade.recomputeSchedule(conn, sid, {});
+    ok(Array.isArray(holdEditPayloads) && holdEditPayloads.length === 0,
+      'on_hold edit: recomputeSchedule dispatches ZERO notifications (assigned sub never notified for a held plan)', JSON.stringify(holdEditPayloads));
+
     // ── RE-START the held schedule → active again, fresh tasks ──
     await cascade.startHeldSchedule(conn, sid, { startDate: '2026-10-05', actorId: 100 });
     const [[js2]] = await conn.query('SELECT status, start_date FROM job_schedules WHERE id=?', [sid]);
@@ -75,6 +81,14 @@ const ymd = (v) => (v == null ? null : String(v).slice(0, 10));
     ok((await liveTasks()) === 3, 're-start: 3 live calendar tasks again', String(await liveTasks()));
     const [[items2]] = await conn.query('SELECT computed_start_date FROM job_schedule_items WHERE schedule_id=? ORDER BY sort_order LIMIT 1', [sid]);
     ok(ymd(items2.computed_start_date) === '2026-10-05', 're-start: cascaded from the new date', ymd(items2.computed_start_date));
+
+    // Contrast: an ACTIVE schedule DOES notify on a date-moving edit (the gate is
+    // status-specific, not a blanket off). Bump the first item's duration → downstream shifts.
+    const [[firstIt]] = await conn.query('SELECT id FROM job_schedule_items WHERE schedule_id=? ORDER BY sort_order LIMIT 1', [sid]);
+    await conn.query('UPDATE job_schedule_items SET duration_days = duration_days + 2 WHERE id = ?', [firstIt.id]);
+    const activeEditPayloads = await cascade.recomputeSchedule(conn, sid, { changedItemId: firstIt.id });
+    ok(Array.isArray(activeEditPayloads) && activeEditPayloads.length > 0,
+      'active edit: recomputeSchedule DOES dispatch (assigned sub notified on a real active schedule)', String((activeEditPayloads || []).length));
 
   } catch (e) { fail++; rec.push('  ✗ harness error -> ' + (e && e.stack ? e.stack : e)); }
   finally {

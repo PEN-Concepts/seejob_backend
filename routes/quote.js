@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
-const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites } = require("../utils/access");
+const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites, OWNER_EXEMPT_EMAILS, resolveOwnerId } = require("../utils/access");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
 const multer = require("multer");
@@ -87,6 +87,68 @@ const transporter = nodemailer.createTransport({
     rejectUnauthorized: false, // allow self-signed certs if needed
   },
 });
+
+// ── D2: Quote Manager backend plan/permission gate ──────────────────────────
+// The frontend (auth-guard.service.ts) allows the Quote Manager route when the
+// user has the 'quote' RIGHT (permission) OR the account's plan has the 'quote'
+// FEATURE. The API had NO such gate (a real bypass). This mirrors the frontend
+// EXACTLY so no entitled user is blocked and no un-entitled user can bypass the UI.
+// PUBLIC token e-sign routes below carry no auth and thus never hit this middleware.
+
+// True when the user's rights (per /users/my-rights logic) include the 'quote' right.
+async function userHasQuoteRight(connection, userId) {
+  const [[u]] = await connection.query("SELECT role FROM `user` WHERE id = ? LIMIT 1", [userId]);
+  if (!u) return false;
+  const role = Number(u.role);
+  const has = async (sql, params) => { const [[r]] = await connection.query(sql, params); return !!r; };
+  if (role === 12) {
+    // role 12 gets the full rights list (LEFT JOIN), so 'quote' is present iff it exists.
+    return has("SELECT 1 FROM `right` WHERE name = 'quote' AND sub_heading = 0 LIMIT 1", []);
+  }
+  if ([2, 3, 4, 5].includes(role)) {
+    return has("SELECT 1 FROM role_right_permission rrp JOIN `right` r ON r.id = rrp.right_id WHERE rrp.role_id = ? AND rrp.user_id = ? AND r.name = 'quote' AND r.sub_heading = 0 LIMIT 1", [role, userId]);
+  }
+  // GC (14) etc.: user-specific rows win; else fall back to role defaults (user_id NULL).
+  if (await has("SELECT 1 FROM role_right_permission rrp JOIN `right` r ON r.id = rrp.right_id WHERE rrp.role_id = ? AND rrp.user_id = ? AND r.name = 'quote' AND r.sub_heading = 0 LIMIT 1", [role, userId])) return true;
+  const anyUserSpecific = await has("SELECT 1 FROM role_right_permission WHERE role_id = ? AND user_id = ? LIMIT 1", [role, userId]);
+  if (anyUserSpecific) return false; // has user-specific rights but not 'quote'
+  return has("SELECT 1 FROM role_right_permission rrp JOIN `right` r ON r.id = rrp.right_id WHERE rrp.role_id = ? AND rrp.user_id IS NULL AND r.name = 'quote' AND r.sub_heading = 0 LIMIT 1", [role]);
+}
+
+// True when the account's active plan includes the 'quote' feature (employee → owner).
+async function accountHasQuoteFeature(connection, userId) {
+  const ownerId = await resolveOwnerId(userId, connection);
+  const [subRows] = await connection.query(
+    "SELECT plan_id FROM subscriptions WHERE user_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1",
+    [ownerId]
+  );
+  if (!subRows.length) return false;
+  const [featRows] = await connection.query("SELECT feature_key FROM plan_features WHERE plan_id = ?", [subRows[0].plan_id]);
+  return featRows.some((r) => {
+    const k = String(r.feature_key || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return k === "quote" || k === "quote_manager";
+  });
+}
+
+async function requireQuoteAccess(req, res, next) {
+  const userId = req.user && req.user.id;
+  if (!userId) return res.status(401).json({ code: "UNAUTHORIZED", message: "Unauthorized" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [[u]] = await connection.query("SELECT email FROM `user` WHERE id = ? LIMIT 1", [userId]);
+    const email = String((u && u.email) || "").trim().toLowerCase();
+    if (OWNER_EXEMPT_EMAILS.has(email)) return next();               // owner/internal never blocked
+    if (await userHasQuoteRight(connection, userId)) return next();  // has the 'quote' right
+    if (await accountHasQuoteFeature(connection, userId)) return next(); // plan includes 'quote'
+    return res.status(403).json({ code: "FEATURE_NOT_AVAILABLE", message: "Your plan does not include Quote Manager." });
+  } catch (e) {
+    logger.error("quote access gate: " + e.message);
+    return res.status(500).json({ code: "BILLING_FEATURES_ERROR", message: "Unable to verify Quote Manager access." });
+  } finally {
+    if (connection) connection.release();
+  }
+}
 
 // ============ PUBLIC (no auth) routes for external client quote preview ============
 
@@ -209,7 +271,7 @@ router.post('/quotes/public/:token/respond', async (req, res) => {
 });
 
 // POST reactivate an expired quote (sets status back to DRAFT with new 30-day validity)
-router.post('/quotes/:id/reactivate', auth.authenticateToken, async (req, res) => {
+router.post('/quotes/:id/reactivate', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -252,7 +314,7 @@ router.post('/quotes/:id/reactivate', auth.authenticateToken, async (req, res) =
 });
 
 // POST send quote email to external client
-router.post('/quotes/:id/send-email', auth.authenticateToken, async (req, res) => {
+router.post('/quotes/:id/send-email', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -389,7 +451,7 @@ router.post('/quotes/:id/send-email', auth.authenticateToken, async (req, res) =
 //get contacts
 router.get(
   "/get_Jobcontacts/:jid",
-  auth.authenticateToken,
+  auth.authenticateToken, requireQuoteAccess,
   async (req, res) => {
     let connection;
     try {
@@ -415,7 +477,7 @@ router.get(
 );
 
 //get contacts
-router.get("/get_jobs/:user_id", auth.authenticateToken, async (req, res) => {
+router.get("/get_jobs/:user_id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const user_id = req.params.user_id; // <-- from URL param
@@ -436,7 +498,7 @@ router.get("/get_jobs/:user_id", auth.authenticateToken, async (req, res) => {
 
 // ---------------- Quote Manager (new) ----------------
 
-router.post('/quotes', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.post('/quotes', auth.authenticateToken, requireQuoteAccess, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;
@@ -624,7 +686,7 @@ router.post('/quotes', auth.authenticateToken, denyExpiredFreeWrites, async (req
   }
 });
 
-router.get('/quotes', auth.authenticateToken, async (req, res) => {
+router.get('/quotes', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;
@@ -671,7 +733,7 @@ if (loggedInEmail) {
   }
 });
 
-router.get('/quotes/:id', auth.authenticateToken, async (req, res) => {
+router.get('/quotes/:id', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;
@@ -729,7 +791,7 @@ router.get('/quotes/:id', auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post('/quotes/:id/sign', auth.authenticateToken, async (req, res) => {
+router.post('/quotes/:id/sign', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;
@@ -842,7 +904,7 @@ router.post('/quotes/:id/sign', auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.put('/quotes/:id', auth.authenticateToken, async (req, res) => {
+router.put('/quotes/:id', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const updated_by_user_id = res.locals.id;
@@ -1008,7 +1070,7 @@ router.put('/quotes/:id', auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.delete('/quotes/:id', auth.authenticateToken, async (req, res) => {
+router.delete('/quotes/:id', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const user_id = res.locals.id;
@@ -1033,7 +1095,7 @@ router.delete('/quotes/:id', auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.post("/create", auth.authenticateToken, requireQuoteAccess, denyExpiredFreeWrites, async (req, res) => {
   let connection;
   try {
     const { job_id, items, change_quote_type } = req.body;
@@ -1109,7 +1171,7 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req
 // GET job by user_id and job_id
 router.get(
   "/list-job/:user_id/:job_id",
-  auth.authenticateToken,
+  auth.authenticateToken, requireQuoteAccess,
   async (req, res) => {
     let connection;
     try {
@@ -1150,7 +1212,7 @@ WHERE col.created_by=  ? and
 // GET leadss quote list by user_id and job_id
 router.get(
   "/list/:user_id/:job_id",
-  auth.authenticateToken,
+  auth.authenticateToken, requireQuoteAccess,
   async (req, res) => {
     let connection;
     try {
@@ -1189,7 +1251,7 @@ WHERE col.created_by=  ? and
 );
 
 // DELETE change order item
-router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/delete/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -1214,7 +1276,7 @@ router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
 
 // PUT update change order
 // PUT update change order item
-router.put("/edit/:id", auth.authenticateToken, async (req, res) => {
+router.put("/edit/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   const { id } = req.params;
   const { description, amount, job_id } = req.body;
 
@@ -1247,7 +1309,7 @@ router.put("/edit/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // update change order relations
-router.put("/changewith/:id", auth.authenticateToken, async (req, res) => {
+router.put("/changewith/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const { id } = req.params; // change order table id
@@ -1274,7 +1336,7 @@ router.put("/changewith/:id", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/get_employees/:id", auth.authenticateToken, async (req, res) => {
+router.get("/get_employees/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -1295,7 +1357,7 @@ router.get("/get_employees/:id", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/get_all_users", auth.authenticateToken, async (req, res) => {
+router.get("/get_all_users", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const created_by = res.locals.id;
@@ -1322,7 +1384,7 @@ router.get("/get_all_users", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/add_contact", auth.authenticateToken, async (req, res) => {
+router.post("/add_contact", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const { job_id, emp_id, change_quote_type } = req.body;
@@ -1389,7 +1451,7 @@ router.post("/add_contact", auth.authenticateToken, async (req, res) => {
 // Get all contacts for a job
 router.get(
   "/job_contacts/:job_id/:change_quote_type",
-  auth.authenticateToken,
+  auth.authenticateToken, requireQuoteAccess,
   async (req, res) => {
     let connection;
     try {
@@ -1416,7 +1478,7 @@ router.get(
   }
 );
 
-router.get("/details/:job_id/:change_quote_type", auth.authenticateToken, blockExpiredOwnJob((r) => r.params.job_id), async (req, res) => {
+router.get("/details/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, blockExpiredOwnJob((r) => r.params.job_id), async (req, res) => {
   let connection;
   try {
     const changeorder_with = res.locals.id;
@@ -1513,7 +1575,7 @@ router.get("/details/:job_id/:change_quote_type", auth.authenticateToken, blockE
 });
 
 
-router.get("/lead_details/:job_id/:change_quote_type", auth.authenticateToken, blockExpiredOwnRecord((r) => r.params.job_id, () => "lead"), async (req, res) => {
+router.get("/lead_details/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, blockExpiredOwnRecord((r) => r.params.job_id, () => "lead"), async (req, res) => {
   let connection;
   try {
     const changeorder_with = res.locals.id;
@@ -1600,7 +1662,7 @@ router.get("/lead_details/:job_id/:change_quote_type", auth.authenticateToken, b
 });
 
 // Update Change Order Status (Approve/Reject)
-router.put("/status/:id", auth.authenticateToken, async (req, res) => {
+router.put("/status/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -1629,7 +1691,7 @@ router.put("/status/:id", auth.authenticateToken, async (req, res) => {
 
 router.post(
   "/email-quote/:quoteId",
-  auth.authenticateToken,
+  auth.authenticateToken, requireQuoteAccess,
   async (req, res) => {
     const { quoteId } = req.params;
 
@@ -2084,7 +2146,7 @@ router.get(
   "/download/:quoteId",
 
   
-  auth.authenticateToken,
+  auth.authenticateToken, requireQuoteAccess,
   async (req, res) => {
     const { quoteId } = req.params;
     let connection;
@@ -2544,7 +2606,7 @@ GROUP BY co.id;`,
   }
 );
 
-router.delete("/job-contact/:id/:job_id/:change_quote_type", auth.authenticateToken, async (req, res) => {
+router.delete("/job-contact/:id/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   const contactId = req.params.id;
   const change_quote_with = req.params.change_quote_type
   const job_id = req.params.job_id
@@ -2563,7 +2625,7 @@ router.delete("/job-contact/:id/:job_id/:change_quote_type", auth.authenticateTo
   }
 
 });
-router.delete("/job-contact/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/job-contact/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
   const contactId = req.params.id;
   try {
     const [result] = await pool.execute(
@@ -2584,7 +2646,7 @@ router.delete("/job-contact/:id", auth.authenticateToken, async (req, res) => {
 
 router.get(
   "/get_Leadcontacts",
-  auth.authenticateToken,
+  auth.authenticateToken, requireQuoteAccess,
   async (req, res) => {
     let connection;
     try {

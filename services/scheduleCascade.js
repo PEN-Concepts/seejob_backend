@@ -276,6 +276,10 @@ async function pushScheduleToCalendar(conn, scheduleId, { actorId = null } = {})
     );
   }
 
+  // Defence-in-depth: only an ACTIVE schedule notifies. Callers already gate this
+  // (applyTemplateToJob returns early when held; startHeldSchedule sets 'active'
+  // first), but never dispatch for a non-active schedule even if called directly.
+  if (s.status !== 'active') return [];
   const assignedItems = graph.items
     .filter((it) => it.assignee_user_id)
     .map((it) => ({
@@ -411,7 +415,10 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
       );
     }
 
-    if (dateChanged && it.assignee_user_id) {
+    // Only an ACTIVE schedule's items are really scheduled → only they can notify
+    // the assigned sub. An on_hold (or archived) schedule must NEVER dispatch a
+    // notification, even when an edit/reorder/dep change recomputes its dates.
+    if (dateChanged && it.assignee_user_id && schedule.status === 'active') {
       moved.push({
         userId: it.assignee_user_id,
         tradeName: it.name,
@@ -421,7 +428,9 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
     }
   }
 
-  return groupByAssignee(moved, jobName, schedule.created_by);
+  // Hard gate at the boundary too (defence-in-depth): no payloads for a non-active
+  // schedule, so no dispatchAll caller can ever notify a sub about an on_hold plan.
+  return schedule.status === 'active' ? groupByAssignee(moved, jobName, schedule.created_by) : [];
 }
 
 module.exports = {
