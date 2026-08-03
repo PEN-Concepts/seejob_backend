@@ -20,7 +20,7 @@ const APPLY = process.argv.includes("--apply");
     const res = await backfillJobColors(connection, { apply: APPLY });
     for (const p of res.plan) {
       console.log(
-        `${APPLY ? "SET " : "WOULD SET"} job ${p.jobId} (creator ${p.createdBy}) -> ${p.to}`
+        `${APPLY ? "SET " : "WOULD SET"} job ${p.jobId} (account ${p.account}) -> ${p.to}`
       );
     }
     console.log(

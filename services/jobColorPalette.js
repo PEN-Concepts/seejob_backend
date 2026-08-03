@@ -1,4 +1,5 @@
 'use strict';
+const { resolveOwnerId } = require('../utils/access');
 /**
  * Job color POOL. Leads are coloured from a separate grey ramp on the client;
  * this 30-colour pool is only for real jobs. A colour is ASSIGNED when a lead
@@ -34,47 +35,69 @@ async function pickJobColor(connection, createdBy) {
 
 /**
  * One-time BACKFILL for legacy jobs created before the pool system shipped
- * (active jobs with a NULL/empty color). Assigns from the SAME 30-colour pool
- * using the exact pickJobColor rule — per creator, first colour not already held
- * by that creator's active jobs, cycling when all 30 are taken. Non-destructive:
- * jobs that already have a colour are never changed, and completed/archived jobs
- * are left NULL (they intentionally released their colour back to the pool).
+ * (active jobs with a NULL/empty color). Assigns from the SAME 30-colour pool,
+ * but scoped PER ACCOUNT (owner + employees) rather than per creator, so an
+ * account's jobs stay visually distinct on its shared calendar/Task Manager —
+ * each null job takes the first pool colour not already held by ANY active job
+ * on that account, cycling when all 30 are taken. Non-destructive: jobs that
+ * already have a colour are never changed, and completed/archived jobs are left
+ * NULL (they intentionally released their colour back to the pool).
+ *
+ * (New jobs still colour per-creator via pickJobColor; this per-account scope
+ * applies to the one-time legacy backfill only.)
  *
  * The "used" set is tracked in memory and updated per assignment, so a DRY RUN
- * (apply=false) produces EXACTLY the colours a real apply would — no duplicates
- * within one creator. Returns { apply, scanned, filled, plan[] }.
+ * (apply=false) produces EXACTLY the colours a real apply would. Returns
+ * { apply, scanned, filled, plan[] } where each plan row is { jobId, account, to }.
  */
 async function backfillJobColors(connection, opts = {}) {
   const apply = opts.apply === true;
   // All ACTIVE jobs (color released on complete/archive, so only status=1 holds).
   const [rows] = await connection.query(
-    "SELECT id, created_by, color FROM job WHERE status = 1 ORDER BY created_by ASC, id ASC"
+    "SELECT id, created_by, color FROM job WHERE status = 1 ORDER BY id ASC"
   );
 
-  // Seed each creator's used-colour set from jobs that ALREADY have a colour.
-  const usedByCreator = new Map();
+  // Resolve each creator to its account owner (employee → owner), cached.
+  const ownerCache = new Map();
+  const ownerOf = async (createdBy) => {
+    if (ownerCache.has(createdBy)) return ownerCache.get(createdBy);
+    let owner;
+    try { owner = await resolveOwnerId(createdBy, connection); }
+    catch (_) { owner = createdBy; }
+    owner = owner || createdBy;
+    ownerCache.set(createdBy, owner);
+    return owner;
+  };
+
+  // Group jobs by account owner (preserving global id order within each group).
+  const byAccount = new Map();
   for (const r of rows) {
-    const c = String(r.color || '').trim().toLowerCase();
-    if (!c) continue;
-    if (!usedByCreator.has(r.created_by)) usedByCreator.set(r.created_by, new Set());
-    usedByCreator.get(r.created_by).add(c);
+    const owner = await ownerOf(r.created_by);
+    if (!byAccount.has(owner)) byAccount.set(owner, []);
+    byAccount.get(owner).push(r);
   }
 
   const plan = [];
   let filled = 0;
-  for (const r of rows) {
-    if (String(r.color || '').trim()) continue; // keep existing colour
-    if (!usedByCreator.has(r.created_by)) usedByCreator.set(r.created_by, new Set());
-    const used = usedByCreator.get(r.created_by);
-    const color =
-      JOB_COLORS.find((c) => !used.has(c.toLowerCase())) ||
-      JOB_COLORS[used.size % JOB_COLORS.length];
-    used.add(color.toLowerCase());
-    plan.push({ jobId: r.id, createdBy: r.created_by, to: color });
-    if (apply) {
-      await connection.query("UPDATE job SET color = ? WHERE id = ?", [color, r.id]);
+  for (const [owner, jobs] of byAccount) {
+    // Seed the account's used-colour set from jobs that ALREADY have a colour.
+    const used = new Set();
+    for (const j of jobs) {
+      const c = String(j.color || '').trim().toLowerCase();
+      if (c) used.add(c);
     }
-    filled++;
+    for (const j of jobs) {
+      if (String(j.color || '').trim()) continue; // keep existing colour
+      const color =
+        JOB_COLORS.find((c) => !used.has(c.toLowerCase())) ||
+        JOB_COLORS[used.size % JOB_COLORS.length];
+      used.add(color.toLowerCase());
+      plan.push({ jobId: j.id, account: owner, to: color });
+      if (apply) {
+        await connection.query("UPDATE job SET color = ? WHERE id = ?", [color, j.id]);
+      }
+      filled++;
+    }
   }
 
   return { apply, scanned: rows.length, filled, plan };
