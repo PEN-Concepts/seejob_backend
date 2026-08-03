@@ -1,5 +1,4 @@
 'use strict';
-const { resolveOwnerId } = require('../utils/access');
 /**
  * Job color POOL. Leads are coloured from a separate grey ramp on the client;
  * this 30-colour pool is only for real jobs. A colour is ASSIGNED when a lead
@@ -36,15 +35,17 @@ async function pickJobColor(connection, createdBy) {
 /**
  * One-time BACKFILL for legacy jobs created before the pool system shipped
  * (active jobs with a NULL/empty color). Assigns from the SAME 30-colour pool,
- * but scoped PER ACCOUNT (owner + employees) rather than per creator, so an
- * account's jobs stay visually distinct on its shared calendar/Task Manager —
- * each null job takes the first pool colour not already held by ANY active job
- * on that account, cycling when all 30 are taken. Non-destructive: jobs that
- * already have a colour are never changed, and completed/archived jobs are left
- * NULL (they intentionally released their colour back to the pool).
+ * but scoped PER ACCOUNT so an account's jobs stay visually distinct on its
+ * shared calendar/Task Manager — each null job takes the first pool colour not
+ * already held by ANY active job on that account, cycling when all 30 are taken.
+ * Non-destructive: jobs that already have a colour are never changed, and
+ * completed/archived jobs are left NULL (they released their colour by design).
  *
- * (New jobs still colour per-creator via pickJobColor; this per-account scope
- * applies to the one-time legacy backfill only.)
+ * The account key mirrors EXACTLY what the calendar / jobs-all list shows
+ * together: COALESCE(creator.created_by, job.created_by) — i.e. the owner when
+ * the creator is the owner or one of the owner's sub-users (employee/client),
+ * else the creator itself. (New jobs still colour per-creator via pickJobColor;
+ * this per-account scope applies to the one-time legacy backfill only.)
  *
  * The "used" set is tracked in memory and updated per assignment, so a DRY RUN
  * (apply=false) produces EXACTLY the colours a real apply would. Returns
@@ -52,27 +53,20 @@ async function pickJobColor(connection, createdBy) {
  */
 async function backfillJobColors(connection, opts = {}) {
   const apply = opts.apply === true;
-  // All ACTIVE jobs (color released on complete/archive, so only status=1 holds).
+  // All ACTIVE jobs (color released on complete/archive, so only status=1 holds),
+  // tagged with the account root they display under (same rule as /all-tasks).
   const [rows] = await connection.query(
-    "SELECT id, created_by, color FROM job WHERE status = 1 ORDER BY id ASC"
+    `SELECT j.id, j.color, COALESCE(u.created_by, j.created_by) AS account_root
+       FROM job j
+       LEFT JOIN \`user\` u ON u.id = j.created_by
+      WHERE j.status = 1
+      ORDER BY j.id ASC`
   );
 
-  // Resolve each creator to its account owner (employee → owner), cached.
-  const ownerCache = new Map();
-  const ownerOf = async (createdBy) => {
-    if (ownerCache.has(createdBy)) return ownerCache.get(createdBy);
-    let owner;
-    try { owner = await resolveOwnerId(createdBy, connection); }
-    catch (_) { owner = createdBy; }
-    owner = owner || createdBy;
-    ownerCache.set(createdBy, owner);
-    return owner;
-  };
-
-  // Group jobs by account owner (preserving global id order within each group).
+  // Group jobs by account root (preserving global id order within each group).
   const byAccount = new Map();
   for (const r of rows) {
-    const owner = await ownerOf(r.created_by);
+    const owner = r.account_root;
     if (!byAccount.has(owner)) byAccount.set(owner, []);
     byAccount.get(owner).push(r);
   }
