@@ -14,8 +14,8 @@
 // approved list — do not reorder/substitute. Sunflower #fdb813 intentionally
 // matches the brand Sunflower (owner's explicit choice for this pool).
 const JOB_COLORS = [
-  // Orange / rust (5)
-  '#a8461f', '#c1651d', '#8a4a2e', '#b5794f', '#a95e3b',
+  // Orange / rust (4) — #a8461f removed (too close to the other rusts; per owner)
+  '#c1651d', '#8a4a2e', '#b5794f', '#a95e3b',
   // Gold / amber / yellow (6)
   '#c68a1f', '#c9a227', '#d4a017', '#a67c2e', '#fdb813', '#d6c148',
   // Brown (5)
@@ -30,8 +30,21 @@ const JOB_COLORS = [
   '#6b3b9b', '#7a3d6b', '#a83e7a', '#b5788a', '#aa91b6', '#926ca4', '#60294d',
 ];
 
-// Family index ranges within JOB_COLORS (the verbatim list above is NOT changed).
-const FAMILIES = [[0, 4], [5, 10], [11, 15], [16, 22], [23, 31], [32, 39], [40, 46]];
+// Family index ranges within JOB_COLORS (46 colours after removing one rust),
+// listed in a WARM/COOL-ALTERNATING traversal order so the round-robin picks a
+// warm colour, then a cool one, then warm… — an account's first jobs land in
+// visibly different families (orange → green → gold → blue → brown → purple →
+// tan) instead of a run of warm tones. The JOB_COLORS list itself is unchanged;
+// this is only the order families are visited when assigning.
+const FAMILIES = [
+  [0, 3],    // orange/rust (warm)
+  [22, 30],  // green (cool)
+  [4, 9],    // gold/amber (warm)
+  [31, 38],  // blue/teal (cool)
+  [10, 14],  // brown (warm)
+  [39, 45],  // purple/pink (cool)
+  [15, 21],  // tan/camel (warm)
+];
 
 // PICK_ORDER: the SAME 47 colours, but walked round-robin across families so
 // consecutive assignments land in different families (orange → gold → brown →
