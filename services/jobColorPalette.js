@@ -10,13 +10,24 @@
  * palette colour not currently held by that creator's ACTIVE jobs, so at any
  * time a creator's active jobs stay visually distinct until all 30 are taken.
  */
+// Approved muted, RED-FREE 47-colour pool (task #53). Order is verbatim from the
+// approved list — do not reorder/substitute. Sunflower #fdb813 intentionally
+// matches the brand Sunflower (owner's explicit choice for this pool).
 const JOB_COLORS = [
-  '#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
-  '#008080', '#f032e6', '#9a6324', '#800000', '#808000',
-  '#000075', '#46b3a0', '#e67e22', '#2e8b57', '#c71585',
-  '#1e90ff', '#b8860b', '#6a5acd', '#20b2aa', '#cd5c5c',
-  '#228b22', '#d2691e', '#4682b4', '#8b008b', '#ff6347',
-  '#00868b', '#9932cc', '#556b2f', '#a0522d', '#2f4f9f',
+  // Orange / rust (5)
+  '#a8461f', '#c1651d', '#8a4a2e', '#b5794f', '#a95e3b',
+  // Gold / amber / yellow (6)
+  '#c68a1f', '#c9a227', '#d4a017', '#a67c2e', '#fdb813', '#d6c148',
+  // Brown (5)
+  '#6b4226', '#4a3a2a', '#8f6a45', '#725649', '#422619',
+  // Tan / camel (7)
+  '#b8834f', '#c9a878', '#dcc39a', '#b8b08a', '#cbb573', '#d5d1b9', '#c1bda1',
+  // Green (9)
+  '#6b7a2e', '#4a7a3d', '#8a9a7a', '#3ea88a', '#1f5c45', '#9adcc2', '#879c2e', '#6fb89a', '#2fbab0',
+  // Blue / teal (8)
+  '#2f7d7d', '#7fa8c9', '#3b6f9b', '#3d4a8a', '#b3a6e6', '#4689b5', '#6a7c90', '#866dd1',
+  // Purple / pink (7)
+  '#6b3b9b', '#7a3d6b', '#a83e7a', '#b5788a', '#aa91b6', '#926ca4', '#60294d',
 ];
 
 /** First palette colour not held by this creator's active jobs; cycles when full. */
@@ -53,6 +64,11 @@ async function pickJobColor(connection, createdBy) {
  */
 async function backfillJobColors(connection, opts = {}) {
   const apply = opts.apply === true;
+  // reassign=true → OVERWRITE every active job's colour from the (new) pool. Used
+  // when the pool itself changes (task #53: mute + drop reds), so jobs holding an
+  // old/removed colour are recoloured. reassign=false → original fill-only mode
+  // (only NULL-colour legacy jobs, existing colours kept).
+  const reassign = opts.reassign === true;
   // All ACTIVE jobs (color released on complete/archive, so only status=1 holds),
   // tagged with the account root they display under (same rule as /all-tasks).
   const [rows] = await connection.query(
@@ -74,19 +90,22 @@ async function backfillJobColors(connection, opts = {}) {
   const plan = [];
   let filled = 0;
   for (const [owner, jobs] of byAccount) {
-    // Seed the account's used-colour set from jobs that ALREADY have a colour.
+    // Fill mode seeds the used set from already-coloured jobs (so they're kept).
+    // Reassign mode starts empty — every job is (re)assigned from the pool.
     const used = new Set();
-    for (const j of jobs) {
-      const c = String(j.color || '').trim().toLowerCase();
-      if (c) used.add(c);
+    if (!reassign) {
+      for (const j of jobs) {
+        const c = String(j.color || '').trim().toLowerCase();
+        if (c) used.add(c);
+      }
     }
     for (const j of jobs) {
-      if (String(j.color || '').trim()) continue; // keep existing colour
+      if (!reassign && String(j.color || '').trim()) continue; // fill mode keeps existing
       const color =
         JOB_COLORS.find((c) => !used.has(c.toLowerCase())) ||
         JOB_COLORS[used.size % JOB_COLORS.length];
       used.add(color.toLowerCase());
-      plan.push({ jobId: j.id, account: owner, to: color });
+      plan.push({ jobId: j.id, account: owner, from: j.color || null, to: color });
       if (apply) {
         await connection.query("UPDATE job SET color = ? WHERE id = ?", [color, j.id]);
       }
@@ -94,7 +113,7 @@ async function backfillJobColors(connection, opts = {}) {
     }
   }
 
-  return { apply, scanned: rows.length, filled, plan };
+  return { apply, reassign, scanned: rows.length, filled, plan };
 }
 
 module.exports = { JOB_COLORS, pickJobColor, backfillJobColors };

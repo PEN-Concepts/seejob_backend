@@ -1902,7 +1902,8 @@ router.get("/admin/backfill-colors", auth.authenticateToken, async (req, res) =>
       return res.status(403).json({ code: "FORBIDDEN", message: "Owner only." });
     }
     const apply = String(req.query.apply || "") === "1";
-    const result = await backfillJobColors(connection, { apply });
+    const reassign = String(req.query.reassign || "") === "1";
+    const result = await backfillJobColors(connection, { apply, reassign });
     return res.status(200).json(result);
   } catch (err) {
     logger.error("backfill-colors error:", err);
