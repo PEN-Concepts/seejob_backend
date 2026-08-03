@@ -220,7 +220,11 @@ router.put('/:sid/items/:iid', async (req, res) => {
       );
       const sched = await loadScheduleRow(pool, sid);
       const jobName = sched ? await cascade.getJobName(pool, sched.job_id, sched.owner_type) : null;
-      if (fresh) {
+      // NEVER notify subs for a non-active (on_hold/archived) schedule — the rule
+      // that recomputeSchedule/pushScheduleToCalendar already enforce. This
+      // reassignment payload is built independently of recompute, so it needs its
+      // own status gate (a held item also has computed_start_date = NULL).
+      if (fresh && sched && sched.status === 'active') {
         allPayloads = payloads.concat([{
           userId: newAssignee,
           jobName,
