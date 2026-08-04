@@ -12,7 +12,7 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn } = require("../services/dbMigrations");
+const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn, ensureGanttStageProgressTable } = require("../services/dbMigrations");
 const { pickJobColor, backfillJobColors } = require("../services/jobColorPalette");
 
 // Normalize an owner_type/job_type param: anything but 'lead' is a job. Lets the
@@ -1558,6 +1558,65 @@ router.put("/stages/:id", auth.authenticateToken, denyExpiredFreeWrites, async (
 
     res.json({ message: "Stage updated successfully" });
   } catch (err) {
+    res.status(500).json({ message: "Database error", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ─── Stages → Gantt sub-tab: per-trade % complete ─────────────────────────────
+// This is the mirror page's OWN progress data, kept apart from the Gantt Scheduler
+// (a Gantt trade has no % field). Keyed by the trade's job_schedule_items id.
+
+// Read every saved percent for a job's Gantt trades → [{ schedule_item_id, percent }].
+router.get("/gantt-stage-progress/:job_id", auth.authenticateToken, async (req, res) => {
+  const jobId = Number(req.params.job_id);
+  const ownerType = ownerTypeOf(req.query.owner_type);
+  if (!jobId) return res.status(400).json({ message: "job_id is required" });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureGanttStageProgressTable(connection);
+    const [rows] = await connection.execute(
+      "SELECT schedule_item_id, percent FROM gantt_stage_progress WHERE job_id = ? AND owner_type = ?",
+      [jobId, ownerType]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ message: "Database error", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Upsert the % complete for one Gantt trade (keyed by its job_schedule_items id).
+router.put("/gantt-stage-progress/:item_id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+  const itemId = Number(req.params.item_id);
+  const jobId = Number(req.body.job_id);
+  const ownerType = ownerTypeOf(req.body.owner_type);
+  const percent = Math.min(100, Math.max(0, Math.round(Number(req.body.percent) || 0)));
+  if (!itemId || !jobId) return res.status(400).json({ message: "item_id and job_id are required" });
+
+  const signedin_user = res.locals.id;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureGanttStageProgressTable(connection);
+    await connection.execute(
+      `INSERT INTO gantt_stage_progress (schedule_item_id, job_id, owner_type, percent, updated_by)
+       VALUES (?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE percent = VALUES(percent), job_id = VALUES(job_id),
+         owner_type = VALUES(owner_type), updated_by = VALUES(updated_by)`,
+      [itemId, jobId, ownerType, percent, signedin_user]
+    );
+    res.json({ message: "Progress saved", schedule_item_id: itemId, percent });
+  } catch (err) {
+    // % for a trade that no longer exists on the Gantt Scheduler (deleted) would
+    // violate the FK — report it as gone rather than a 500 so the mirror stays quiet.
+    if (err && err.code === 'ER_NO_REFERENCED_ROW_2') {
+      return res.status(409).json({ message: "That trade no longer exists on the Gantt Scheduler." });
+    }
     res.status(500).json({ message: "Database error", error: err.message });
   } finally {
     if (connection) connection.release();

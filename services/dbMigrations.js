@@ -680,8 +680,37 @@ async function ensurePaymentReceiptsTable(connection) {
   paymentReceiptsEnsured = true;
 }
 
+// `gantt_stage_progress` — the Stages → Gantt sub-tab's OWN per-trade % complete,
+// stored separately from the Gantt Scheduler (which has no % field on a trade).
+// Keyed by schedule_item_id (a Gantt trade = job_schedule_items.id) with a FK
+// ON DELETE CASCADE: deleting a trade from the Gantt Scheduler drops its progress
+// row, so a later re-add (a NEW item id) starts fresh at 0% — the confirmed
+// behavior. job_id/owner_type are carried for a cheap scoped fetch per job.
+let ganttStageProgressEnsured = false;
+async function ensureGanttStageProgressTable(connection) {
+  if (ganttStageProgressEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS gantt_stage_progress (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      schedule_item_id INT NOT NULL,
+      job_id INT NOT NULL,
+      owner_type VARCHAR(8) NOT NULL DEFAULT 'job',
+      percent TINYINT NOT NULL DEFAULT 0,
+      updated_by INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_gsp_item (schedule_item_id),
+      INDEX idx_gsp_job (job_id, owner_type),
+      CONSTRAINT fk_gsp_item FOREIGN KEY (schedule_item_id)
+        REFERENCES job_schedule_items(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB
+  `);
+  ganttStageProgressEnsured = true;
+}
+
 module.exports = {
   dropUserMobileUniqueIndex,
+  ensureGanttStageProgressTable,
   ensureUserAccountSourceColumn,
   ensureUserFirstLoginColumn,
   ensureSubscriptionPaymentColumns,
