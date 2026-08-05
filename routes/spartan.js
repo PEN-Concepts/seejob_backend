@@ -24,10 +24,18 @@ async function ensureTables(conn) {
       day_of_week VARCHAR(64) DEFAULT NULL,
       is_special TINYINT DEFAULT 0,
       sort_order INT DEFAULT 0,
+      reminder_lead_min INT NOT NULL DEFAULT 10,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_spartan_goals_user (user_id)
     )
   `);
+  // Lazy add for tables created before the per-goal reminder offset existed.
+  // Existing rows inherit DEFAULT 10 (matches the old hardcoded 10-min lead).
+  try {
+    await conn.query(
+      "ALTER TABLE spartan_goals ADD COLUMN reminder_lead_min INT NOT NULL DEFAULT 10"
+    );
+  } catch (e) { /* column already exists — ignore */ }
   await conn.query(`
     CREATE TABLE IF NOT EXISTS spartan_goal_log (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -83,13 +91,15 @@ router.post("/goals", auth.authenticateToken, async (req, res) => {
   const userId = req.user.id;
   const {
     goal, start_time, duration_minutes, recurrence, day_of_week,
-    is_special, sort_order,
+    is_special, sort_order, reminder_lead_min,
   } = req.body || {};
 
   if (!goal || !String(goal).trim()) {
     return res.status(400).json({ success: false, message: "Goal is required" });
   }
   const rec = ALLOWED_RECURRENCE.has(recurrence) ? recurrence : "daily";
+  // Minutes before start to remind (0 = no reminder). Absent → 10 (legacy default).
+  const lead = reminder_lead_min == null ? 10 : Math.max(0, Number(reminder_lead_min) || 0);
 
   let connection;
   try {
@@ -97,12 +107,12 @@ router.post("/goals", auth.authenticateToken, async (req, res) => {
     await ensureTables(connection);
     const [result] = await connection.query(
       `INSERT INTO spartan_goals
-        (user_id, goal, start_time, duration_minutes, recurrence, day_of_week, is_special, sort_order)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (user_id, goal, start_time, duration_minutes, recurrence, day_of_week, is_special, sort_order, reminder_lead_min)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         userId, String(goal).trim(), start_time || null,
         duration_minutes != null ? Number(duration_minutes) : null,
-        rec, day_of_week || null, is_special ? 1 : 0, Number(sort_order) || 0,
+        rec, day_of_week || null, is_special ? 1 : 0, Number(sort_order) || 0, lead,
       ]
     );
     return res.status(201).json({ success: true, id: result.insertId });
@@ -120,9 +130,10 @@ router.put("/goals/:id", auth.authenticateToken, async (req, res) => {
   const id = req.params.id;
   const {
     goal, start_time, duration_minutes, recurrence, day_of_week,
-    is_special, sort_order,
+    is_special, sort_order, reminder_lead_min,
   } = req.body || {};
   const rec = ALLOWED_RECURRENCE.has(recurrence) ? recurrence : "daily";
+  const lead = reminder_lead_min == null ? 10 : Math.max(0, Number(reminder_lead_min) || 0);
 
   let connection;
   try {
@@ -131,12 +142,12 @@ router.put("/goals/:id", auth.authenticateToken, async (req, res) => {
     const [result] = await connection.query(
       `UPDATE spartan_goals SET
         goal = ?, start_time = ?, duration_minutes = ?, recurrence = ?,
-        day_of_week = ?, is_special = ?, sort_order = ?
+        day_of_week = ?, is_special = ?, sort_order = ?, reminder_lead_min = ?
        WHERE id = ? AND user_id = ?`,
       [
         String(goal || "").trim(), start_time || null,
         duration_minutes != null ? Number(duration_minutes) : null,
-        rec, day_of_week || null, is_special ? 1 : 0, Number(sort_order) || 0,
+        rec, day_of_week || null, is_special ? 1 : 0, Number(sort_order) || 0, lead,
         id, userId,
       ]
     );
