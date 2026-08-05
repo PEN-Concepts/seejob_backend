@@ -506,6 +506,31 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
       }
     }
 
+    // Notify each newly-assigned user (real assignee, not the creator) with an
+    // in-app notification + a real push, so the assignment reaches them even
+    // with the app closed — batched per person so a multi-task assign isn't
+    // spammy. Best-effort, after commit (never affects task creation). Team
+    // assignments (finalUserId null) are skipped, matching the /nudge behavior.
+    try {
+      const [[actorRow]] = await connection.query("SELECT name FROM `user` WHERE id=?", [signedin_user]);
+      const actorName = (actorRow && actorRow.name) ? actorRow.name : 'Someone';
+      const byUser = new Map();
+      for (const t of insertedTasks) {
+        if (!t.user_id || String(t.user_id) === String(signedin_user)) continue;
+        if (!byUser.has(t.user_id)) byUser.set(t.user_id, []);
+        byUser.get(t.user_id).push(t.task_name);
+      }
+      for (const [uid, names] of byUser) {
+        const content = names.length === 1
+          ? `${actorName} assigned you a task: "${names[0]}".`
+          : `${actorName} assigned you ${names.length} tasks.`;
+        try {
+          await notify.insertNotification(connection, { senderId: signedin_user, receiverId: uid, content, url: '/task' });
+          await notify.sendPushToUser(connection, uid, { title: 'New Task Assigned', body: content, url: 'task', type: 'task' });
+        } catch (e) { logger.error('task-assign notify (user ' + uid + '): ' + e.message); }
+      }
+    } catch (e) { logger.error('task-assign notify: ' + e.message); }
+
     // If a single task was created, return just its ID to match frontend expectations
     const responseData = insertedTasks.length === 1 ? insertedTasks[0].id : insertedTasks;
     res.status(201).json({

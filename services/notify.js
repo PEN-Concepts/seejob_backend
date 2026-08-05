@@ -49,7 +49,7 @@ async function sendEmail(to, subject, text, html) {
 // Data-only FCM push to every device token a user has; prune tokens FCM reports as
 // dead. Adapted from cron/sendReminders.js sendToUser. `conn` may be a pool or a
 // transaction connection; defaults to the shared pool.
-async function sendPushToUser(conn, userId, { title, body, url }) {
+async function sendPushToUser(conn, userId, { title, body, url, type }) {
   const db = conn || pool;
   try {
     const [rows] = await db.query(
@@ -62,7 +62,7 @@ async function sendPushToUser(conn, userId, { title, body, url }) {
         await admin.messaging().send({
           token: tok,
           data: {
-            type: 'schedule',
+            type: String(type || 'schedule'),
             title: String(title || 'Schedule update'),
             body: String(body || ''),
             url: String(url || 'calendar'),

@@ -8,7 +8,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { getAccessInfo, isSameAccount, getActivePlanLevel } = require("../utils/access");
+const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
 const path = require("path");
 const multer = require("multer");
@@ -1063,6 +1063,35 @@ router.post("/login-otp-verify", async (req, res) => {
 
   } finally {
     if (connection) connection.release();
+  }
+});
+// TEMP owner-only push diagnostic: is Firebase Admin initialized on THIS server
+// (i.e. is serviceAccountKey.json present so pushes can actually send), and how
+// many device tokens does a given user have (default: the requester; ?user_id=
+// to check another). Distinguishes "push infra down on prod" from "recipient
+// never registered a token". Remove once the push investigation is closed.
+router.get("/push-status", auth.authenticateToken, async (req, res) => {
+  try {
+    const [urows] = await pool.query("SELECT email FROM `user` WHERE id = ? LIMIT 1", [req.user.id]);
+    const email = String((urows && urows[0] && urows[0].email) || "").toLowerCase();
+    if (!OWNER_EXEMPT_EMAILS.has(email)) {
+      return res.status(403).json({ code: "FORBIDDEN", message: "Owner only." });
+    }
+    const targetId = req.query.user_id ? Number(req.query.user_id) : req.user.id;
+    const [[tok]] = await pool.query(
+      "SELECT COUNT(*) AS c, MAX(COALESCE(updated_at, created_at)) AS last FROM user_device_tokens WHERE user_id = ?",
+      [targetId]
+    );
+    return res.json({
+      adminInitialized: admin.apps.length > 0,
+      serverTime: new Date().toISOString(),
+      userId: targetId,
+      tokenCount: tok ? tok.c : 0,
+      lastTokenAt: tok ? tok.last : null,
+    });
+  } catch (err) {
+    logger.error("push-status error: " + err.message);
+    return res.status(500).json({ message: "Internal server error" });
   }
 });
 router.post("/saveDeviceToken", auth.authenticateToken, async (req, res) => {
