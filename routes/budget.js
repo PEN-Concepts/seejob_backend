@@ -3,8 +3,8 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
-const { blockExpiredOwnRecord, requirePlan } = require("../utils/access");
+const { ensureOwnerTypeColumns, ensureSuggestedItemsTable, seedSuggestedItems } = require("../services/dbMigrations");
+const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 
 // Normalize the job_type/owner_type param to the discriminator stored on
 // division_lineitems. Anything that isn't an explicit 'lead' is a job.
@@ -340,7 +340,59 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpi
   }
 });
 
-// POST /divisions/:divisionId/lineitems 
+// GET /divisions/:divisionId/suggested-items — the static suggested-items
+// catalog for a division, filtered by project type. Powers the "Suggested
+// items for Division N" chips. ?job_type=residential -> R + B; commercial ->
+// C + B; anything else (or omitted) -> all. The FE subtracts items already on
+// the budget to compute the "N remaining" count.
+router.get("/divisions/:divisionId/suggested-items", auth.authenticateToken, requireJobBudgetFeature, async (req, res) => {
+  const divisionId = Number(req.params.divisionId);
+  const jt = String(req.query.job_type || "").toLowerCase();
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureSuggestedItemsTable(connection);
+    const params = [divisionId];
+    let sql = `SELECT id, division_id, code, name, applicability, sort_order
+               FROM suggested_items WHERE division_id = ?`;
+    if (jt === "residential") { sql += ` AND applicability IN ('R','B')`; }
+    else if (jt === "commercial") { sql += ` AND applicability IN ('C','B')`; }
+    sql += ` ORDER BY sort_order ASC, code ASC`;
+    const [rows] = await connection.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    logger.error("Error fetching suggested items", err);
+    res.status(500).json({ message: "Failed to fetch suggested items" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// GET /admin/seed-suggested-items — owner-only: (re)seed the suggested_items
+// reference library from data/suggestedItems.js (idempotent upsert). Used to
+// apply list edits after the initial auto-seed on table creation.
+router.get("/admin/seed-suggested-items", auth.authenticateToken, async (req, res) => {
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [urows] = await connection.query("SELECT email FROM `user` WHERE id = ? LIMIT 1", [req.user.id]);
+    const email = String((urows && urows[0] && urows[0].email) || "").toLowerCase();
+    if (!OWNER_EXEMPT_EMAILS.has(email)) {
+      return res.status(403).json({ code: "FORBIDDEN", message: "Owner only." });
+    }
+    await ensureSuggestedItemsTable(connection);
+    const count = await seedSuggestedItems(connection);
+    const [[{ total }]] = await connection.query("SELECT COUNT(*) AS total FROM suggested_items");
+    return res.json({ success: true, seeded: count, total });
+  } catch (err) {
+    logger.error("Error seeding suggested items", err);
+    return res.status(500).json({ message: "Failed to seed suggested items" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST /divisions/:divisionId/lineitems
 router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && (r.body.job_id != null ? r.body.job_id : (r.body.items && r.body.items[0] && r.body.items[0].job_id)), (r) => r.body && r.body.job_type), requireJobBudgetFeature, async (req, res) => {
   const { divisionId } = req.params;
   const created_by = res.locals.id;

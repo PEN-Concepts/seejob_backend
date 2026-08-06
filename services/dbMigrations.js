@@ -708,8 +708,57 @@ async function ensureGanttStageProgressTable(connection) {
   ganttStageProgressEnsured = true;
 }
 
+// Static CSI suggested-items reference library (powers the Job Budget
+// "Suggested items for Division N" chips). This is REFERENCE data, distinct
+// from division_lineitems (which holds per-job budget lines with job_id +
+// amounts). One row per catalog item, tagged R/C/B, linked to divisions by
+// division_id (= divisions.id = division_number).
+let suggestedItemsEnsured = false;
+
+/** Idempotent upsert of the full reference list (keyed by unique `code`).
+ *  Safe to re-run; updates name/applicability/division/order in place. */
+async function seedSuggestedItems(connection) {
+  const { ROWS } = require("../data/suggestedItems");
+  if (!ROWS.length) return 0;
+  const values = ROWS.map((r) => [r.division_id, r.code, r.name, r.applicability, r.sort_order]);
+  await connection.query(
+    `INSERT INTO suggested_items (division_id, code, name, applicability, sort_order)
+     VALUES ?
+     ON DUPLICATE KEY UPDATE
+       division_id = VALUES(division_id),
+       name = VALUES(name),
+       applicability = VALUES(applicability),
+       sort_order = VALUES(sort_order)`,
+    [values]
+  );
+  return ROWS.length;
+}
+
+async function ensureSuggestedItemsTable(connection) {
+  if (suggestedItemsEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS suggested_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      division_id INT NOT NULL,
+      code VARCHAR(16) NOT NULL,
+      name VARCHAR(255) NOT NULL,
+      applicability ENUM('R','C','B') NOT NULL DEFAULT 'B',
+      sort_order INT NOT NULL DEFAULT 0,
+      UNIQUE KEY uq_suggested_code (code),
+      INDEX idx_suggested_division (division_id)
+    ) ENGINE=InnoDB
+  `);
+  // First-time population only; re-seeds/updates go through seedSuggestedItems
+  // (the owner-only endpoint), so we never clobber the table on every request.
+  const [[{ c }]] = await connection.query("SELECT COUNT(*) AS c FROM suggested_items");
+  if (Number(c) === 0) await seedSuggestedItems(connection);
+  suggestedItemsEnsured = true;
+}
+
 module.exports = {
   dropUserMobileUniqueIndex,
+  ensureSuggestedItemsTable,
+  seedSuggestedItems,
   ensureGanttStageProgressTable,
   ensureUserAccountSourceColumn,
   ensureUserFirstLoginColumn,
