@@ -83,6 +83,23 @@ async function ensureOwnerTypeColumns(connection) {
   ownerTypeEnsured = true;
 }
 
+// Job Budget: `sub_cost` = what the subcontractor charges you for a line, stored
+// alongside `amount` (= what you bill the client / "Client budget"). Additive,
+// idempotent; runs once per process before a budget save/load.
+let subCostEnsured = false;
+async function ensureSubCostColumn(connection) {
+  if (subCostEnsured) return;
+  const [cols] = await connection.query(
+    `SHOW COLUMNS FROM division_lineitems LIKE 'sub_cost'`
+  );
+  if (!cols.length) {
+    await connection.query(
+      `ALTER TABLE division_lineitems ADD COLUMN sub_cost DECIMAL(12,2) NULL DEFAULT NULL`
+    );
+  }
+  subCostEnsured = true;
+}
+
 // Backend-scheduled reminders: rows the sendReminders cron scans each minute and
 // delivers via FCM, so alerts fire even when the app is closed. fire_at is stored
 // in UTC (compared against UTC_TIMESTAMP()) to be timezone-safe.
@@ -769,6 +786,7 @@ module.exports = {
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,
   ensureOwnerTypeColumns,
+  ensureSubCostColumn,
   ensureRemindersTable,
   ensureScheduleTemplateTables,
   ensurePlanLevelColumn,

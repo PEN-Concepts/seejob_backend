@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { ensureOwnerTypeColumns, ensureSuggestedItemsTable, seedSuggestedItems } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureSuggestedItemsTable, seedSuggestedItems } = require("../services/dbMigrations");
 const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 
 // Normalize the job_type/owner_type param to the discriminator stored on
@@ -258,8 +258,9 @@ router.get("/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.
   try {
     connection = await pool.getConnection();
     await ensureOwnerTypeColumns(connection);
+    await ensureSubCostColumn(connection);
     const [rows] = await connection.query(
-      `SELECT id, division_id, lineitem_description, amount, csi_number, job_id,
+      `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id,
               subcontractor_id, foreman_percent, paid_amount
        FROM division_lineitems
        WHERE job_id = ? AND owner_type = ?
@@ -319,8 +320,9 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpi
   try {
     connection = await pool.getConnection();
     await ensureOwnerTypeColumns(connection);
+    await ensureSubCostColumn(connection);
     const params = [];
-    let sql = `SELECT id, division_id, lineitem_description, amount, csi_number, job_id, contingency,
+    let sql = `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id, contingency,
                      subcontractor_id, foreman_percent, paid_amount
                FROM division_lineitems
                WHERE division_id = ?`;
@@ -424,6 +426,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
     const connection = await pool.getConnection();
     try {
       await ensureOwnerTypeColumns(connection);
+      await ensureSubCostColumn(connection);
       await connection.beginTransaction();
 
       const insertedItems = [];
@@ -433,6 +436,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           csi_number: it.csi_number ?? null,
           lineitem_description: it.lineitem_description ?? null,
           amount: it.amount ?? null,
+          sub_cost: it.sub_cost ?? null,
           contingency: it.contingency ?? null,
           subcontractor_id: it.subcontractor_id ?? null,
           foreman_percent: it.foreman_percent ?? 0,
@@ -453,7 +457,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           const prevPaid = prevRows && prevRows.length ? Number(prevRows[0].paid_amount) : null;
 
           const updateSql = `UPDATE division_lineitems
-            SET csi_number = ?, lineitem_description = ?, amount = ?, contingency = ?,
+            SET csi_number = ?, lineitem_description = ?, amount = ?, sub_cost = ?, contingency = ?,
                 subcontractor_id = ?, foreman_percent = ?, paid_amount = ?
             WHERE id = ? AND division_id = ? AND job_id = ? AND owner_type = ?`;
 
@@ -461,6 +465,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.csi_number,
             normalized.lineitem_description,
             normalized.amount,
+            normalized.sub_cost,
             normalized.contingency,
             normalized.subcontractor_id,
             normalized.foreman_percent,
@@ -578,10 +583,10 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           });
         } else {
           const insertSql = `INSERT INTO division_lineitems
-            (division_id, job_id, owner_type, csi_number, lineitem_description, amount, contingency,
+            (division_id, job_id, owner_type, csi_number, lineitem_description, amount, sub_cost, contingency,
              subcontractor_id, foreman_percent, paid_amount,
              created_at, created_by)
-            VALUES (?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
 
           const insertValues = [
             Number(divisionId),
@@ -590,6 +595,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.csi_number,
             normalized.lineitem_description,
             normalized.amount,
+            normalized.sub_cost,
             normalized.contingency,
             normalized.subcontractor_id,
             normalized.foreman_percent,
