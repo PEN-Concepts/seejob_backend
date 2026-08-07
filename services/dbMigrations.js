@@ -100,6 +100,46 @@ async function ensureSubCostColumn(connection) {
   subCostEnsured = true;
 }
 
+// Subcontractor payments recorded against a budget line item's sub_cost.
+// `division_lineitem_payments` holds the live payment rows; every create/edit/
+// delete is also logged to `division_lineitem_payment_audit` (old/new JSON
+// snapshot + who + when) so the audit trail survives even a hard delete. Both
+// are first-class migrated tables (unlike the older *_history tables).
+let paymentsTablesEnsured = false;
+async function ensurePaymentsTables(connection) {
+  if (paymentsTablesEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS division_lineitem_payments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      lineitem_id INT NOT NULL,
+      method VARCHAR(20) NOT NULL,
+      check_number VARCHAR(50) NULL,
+      payment_date DATE NOT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      created_by INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by INT NULL,
+      updated_at DATETIME NULL,
+      INDEX idx_dlp_lineitem (lineitem_id)
+    ) ENGINE=InnoDB
+  `);
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS division_lineitem_payment_audit (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      payment_id INT NULL,
+      lineitem_id INT NULL,
+      action VARCHAR(10) NOT NULL,
+      old_value TEXT NULL,
+      new_value TEXT NULL,
+      changed_by INT NULL,
+      changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_dlpa_lineitem (lineitem_id),
+      INDEX idx_dlpa_payment (payment_id)
+    ) ENGINE=InnoDB
+  `);
+  paymentsTablesEnsured = true;
+}
+
 // Backend-scheduled reminders: rows the sendReminders cron scans each minute and
 // delivers via FCM, so alerts fire even when the app is closed. fire_at is stored
 // in UTC (compared against UTC_TIMESTAMP()) to be timezone-safe.
@@ -787,6 +827,7 @@ module.exports = {
   ensureLeadBidStatusColumn,
   ensureOwnerTypeColumns,
   ensureSubCostColumn,
+  ensurePaymentsTables,
   ensureRemindersTable,
   ensureScheduleTemplateTables,
   ensurePlanLevelColumn,

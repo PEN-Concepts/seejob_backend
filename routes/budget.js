@@ -3,8 +3,12 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureSuggestedItemsTable, seedSuggestedItems } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureSubCostColumn, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems } = require("../services/dbMigrations");
 const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS } = require("../utils/access");
+const { requireAccountOwner } = require("../utils/adminGate");
+
+// Payment methods a subcontractor payment can be recorded under.
+const PAYMENT_METHODS = new Set(["check", "cash", "credit_card", "venmo", "wire"]);
 
 // Normalize the job_type/owner_type param to the discriminator stored on
 // division_lineitems. Anything that isn't an explicit 'lead' is a job.
@@ -669,6 +673,192 @@ router.get(
 );
 
 // DELETE /divisions/:divisionId/lineitems/:itemId
+// ---- Sub-contractor payments against a line item's sub_cost ----
+// Owner-only (requireAccountOwner) — INTERIM until the Employee Level system.
+// A payment ADJUSTS the line item's paid_amount (the "Paid to date" total); any
+// pre-existing paid_amount is preserved as an opening balance. Every mutation is
+// logged to division_lineitem_payment_audit.
+
+const paymentAmountAllowed = (v) => { const n = Number(v); return !isNaN(n) && n > 0; };
+
+async function adjustPaidAmount(connection, itemId, ownerType, delta) {
+  await connection.query(
+    `UPDATE division_lineitems
+       SET paid_amount = GREATEST(0, COALESCE(paid_amount, 0) + ?)
+     WHERE id = ? AND owner_type = ?`,
+    [delta, Number(itemId), ownerType]
+  );
+  const [rows] = await connection.query(
+    `SELECT paid_amount FROM division_lineitems WHERE id = ? AND owner_type = ? LIMIT 1`,
+    [Number(itemId), ownerType]
+  );
+  return rows.length ? Number(rows[0].paid_amount) : null;
+}
+
+// GET payments for a line item
+router.get("/lineitems/:itemId/payments", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const itemId = Number(req.params.itemId);
+  if (!itemId) return res.status(400).json({ message: "Invalid line item id" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensurePaymentsTables(connection);
+    const [rows] = await connection.query(
+      `SELECT p.id, p.lineitem_id, p.method, p.check_number, p.payment_date, p.amount,
+              p.created_at, p.created_by, p.updated_at, p.updated_by,
+              u.name AS created_by_name
+         FROM division_lineitem_payments p
+         LEFT JOIN user u ON u.id = p.created_by
+        WHERE p.lineitem_id = ?
+        ORDER BY p.payment_date ASC, p.id ASC`,
+      [itemId]
+    );
+    return res.json(rows || []);
+  } catch (err) {
+    logger.error("Error fetching payments", err);
+    return res.status(500).json({ message: "Failed to fetch payments" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST record a payment
+router.post("/lineitems/:itemId/payments", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const itemId = Number(req.params.itemId);
+  const changedBy = res.locals.id;
+  const { job_type, method, check_number, payment_date, amount } = req.body || {};
+  if (!itemId) return res.status(400).json({ message: "Invalid line item id" });
+  if (!PAYMENT_METHODS.has(String(method))) return res.status(400).json({ message: "Invalid payment method" });
+  if (!paymentAmountAllowed(amount)) return res.status(400).json({ message: "Amount must be greater than 0" });
+  if (!payment_date) return res.status(400).json({ message: "Payment date is required" });
+  const ownerType = ownerTypeOf(job_type);
+  const checkNo = String(method) === "check" ? (check_number ? String(check_number).trim() : null) : null;
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensurePaymentsTables(connection);
+    await ensureSubCostColumn(connection);
+    await connection.beginTransaction();
+    const [ins] = await connection.query(
+      `INSERT INTO division_lineitem_payments
+         (lineitem_id, method, check_number, payment_date, amount, created_by, created_at)
+       VALUES (?,?,?,?,?,?,NOW())`,
+      [itemId, String(method), checkNo, payment_date, Number(amount), changedBy ?? null]
+    );
+    const paidAmount = await adjustPaidAmount(connection, itemId, ownerType, Number(amount));
+    const newVal = JSON.stringify({ method: String(method), check_number: checkNo, payment_date, amount: Number(amount) });
+    await connection.query(
+      `INSERT INTO division_lineitem_payment_audit
+         (payment_id, lineitem_id, action, old_value, new_value, changed_by, changed_at)
+       VALUES (?,?, 'create', NULL, ?, ?, NOW())`,
+      [ins.insertId, itemId, newVal, changedBy ?? null]
+    );
+    await connection.commit();
+    return res.status(201).json({ id: ins.insertId, paid_amount: paidAmount });
+  } catch (err) {
+    if (connection) await connection.rollback();
+    logger.error("Error recording payment", err);
+    return res.status(500).json({ message: "Failed to record payment" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// PUT edit a payment
+router.put("/lineitems/:itemId/payments/:paymentId", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const itemId = Number(req.params.itemId);
+  const paymentId = Number(req.params.paymentId);
+  const changedBy = res.locals.id;
+  const { job_type, method, check_number, payment_date, amount } = req.body || {};
+  if (!itemId || !paymentId) return res.status(400).json({ message: "Invalid ids" });
+  if (!PAYMENT_METHODS.has(String(method))) return res.status(400).json({ message: "Invalid payment method" });
+  if (!paymentAmountAllowed(amount)) return res.status(400).json({ message: "Amount must be greater than 0" });
+  if (!payment_date) return res.status(400).json({ message: "Payment date is required" });
+  const ownerType = ownerTypeOf(job_type);
+  const checkNo = String(method) === "check" ? (check_number ? String(check_number).trim() : null) : null;
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensurePaymentsTables(connection);
+    await ensureSubCostColumn(connection);
+    await connection.beginTransaction();
+    const [prev] = await connection.query(
+      `SELECT method, check_number, payment_date, amount FROM division_lineitem_payments
+        WHERE id = ? AND lineitem_id = ? LIMIT 1`,
+      [paymentId, itemId]
+    );
+    if (!prev.length) { await connection.rollback(); return res.status(404).json({ message: "Payment not found" }); }
+    const oldAmount = Number(prev[0].amount);
+    await connection.query(
+      `UPDATE division_lineitem_payments
+          SET method = ?, check_number = ?, payment_date = ?, amount = ?, updated_by = ?, updated_at = NOW()
+        WHERE id = ? AND lineitem_id = ?`,
+      [String(method), checkNo, payment_date, Number(amount), changedBy ?? null, paymentId, itemId]
+    );
+    const paidAmount = await adjustPaidAmount(connection, itemId, ownerType, Number(amount) - oldAmount);
+    await connection.query(
+      `INSERT INTO division_lineitem_payment_audit
+         (payment_id, lineitem_id, action, old_value, new_value, changed_by, changed_at)
+       VALUES (?,?, 'edit', ?, ?, ?, NOW())`,
+      [paymentId, itemId,
+        JSON.stringify({ method: prev[0].method, check_number: prev[0].check_number, payment_date: prev[0].payment_date, amount: oldAmount }),
+        JSON.stringify({ method: String(method), check_number: checkNo, payment_date, amount: Number(amount) }),
+        changedBy ?? null]
+    );
+    await connection.commit();
+    return res.json({ id: paymentId, paid_amount: paidAmount });
+  } catch (err) {
+    if (connection) await connection.rollback();
+    logger.error("Error editing payment", err);
+    return res.status(500).json({ message: "Failed to edit payment" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// DELETE a payment
+router.delete("/lineitems/:itemId/payments/:paymentId", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const itemId = Number(req.params.itemId);
+  const paymentId = Number(req.params.paymentId);
+  const changedBy = res.locals.id;
+  const ownerType = ownerTypeOf(req.query.job_type);
+  if (!itemId || !paymentId) return res.status(400).json({ message: "Invalid ids" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensurePaymentsTables(connection);
+    await ensureSubCostColumn(connection);
+    await connection.beginTransaction();
+    const [prev] = await connection.query(
+      `SELECT method, check_number, payment_date, amount FROM division_lineitem_payments
+        WHERE id = ? AND lineitem_id = ? LIMIT 1`,
+      [paymentId, itemId]
+    );
+    if (!prev.length) { await connection.rollback(); return res.status(404).json({ message: "Payment not found" }); }
+    const oldAmount = Number(prev[0].amount);
+    await connection.query(`DELETE FROM division_lineitem_payments WHERE id = ? AND lineitem_id = ?`, [paymentId, itemId]);
+    const paidAmount = await adjustPaidAmount(connection, itemId, ownerType, -oldAmount);
+    await connection.query(
+      `INSERT INTO division_lineitem_payment_audit
+         (payment_id, lineitem_id, action, old_value, new_value, changed_by, changed_at)
+       VALUES (?,?, 'delete', ?, NULL, ?, NOW())`,
+      [paymentId, itemId,
+        JSON.stringify({ method: prev[0].method, check_number: prev[0].check_number, payment_date: prev[0].payment_date, amount: oldAmount }),
+        changedBy ?? null]
+    );
+    await connection.commit();
+    return res.json({ id: paymentId, paid_amount: paidAmount });
+  } catch (err) {
+    if (connection) await connection.rollback();
+    logger.error("Error deleting payment", err);
+    return res.status(500).json({ message: "Failed to delete payment" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, async (req, res) => {
   const { divisionId, itemId } = req.params;
   const { job_id, job_type } = req.query;
@@ -688,6 +878,17 @@ router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken
     } catch (e) {
       if (!(e && e.code === 'ER_NO_SUCH_TABLE')) {
         throw e;
+      }
+    }
+
+    // Sub-contractor payments recorded against this line item (+ their audit).
+    for (const tbl of ['division_lineitem_payments', 'division_lineitem_payment_audit']) {
+      try {
+        await connection.query(`DELETE FROM ${tbl} WHERE lineitem_id = ?`, [Number(itemId)]);
+      } catch (e) {
+        if (!(e && e.code === 'ER_NO_SUCH_TABLE')) {
+          throw e;
+        }
       }
     }
 

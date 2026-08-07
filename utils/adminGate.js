@@ -49,4 +49,40 @@ async function requireAdmin(req, res, next) {
   return next();
 }
 
-module.exports = { SUPER_ADMIN_ID, isAdminUser, requireAdmin };
+/**
+ * INTERIM access gate for sub-contractor PAYMENT actions (record/edit/delete).
+ * Payments are sensitive financial data, so — until the Employee Level (1-5)
+ * system exists — they are restricted to the ACCOUNT OWNER. Employees
+ * (user.category = 1) work under an owner and may edit budget lines, but may
+ * NOT touch payments. Owner-exempt/super-admin always pass. Fails CLOSED.
+ * TODO(employee-levels): replace with a proper per-level permission once the
+ * Employee Level system is built.
+ */
+const EMPLOYEE_CATEGORY = 1;
+async function requireAccountOwner(req, res, next) {
+  const userId = req.user && req.user.id ? req.user.id : (res.locals && res.locals.id);
+  if (!userId) {
+    return res.status(401).json({ code: "401", message: "Unauthorized", data: {} });
+  }
+  try {
+    if (await isAdminUser(userId)) return next(); // owner-exempt email / super-admin
+    const [rows] = await pool.query(
+      "SELECT category FROM `user` WHERE id = ? LIMIT 1",
+      [userId]
+    );
+    const category = rows.length ? Number(rows[0].category) : null;
+    if (category === EMPLOYEE_CATEGORY) {
+      return res.status(403).json({
+        code: "403",
+        message: "Payments can only be recorded or changed by the account owner.",
+        data: {},
+      });
+    }
+    return next();
+  } catch (err) {
+    logger.error("requireAccountOwner error: " + err.message);
+    return res.status(403).json({ code: "403", message: "Forbidden", data: {} }); // fail closed
+  }
+}
+
+module.exports = { SUPER_ADMIN_ID, isAdminUser, requireAdmin, requireAccountOwner };
