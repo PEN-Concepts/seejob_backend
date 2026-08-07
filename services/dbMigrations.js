@@ -100,6 +100,24 @@ async function ensureSubCostColumn(connection) {
   subCostEnsured = true;
 }
 
+// Job Budget: `in_house` = the line item is done by the company's own crew
+// (the viewing account itself) instead of a subcontractor. Mutually exclusive
+// with subcontractor_id (when in_house=1 the sub id is forced NULL). Additive,
+// idempotent; runs before a budget save/load.
+let inHouseEnsured = false;
+async function ensureInHouseColumn(connection) {
+  if (inHouseEnsured) return;
+  const [cols] = await connection.query(
+    `SHOW COLUMNS FROM division_lineitems LIKE 'in_house'`
+  );
+  if (!cols.length) {
+    await connection.query(
+      `ALTER TABLE division_lineitems ADD COLUMN in_house TINYINT NOT NULL DEFAULT 0`
+    );
+  }
+  inHouseEnsured = true;
+}
+
 // Subcontractor payments recorded against a budget line item's sub_cost.
 // `division_lineitem_payments` holds the live payment rows; every create/edit/
 // delete is also logged to `division_lineitem_payment_audit` (old/new JSON
@@ -928,6 +946,7 @@ module.exports = {
   ensureLeadBidStatusColumn,
   ensureOwnerTypeColumns,
   ensureSubCostColumn,
+  ensureInHouseColumn,
   ensurePaymentsTables,
   ensureJobNumberColumn,
   backfillJobNumbers,

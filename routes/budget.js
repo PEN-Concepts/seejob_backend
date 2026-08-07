@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { ensureOwnerTypeColumns, ensureSubCostColumn, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems } = require("../services/dbMigrations");
 const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
 
@@ -173,6 +173,35 @@ router.get(
   }
 );
 
+// The VIEWING account's own company name — for the pinned "In House" budget
+// option. Resolves the account OWNER (so an employee sees the owner's company,
+// not their own blank business), then returns that owner's business name.
+router.get(
+  "/company-name",
+  auth.authenticateToken,
+  requireJobBudgetFeature,
+  async (req, res) => {
+    let connection;
+    try {
+      const userId = (req.user && req.user.id) ? req.user.id : res.locals.id;
+      connection = await pool.getConnection();
+      const ownerId = await resolveBillingUserId(connection, userId);
+      const [rows] = await connection.query(
+        "SELECT business, organization_name, name FROM user WHERE id = ? LIMIT 1",
+        [ownerId]
+      );
+      const r = rows && rows[0] ? rows[0] : {};
+      const companyName = String(r.business || r.organization_name || r.name || "").trim();
+      return res.json({ company_name: companyName });
+    } catch (err) {
+      logger.error("Error fetching company name", err);
+      return res.status(500).json({ message: "Failed to fetch company name" });
+    } finally {
+      if (connection) connection.release();
+    }
+  }
+);
+
 router.get(
   "/lineitems/:itemId/pay-history",
   auth.authenticateToken,
@@ -263,9 +292,10 @@ router.get("/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.
     connection = await pool.getConnection();
     await ensureOwnerTypeColumns(connection);
     await ensureSubCostColumn(connection);
+    await ensureInHouseColumn(connection);
     const [rows] = await connection.query(
       `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id,
-              subcontractor_id, foreman_percent, paid_amount
+              subcontractor_id, in_house, foreman_percent, paid_amount
        FROM division_lineitems
        WHERE job_id = ? AND owner_type = ?
        ORDER BY division_id ASC, id ASC`,
@@ -325,9 +355,10 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpi
     connection = await pool.getConnection();
     await ensureOwnerTypeColumns(connection);
     await ensureSubCostColumn(connection);
+    await ensureInHouseColumn(connection);
     const params = [];
     let sql = `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id, contingency,
-                     subcontractor_id, foreman_percent, paid_amount
+                     subcontractor_id, in_house, foreman_percent, paid_amount
                FROM division_lineitems
                WHERE division_id = ?`;
     params.push(divisionId);
@@ -431,6 +462,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
     try {
       await ensureOwnerTypeColumns(connection);
       await ensureSubCostColumn(connection);
+      await ensureInHouseColumn(connection);
       await connection.beginTransaction();
 
       const insertedItems = [];
@@ -442,7 +474,9 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           amount: it.amount ?? null,
           sub_cost: it.sub_cost ?? null,
           contingency: it.contingency ?? null,
-          subcontractor_id: it.subcontractor_id ?? null,
+          in_house: it.in_house ? 1 : 0,
+          // in-house and a subcontractor are mutually exclusive
+          subcontractor_id: it.in_house ? null : (it.subcontractor_id ?? null),
           foreman_percent: it.foreman_percent ?? 0,
           paid_amount: it.paid_amount ?? 0,
           _pay_percent_applied: it.pay_percent_applied ?? null,
@@ -462,7 +496,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
 
           const updateSql = `UPDATE division_lineitems
             SET csi_number = ?, lineitem_description = ?, amount = ?, sub_cost = ?, contingency = ?,
-                subcontractor_id = ?, foreman_percent = ?, paid_amount = ?
+                subcontractor_id = ?, in_house = ?, foreman_percent = ?, paid_amount = ?
             WHERE id = ? AND division_id = ? AND job_id = ? AND owner_type = ?`;
 
           const updateValues = [
@@ -472,6 +506,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.sub_cost,
             normalized.contingency,
             normalized.subcontractor_id,
+            normalized.in_house,
             normalized.foreman_percent,
             normalized.paid_amount,
             normalized.id,
@@ -588,9 +623,9 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
         } else {
           const insertSql = `INSERT INTO division_lineitems
             (division_id, job_id, owner_type, csi_number, lineitem_description, amount, sub_cost, contingency,
-             subcontractor_id, foreman_percent, paid_amount,
+             subcontractor_id, in_house, foreman_percent, paid_amount,
              created_at, created_by)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
 
           const insertValues = [
             Number(divisionId),
@@ -602,6 +637,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.sub_cost,
             normalized.contingency,
             normalized.subcontractor_id,
+            normalized.in_house,
             normalized.foreman_percent,
             normalized.paid_amount,
             created_by ?? null,
