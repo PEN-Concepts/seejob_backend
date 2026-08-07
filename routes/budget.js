@@ -722,6 +722,34 @@ router.get("/lineitems/:itemId/payments", auth.authenticateToken, blockExpiredOw
   }
 });
 
+// GET the payment audit trail for a line item (owner-only). Rows persist even
+// after their payment is deleted, so this is the durable "who changed what,
+// when" record for create/edit/delete of subcontractor payments.
+router.get("/lineitems/:itemId/payment-audit", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const itemId = Number(req.params.itemId);
+  if (!itemId) return res.status(400).json({ message: "Invalid line item id" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensurePaymentsTables(connection);
+    const [rows] = await connection.query(
+      `SELECT a.id, a.payment_id, a.lineitem_id, a.action, a.old_value, a.new_value,
+              a.changed_by, a.changed_at, u.name AS changed_by_name
+         FROM division_lineitem_payment_audit a
+         LEFT JOIN user u ON u.id = a.changed_by
+        WHERE a.lineitem_id = ?
+        ORDER BY a.changed_at ASC, a.id ASC`,
+      [itemId]
+    );
+    return res.json(rows || []);
+  } catch (err) {
+    logger.error("Error fetching payment audit", err);
+    return res.status(500).json({ message: "Failed to fetch payment audit" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // POST record a payment
 router.post("/lineitems/:itemId/payments", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
   const itemId = Number(req.params.itemId);
