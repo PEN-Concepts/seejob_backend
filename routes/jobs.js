@@ -12,7 +12,7 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn, ensureGanttStageProgressTable } = require("../services/dbMigrations");
+const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn, ensureGanttStageProgressTable, assignJobNumberIfMissing } = require("../services/dbMigrations");
 const { pickJobColor, backfillJobColors } = require("../services/jobColorPalette");
 
 // Normalize an owner_type/job_type param: anything but 'lead' is a job. Lets the
@@ -772,6 +772,13 @@ const [result] = await connection.execute(
       await connection.query("UPDATE job SET color = ? WHERE id = ?", [jobColor, result.insertId]);
     } catch (colorErr) {
       logger.error("Job create colour assign failed:", colorErr);
+    }
+
+    // Assign the company-wide sequential Job Number at creation (main path).
+    try {
+      await assignJobNumberIfMissing(connection, result.insertId);
+    } catch (jobNumErr) {
+      logger.error("assignJobNumberIfMissing failed:", jobNumErr);
     }
 
     // Typed-in client info becomes a Saved contact automatically

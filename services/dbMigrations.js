@@ -140,6 +140,107 @@ async function ensurePaymentsTables(connection) {
   paymentsTablesEnsured = true;
 }
 
+// ---- Company-wide sequential Job Number + per-job invoice numbering ----
+// "Company" = an account owner (a user who is not an employee) plus the members
+// they invited (user.created_by = ownerId, category = 1). A job's company owner
+// is resolved from its created_by. Job Number is sequential WITHIN a company.
+
+// Resolve the account-owner id for a set of creator user ids (employees map to
+// their inviter; everyone else maps to themselves).
+async function resolveOwnersFor(connection, creatorIds) {
+  const map = new Map();
+  const ids = [...new Set(creatorIds.filter((x) => x != null).map(Number))];
+  if (!ids.length) return map;
+  const [rows] = await connection.query(
+    `SELECT id, created_by, category FROM \`user\` WHERE id IN (${ids.map(() => '?').join(',')})`,
+    ids
+  );
+  const byId = new Map(rows.map((r) => [Number(r.id), r]));
+  for (const id of ids) {
+    const u = byId.get(id);
+    const owner = u && Number(u.category) === 1 && u.created_by ? Number(u.created_by) : id;
+    map.set(id, owner);
+  }
+  return map;
+}
+
+let jobNumberColumnEnsured = false;
+async function ensureJobNumberColumn(connection) {
+  if (jobNumberColumnEnsured) return;
+  const [cols] = await connection.query("SHOW COLUMNS FROM `job` LIKE 'job_number'");
+  if (!cols.length) {
+    await connection.query("ALTER TABLE `job` ADD COLUMN `job_number` INT NULL DEFAULT NULL");
+  }
+  await backfillJobNumbers(connection);
+  jobNumberColumnEnsured = true;
+}
+
+// One-time (idempotent) backfill: every job without a job_number gets one,
+// sequential per company in creation-date order, continuing after any numbers
+// already assigned for that company. Re-running is a no-op (only fills NULLs).
+async function backfillJobNumbers(connection) {
+  const [nulls] = await connection.query(
+    "SELECT id, created_by FROM `job` WHERE job_number IS NULL ORDER BY created_at ASC, id ASC"
+  );
+  if (!nulls.length) return;
+  // Current max per company from already-numbered jobs.
+  const [numbered] = await connection.query(
+    "SELECT created_by, job_number FROM `job` WHERE job_number IS NOT NULL"
+  );
+  const creators = [...nulls.map((j) => j.created_by), ...numbered.map((j) => j.created_by)];
+  const owners = await resolveOwnersFor(connection, creators);
+  const maxByOwner = new Map();
+  for (const j of numbered) {
+    const owner = owners.get(Number(j.created_by)) ?? Number(j.created_by);
+    maxByOwner.set(owner, Math.max(maxByOwner.get(owner) || 0, Number(j.job_number) || 0));
+  }
+  for (const j of nulls) {
+    const owner = owners.get(Number(j.created_by)) ?? Number(j.created_by);
+    const next = (maxByOwner.get(owner) || 0) + 1;
+    maxByOwner.set(owner, next);
+    await connection.query("UPDATE `job` SET job_number = ? WHERE id = ? AND job_number IS NULL", [next, j.id]);
+  }
+}
+
+// Assign the next company-sequential job_number to one job if it doesn't have
+// one yet. Returns the job's number. Safe to call repeatedly.
+async function assignJobNumberIfMissing(connection, jobId) {
+  await ensureJobNumberColumn(connection);
+  const [rows] = await connection.query("SELECT created_by, job_number FROM `job` WHERE id = ? LIMIT 1", [Number(jobId)]);
+  if (!rows.length) return null;
+  if (rows[0].job_number != null) return Number(rows[0].job_number);
+  const owners = await resolveOwnersFor(connection, [rows[0].created_by]);
+  const ownerId = owners.get(Number(rows[0].created_by)) ?? Number(rows[0].created_by);
+  const [[{ next }]] = await connection.query(
+    `SELECT COALESCE(MAX(job_number), 0) + 1 AS next FROM \`job\`
+      WHERE created_by IN (SELECT id FROM \`user\` WHERE id = ? OR (created_by = ? AND category = 1))`,
+    [ownerId, ownerId]
+  );
+  await connection.query("UPDATE `job` SET job_number = ? WHERE id = ? AND job_number IS NULL", [next, Number(jobId)]);
+  const [[chk]] = await connection.query("SELECT job_number FROM `job` WHERE id = ? LIMIT 1", [Number(jobId)]);
+  return chk ? Number(chk.job_number) : next;
+}
+
+// Per-job client invoices. Numbering (invoice_seq) is sequential per job from 1.
+// Invoice CONTENT (amounts/PDF/client details) is a separate feature; this table
+// + the numbering + status slot are the entry point.
+let invoicesTableEnsured = false;
+async function ensureInvoicesTable(connection) {
+  if (invoicesTableEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS job_invoices (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      job_id INT NOT NULL,
+      invoice_seq INT NOT NULL,
+      status VARCHAR(20) NULL,
+      created_by INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_ji_job (job_id)
+    ) ENGINE=InnoDB
+  `);
+  invoicesTableEnsured = true;
+}
+
 // Backend-scheduled reminders: rows the sendReminders cron scans each minute and
 // delivers via FCM, so alerts fire even when the app is closed. fire_at is stored
 // in UTC (compared against UTC_TIMESTAMP()) to be timezone-safe.
@@ -828,6 +929,10 @@ module.exports = {
   ensureOwnerTypeColumns,
   ensureSubCostColumn,
   ensurePaymentsTables,
+  ensureJobNumberColumn,
+  backfillJobNumbers,
+  assignJobNumberIfMissing,
+  ensureInvoicesTable,
   ensureRemindersTable,
   ensureScheduleTemplateTables,
   ensurePlanLevelColumn,
