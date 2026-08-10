@@ -2270,6 +2270,14 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       : (req.body.name || '');
   if (!name || !email) return res.status(400).json({ message: 'Name and email are required' });
 
+  // Client-type contacts must NOT be auto-invited: the invite link currently
+  // lands on a broken/generic page (there is no client portal login yet). We
+  // still save the contact, but never fire the "Invitation to Join SeeJobRun"
+  // email for a client. Other types (subcontractor/staff) are unaffected.
+  // Revisit once the client portal is live — see CCP-client-portal-*.
+  const isClientContact = String(user_type || '').trim().toLowerCase() === 'client';
+  const inviteAllowed = !!send_invite && !isClientContact;
+
   let connection;
   try {
     connection = await pool.getConnection();
@@ -2323,13 +2331,13 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       [userId, contactUserId, contactUserId, userId]
     );
 
-    const targetStatus = send_invite ? 'Pending' : 'Saved';
+    const targetStatus = inviteAllowed ? 'Pending' : 'Saved';
     if (existingLink) {
       if (existingLink.status === 'Accept') {
         return res.status(409).json({ message: 'This person is already in your contacts.' });
       }
       // Upgrade Saved → Pending when inviting; never downgrade
-      if (send_invite && existingLink.status === 'Saved') {
+      if (inviteAllowed && existingLink.status === 'Saved') {
         await connection.query(`UPDATE contact SET status = 'Pending', updated_at = NOW() WHERE id = ?`, [existingLink.id]);
       }
     } else {
@@ -2340,7 +2348,7 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       );
     }
 
-    if (send_invite) {
+    if (inviteAllowed) {
       // Track for signup sync + send the email
       const [[existingInvite]] = await connection.query(
         `SELECT id FROM invited_contacts WHERE email = ? LIMIT 1`, [email]
@@ -2361,7 +2369,7 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       }
     }
 
-    res.json({ contact_user_id: contactUserId, status: targetStatus, email_sent: !!send_invite });
+    res.json({ contact_user_id: contactUserId, status: targetStatus, email_sent: inviteAllowed });
   } catch (err) {
     logger.error('save-contact error:', err);
     if (err && err.code === 'ER_DUP_ENTRY') {
@@ -2509,10 +2517,16 @@ router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req,
     if (!link) return res.status(404).json({ message: 'No pending contact found' });
 
     const [[contactUser]] = await connection.query(
-      'SELECT name, email FROM user WHERE id = ?', [contactUserId]
+      'SELECT name, email, category, role FROM user WHERE id = ?', [contactUserId]
     );
     if (!contactUser || !contactUser.email || contactUser.email.endsWith('@no-email.invalid')) {
       return res.status(404).json({ message: 'This contact has no email on file yet — add one in Edit first.' });
+    }
+    // Never (re)send an invite to a Client — the invite link has no valid
+    // destination until the client portal login exists. Scoped to clients only;
+    // subcontractor/staff invites still work.
+    if (Number(contactUser.category) === 3 || Number(contactUser.role) === 3) {
+      return res.status(400).json({ email_sent: false, message: 'Client invitations are paused until the client portal is available.' });
     }
 
     const [[existingInvite]] = await connection.query(
