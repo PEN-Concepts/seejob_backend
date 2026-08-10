@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables } = require("../services/dbMigrations");
 const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
 
@@ -14,6 +14,35 @@ const PAYMENT_METHODS = new Set(["check", "cash", "credit_card", "venmo", "wire"
 // division_lineitems. Anything that isn't an explicit 'lead' is a job.
 function ownerTypeOf(v) {
   return String(v || "").toLowerCase() === "lead" ? "lead" : "job";
+}
+
+// Is this job's budget locked? Fail-open (false) on any error so a migration
+// hiccup never blocks legitimate edits.
+async function isBudgetLocked(connection, jobId, ownerType) {
+  try {
+    await ensureBudgetLockTables(connection);
+    const [rows] = await connection.query(
+      "SELECT locked FROM budget_locks WHERE job_id = ? AND owner_type = ? LIMIT 1",
+      [Number(jobId), ownerType]
+    );
+    return rows.length ? !!Number(rows[0].locked) : false;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Display name for lock/unlock audit ("who").
+async function userDisplayName(connection, userId) {
+  try {
+    const [rows] = await connection.query(
+      "SELECT name, email FROM `user` WHERE id = ? LIMIT 1",
+      [userId]
+    );
+    if (!rows.length) return null;
+    return String(rows[0].name || rows[0].email || "").trim() || null;
+  } catch (_) {
+    return null;
+  }
 }
 
 async function resolveBillingUserId(connection, userId) {
@@ -347,6 +376,9 @@ router.post("/contingency", auth.authenticateToken, blockExpiredOwnRecord((r) =>
     connection = await pool.getConnection();
     await ensureOwnerTypeColumns(connection);
     await ensureBudgetPercentColumns(connection);
+    if (await isBudgetLocked(connection, job_id, ownerType)) {
+      return res.status(423).json({ message: "Budget is locked. Unlock it or make the change through a signed Change Order.", locked: true });
+    }
     const [result] = await connection.query(
       `UPDATE division_lineitems SET ${setParts.join(', ')} WHERE job_id = ? AND owner_type = ?`,
       [...setVals, job_id, ownerType]
@@ -484,6 +516,10 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
       await ensureSubCostColumn(connection);
       await ensureInHouseColumn(connection);
       await ensureBudgetPercentColumns(connection);
+      if (await isBudgetLocked(connection, job_id, ownerType)) {
+        // The inner finally releases the connection.
+        return res.status(423).json({ message: "Budget is locked. Unlock it or make the change through a signed Change Order.", locked: true });
+      }
       await connection.beginTransaction();
 
       const insertedItems = [];
@@ -961,6 +997,10 @@ router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken
     connection = await pool.getConnection();
     await ensureOwnerTypeColumns(connection);
 
+    if (job_id && await isBudgetLocked(connection, Number(job_id), ownerTypeOf(job_type))) {
+      return res.status(423).json({ message: "Budget is locked. Unlock it or make the change through a signed Change Order.", locked: true });
+    }
+
     await connection.beginTransaction();
 
     try {
@@ -1021,6 +1061,118 @@ router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken
     } catch (_) {}
     logger.error("Error deleting line item", err);
     return res.status(500).json({ message: "Failed to delete line item" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ---- Budget lock (fixed baseline) ----
+// GET current lock state + the frozen snapshot for a job's Budget tab.
+router.get("/lock-state", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, async (req, res) => {
+  const { job_id, job_type } = req.query;
+  if (!job_id) {
+    return res.status(400).json({ message: "job_id is required" });
+  }
+  const ownerType = ownerTypeOf(job_type);
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureBudgetLockTables(connection);
+    const [rows] = await connection.query(
+      "SELECT locked, snapshot, locked_by, locked_by_name, locked_at FROM budget_locks WHERE job_id = ? AND owner_type = ? LIMIT 1",
+      [Number(job_id), ownerType]
+    );
+    if (!rows.length) {
+      return res.json({ locked: false, snapshot: null, locked_by: null, locked_by_name: null, locked_at: null });
+    }
+    const row = rows[0];
+    let snap = null;
+    try { snap = row.snapshot ? JSON.parse(row.snapshot) : null; } catch (_) { snap = null; }
+    return res.json({
+      locked: !!Number(row.locked),
+      snapshot: snap,
+      locked_by: row.locked_by,
+      locked_by_name: row.locked_by_name,
+      locked_at: row.locked_at,
+    });
+  } catch (err) {
+    logger.error("Error fetching budget lock state", err);
+    return res.status(500).json({ message: "Failed to fetch lock state" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST /lock — freeze the budget. Anyone with budget edit access may lock;
+// unlocking is owner-only (below). Stores the summary snapshot + logs the action.
+router.post("/lock", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, async (req, res) => {
+  const body = req.body || {};
+  const { job_id, job_type } = body;
+  if (!job_id) {
+    return res.status(400).json({ message: "job_id is required" });
+  }
+  const ownerType = ownerTypeOf(job_type);
+  const userId = res.locals.id;
+  let snapshot;
+  try { snapshot = body.snapshot ? JSON.stringify(body.snapshot) : null; } catch (_) { snapshot = null; }
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureBudgetLockTables(connection);
+    const name = await userDisplayName(connection, userId);
+    await connection.query(
+      `INSERT INTO budget_locks (job_id, owner_type, locked, snapshot, locked_by, locked_by_name, locked_at, updated_at)
+       VALUES (?, ?, 1, ?, ?, ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE locked = 1, snapshot = VALUES(snapshot), locked_by = VALUES(locked_by),
+         locked_by_name = VALUES(locked_by_name), locked_at = NOW(), updated_at = NOW()`,
+      [Number(job_id), ownerType, snapshot, userId, name]
+    );
+    await connection.query(
+      "INSERT INTO budget_lock_audit (job_id, owner_type, action, changed_by, changed_by_name) VALUES (?, ?, 'lock', ?, ?)",
+      [Number(job_id), ownerType, userId, name]
+    );
+    const [[row]] = await connection.query(
+      "SELECT locked_at, locked_by_name FROM budget_locks WHERE job_id = ? AND owner_type = ? LIMIT 1",
+      [Number(job_id), ownerType]
+    );
+    return res.json({ locked: true, locked_at: row && row.locked_at, locked_by_name: row && row.locked_by_name });
+  } catch (err) {
+    logger.error("Error locking budget", err);
+    return res.status(500).json({ message: "Failed to lock budget" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST /unlock — owner-only (requireAccountOwner, fail-closed). Restores live/
+// editable behavior and logs the action.
+router.post("/unlock", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const body = req.body || {};
+  const { job_id, job_type } = body;
+  if (!job_id) {
+    return res.status(400).json({ message: "job_id is required" });
+  }
+  const ownerType = ownerTypeOf(job_type);
+  const userId = res.locals.id;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureBudgetLockTables(connection);
+    const name = await userDisplayName(connection, userId);
+    await connection.query(
+      `INSERT INTO budget_locks (job_id, owner_type, locked, locked_by, locked_by_name, locked_at, updated_at)
+       VALUES (?, ?, 0, ?, ?, NULL, NOW())
+       ON DUPLICATE KEY UPDATE locked = 0, updated_at = NOW()`,
+      [Number(job_id), ownerType, userId, name]
+    );
+    await connection.query(
+      "INSERT INTO budget_lock_audit (job_id, owner_type, action, changed_by, changed_by_name) VALUES (?, ?, 'unlock', ?, ?)",
+      [Number(job_id), ownerType, userId, name]
+    );
+    return res.json({ locked: false });
+  } catch (err) {
+    logger.error("Error unlocking budget", err);
+    return res.status(500).json({ message: "Failed to unlock budget" });
   } finally {
     if (connection) connection.release();
   }

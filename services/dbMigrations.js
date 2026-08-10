@@ -174,6 +174,45 @@ async function ensurePaymentsTables(connection) {
   paymentsTablesEnsured = true;
 }
 
+// ---- Budget lock (fixed baseline) ----
+// Once a project starts being built, the account owner (interim; Employee Levels
+// pending) can LOCK the Budget tab: the summary card's calculated values freeze
+// as a stored snapshot and every division line item becomes read-only. Only a
+// signed Change Order (or an owner Unlock) may change it afterward. `budget_locks`
+// holds one row per (job_id, owner_type); `budget_lock_audit` logs every
+// lock/unlock (who + when).
+let budgetLockTablesEnsured = false;
+async function ensureBudgetLockTables(connection) {
+  if (budgetLockTablesEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS budget_locks (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      job_id INT NOT NULL,
+      owner_type VARCHAR(10) NOT NULL DEFAULT 'job',
+      locked TINYINT NOT NULL DEFAULT 0,
+      snapshot TEXT NULL,
+      locked_by INT NULL,
+      locked_by_name VARCHAR(255) NULL,
+      locked_at DATETIME NULL,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_budget_lock (job_id, owner_type)
+    ) ENGINE=InnoDB
+  `);
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS budget_lock_audit (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      job_id INT NOT NULL,
+      owner_type VARCHAR(10) NOT NULL DEFAULT 'job',
+      action VARCHAR(10) NOT NULL,
+      changed_by INT NULL,
+      changed_by_name VARCHAR(255) NULL,
+      changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_bla_job (job_id, owner_type)
+    ) ENGINE=InnoDB
+  `);
+  budgetLockTablesEnsured = true;
+}
+
 // ---- Company-wide sequential Job Number + per-job invoice numbering ----
 // "Company" = an account owner (a user who is not an employee) plus the members
 // they invited (user.created_by = ownerId, category = 1). A job's company owner
@@ -965,6 +1004,7 @@ module.exports = {
   ensureInHouseColumn,
   ensureBudgetPercentColumns,
   ensurePaymentsTables,
+  ensureBudgetLockTables,
   ensureJobNumberColumn,
   backfillJobNumbers,
   assignJobNumberIfMissing,
