@@ -213,6 +213,67 @@ async function ensureBudgetLockTables(connection) {
   budgetLockTablesEnsured = true;
 }
 
+// ---- Change orders → Budget (job-linked, signed COs feed the Budget tab) ----
+// System B `change_orders` is provisioned outside this codebase, so we ALTER it
+// idempotently: `job_id` links a Change Order to a job (set only for CO-mode
+// documents), `budget_sub_cost` is the manually-entered "what it costs you" for
+// the CO's Budget row, and `budget_paid_amount` is the running Paid-to-date
+// (maintained from change_order_payments, mirroring division_lineitems).
+let changeOrderBudgetColsEnsured = false;
+async function ensureChangeOrderBudgetColumns(connection) {
+  if (changeOrderBudgetColsEnsured) return;
+  const adds = [
+    ['job_id', 'INT NULL'],
+    ['budget_sub_cost', 'DECIMAL(12,2) NULL'],
+    ['budget_paid_amount', 'DECIMAL(12,2) NOT NULL DEFAULT 0'],
+  ];
+  for (const [col, def] of adds) {
+    const [cols] = await connection.query(`SHOW COLUMNS FROM change_orders LIKE '${col}'`);
+    if (!cols.length) {
+      await connection.query(`ALTER TABLE change_orders ADD COLUMN ${col} ${def}`);
+    }
+  }
+  changeOrderBudgetColsEnsured = true;
+}
+
+// Payments recorded against a signed change order's Budget row — mirrors
+// division_lineitem_payments (+ audit) so the CO "$ Pay" reuses the exact same
+// mechanic. Keyed by change_order_id.
+let changeOrderPaymentTablesEnsured = false;
+async function ensureChangeOrderPaymentTables(connection) {
+  if (changeOrderPaymentTablesEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS change_order_payments (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      change_order_id INT NOT NULL,
+      method VARCHAR(20) NOT NULL,
+      check_number VARCHAR(50) NULL,
+      payment_date DATE NOT NULL,
+      amount DECIMAL(12,2) NOT NULL,
+      created_by INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by INT NULL,
+      updated_at DATETIME NULL,
+      INDEX idx_cop_co (change_order_id)
+    ) ENGINE=InnoDB
+  `);
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS change_order_payment_audit (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      payment_id INT NULL,
+      change_order_id INT NULL,
+      action VARCHAR(10) NOT NULL,
+      old_value TEXT NULL,
+      new_value TEXT NULL,
+      changed_by INT NULL,
+      changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_copa_co (change_order_id),
+      INDEX idx_copa_payment (payment_id)
+    ) ENGINE=InnoDB
+  `);
+  changeOrderPaymentTablesEnsured = true;
+}
+
 // ---- Company-wide sequential Job Number + per-job invoice numbering ----
 // "Company" = an account owner (a user who is not an employee) plus the members
 // they invited (user.created_by = ownerId, category = 1). A job's company owner
@@ -1005,6 +1066,8 @@ module.exports = {
   ensureBudgetPercentColumns,
   ensurePaymentsTables,
   ensureBudgetLockTables,
+  ensureChangeOrderBudgetColumns,
+  ensureChangeOrderPaymentTables,
   ensureJobNumberColumn,
   backfillJobNumbers,
   assignJobNumberIfMissing,

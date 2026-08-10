@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
 const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
 
@@ -1061,6 +1061,253 @@ router.delete("/divisions/:divisionId/lineitems/:itemId", auth.authenticateToken
     } catch (_) {}
     logger.error("Error deleting line item", err);
     return res.status(500).json({ message: "Failed to delete line item" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ---- Change orders → Budget (signed, job-linked COs feed the Budget tab) ----
+
+// Recompute a change order's Budget Paid-to-date after a payment op (mirrors
+// adjustPaidAmount for line items).
+async function adjustCoPaidAmount(connection, coId, delta) {
+  await connection.query(
+    `UPDATE change_orders
+       SET budget_paid_amount = GREATEST(0, COALESCE(budget_paid_amount, 0) + ?)
+     WHERE id = ?`,
+    [delta, Number(coId)]
+  );
+  const [rows] = await connection.query(
+    `SELECT budget_paid_amount FROM change_orders WHERE id = ? LIMIT 1`,
+    [Number(coId)]
+  );
+  return rows.length ? Number(rows[0].budget_paid_amount) : null;
+}
+
+// GET the company's jobs for the Quote Manager job picker (id + name + number),
+// resolved to the account owner so employees see the owner's jobs too.
+router.get("/jobs", auth.authenticateToken, async (req, res) => {
+  const userId = res.locals.id;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const ownerId = await resolveBillingUserId(connection, userId);
+    const [rows] = await connection.query(
+      `SELECT id, job_name AS name, job_number
+         FROM job
+        WHERE status = 1
+          AND (created_by = ? OR created_by IN (SELECT id FROM \`user\` WHERE created_by = ?))
+        ORDER BY job_number ASC, id ASC`,
+      [ownerId, ownerId]
+    );
+    return res.json(rows || []);
+  } catch (err) {
+    logger.error("Error fetching jobs for picker", err);
+    return res.status(500).json({ message: "Failed to fetch jobs" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// GET signed, job-linked change orders for a job's Budget tab. Draft/Sent/
+// job-less COs are excluded (only status SIGNED with this job_id).
+router.get("/change-orders", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, async (req, res) => {
+  const { job_id } = req.query;
+  if (!job_id) return res.status(400).json({ message: "job_id is required" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureChangeOrderBudgetColumns(connection);
+    const [rows] = await connection.query(
+      `SELECT id, change_order_number, client_name, grand_total_amount,
+              budget_sub_cost, budget_paid_amount
+         FROM change_orders
+        WHERE job_id = ? AND UPPER(status) = 'SIGNED'
+        ORDER BY id ASC`,
+      [Number(job_id)]
+    );
+    return res.json((rows || []).map((r) => ({
+      id: r.id,
+      change_order_number: r.change_order_number,
+      client_name: r.client_name,
+      base_amount: Number(r.grand_total_amount) || 0,
+      sub_cost: r.budget_sub_cost != null ? Number(r.budget_sub_cost) : null,
+      paid_amount: Number(r.budget_paid_amount) || 0,
+    })));
+  } catch (err) {
+    logger.error("Error fetching budget change orders", err);
+    return res.status(500).json({ message: "Failed to fetch change orders" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// POST set a change order's manually-entered Budget sub cost. Not lock-guarded —
+// adding/costing a signed CO is exactly how a locked budget is extended.
+router.post("/change-orders/:coId/sub-cost", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, async (req, res) => {
+  const coId = Number(req.params.coId);
+  if (!coId) return res.status(400).json({ message: "Invalid change order id" });
+  const raw = req.body && req.body.sub_cost;
+  const subCost = raw == null || raw === "" ? null : Number(raw);
+  if (subCost != null && (isNaN(subCost) || subCost < 0)) return res.status(400).json({ message: "Invalid sub cost" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureChangeOrderBudgetColumns(connection);
+    const [result] = await connection.query(
+      `UPDATE change_orders SET budget_sub_cost = ? WHERE id = ?`,
+      [subCost, coId]
+    );
+    if (!result.affectedRows) return res.status(404).json({ message: "Change order not found" });
+    return res.json({ id: coId, sub_cost: subCost });
+  } catch (err) {
+    logger.error("Error updating change order sub cost", err);
+    return res.status(500).json({ message: "Failed to update sub cost" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// ---- Change-order payments (mirror of the line-item Pay mechanic) ----
+router.get("/change-orders/:coId/payments", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const coId = Number(req.params.coId);
+  if (!coId) return res.status(400).json({ message: "Invalid change order id" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureChangeOrderPaymentTables(connection);
+    const [rows] = await connection.query(
+      `SELECT p.id, p.change_order_id, p.method, p.check_number, p.payment_date, p.amount,
+              p.created_at, p.created_by, p.updated_at, p.updated_by, u.name AS created_by_name
+         FROM change_order_payments p
+         LEFT JOIN user u ON u.id = p.created_by
+        WHERE p.change_order_id = ?
+        ORDER BY p.payment_date ASC, p.id ASC`,
+      [coId]
+    );
+    return res.json(rows || []);
+  } catch (err) {
+    logger.error("Error fetching CO payments", err);
+    return res.status(500).json({ message: "Failed to fetch payments" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+router.post("/change-orders/:coId/payments", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const coId = Number(req.params.coId);
+  const changedBy = res.locals.id;
+  const { method, check_number, payment_date, amount } = req.body || {};
+  if (!coId) return res.status(400).json({ message: "Invalid change order id" });
+  if (!PAYMENT_METHODS.has(String(method))) return res.status(400).json({ message: "Invalid payment method" });
+  if (!paymentAmountAllowed(amount)) return res.status(400).json({ message: "Amount must be greater than 0" });
+  if (!payment_date) return res.status(400).json({ message: "Payment date is required" });
+  const checkNo = String(method) === "check" ? (check_number ? String(check_number).trim() : null) : null;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureChangeOrderPaymentTables(connection);
+    await ensureChangeOrderBudgetColumns(connection);
+    await connection.beginTransaction();
+    const [ins] = await connection.query(
+      `INSERT INTO change_order_payments (change_order_id, method, check_number, payment_date, amount, created_by, created_at)
+       VALUES (?,?,?,?,?,?,NOW())`,
+      [coId, String(method), checkNo, payment_date, Number(amount), changedBy ?? null]
+    );
+    const paidAmount = await adjustCoPaidAmount(connection, coId, Number(amount));
+    await connection.query(
+      `INSERT INTO change_order_payment_audit (payment_id, change_order_id, action, old_value, new_value, changed_by, changed_at)
+       VALUES (?,?, 'create', NULL, ?, ?, NOW())`,
+      [ins.insertId, coId, JSON.stringify({ method: String(method), check_number: checkNo, payment_date, amount: Number(amount) }), changedBy ?? null]
+    );
+    await connection.commit();
+    return res.status(201).json({ id: ins.insertId, paid_amount: paidAmount });
+  } catch (err) {
+    if (connection) await connection.rollback();
+    logger.error("Error recording CO payment", err);
+    return res.status(500).json({ message: "Failed to record payment" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+router.put("/change-orders/:coId/payments/:paymentId", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const coId = Number(req.params.coId);
+  const paymentId = Number(req.params.paymentId);
+  const changedBy = res.locals.id;
+  const { method, check_number, payment_date, amount } = req.body || {};
+  if (!coId || !paymentId) return res.status(400).json({ message: "Invalid ids" });
+  if (!PAYMENT_METHODS.has(String(method))) return res.status(400).json({ message: "Invalid payment method" });
+  if (!paymentAmountAllowed(amount)) return res.status(400).json({ message: "Amount must be greater than 0" });
+  if (!payment_date) return res.status(400).json({ message: "Payment date is required" });
+  const checkNo = String(method) === "check" ? (check_number ? String(check_number).trim() : null) : null;
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureChangeOrderPaymentTables(connection);
+    await connection.beginTransaction();
+    const [prev] = await connection.query(
+      `SELECT method, check_number, payment_date, amount FROM change_order_payments WHERE id = ? AND change_order_id = ? LIMIT 1`,
+      [paymentId, coId]
+    );
+    if (!prev.length) { await connection.rollback(); return res.status(404).json({ message: "Payment not found" }); }
+    const oldAmount = Number(prev[0].amount);
+    await connection.query(
+      `UPDATE change_order_payments SET method = ?, check_number = ?, payment_date = ?, amount = ?, updated_by = ?, updated_at = NOW()
+        WHERE id = ? AND change_order_id = ?`,
+      [String(method), checkNo, payment_date, Number(amount), changedBy ?? null, paymentId, coId]
+    );
+    const paidAmount = await adjustCoPaidAmount(connection, coId, Number(amount) - oldAmount);
+    await connection.query(
+      `INSERT INTO change_order_payment_audit (payment_id, change_order_id, action, old_value, new_value, changed_by, changed_at)
+       VALUES (?,?, 'edit', ?, ?, ?, NOW())`,
+      [paymentId, coId,
+        JSON.stringify({ method: prev[0].method, check_number: prev[0].check_number, payment_date: prev[0].payment_date, amount: oldAmount }),
+        JSON.stringify({ method: String(method), check_number: checkNo, payment_date, amount: Number(amount) }),
+        changedBy ?? null]
+    );
+    await connection.commit();
+    return res.json({ id: paymentId, paid_amount: paidAmount });
+  } catch (err) {
+    if (connection) await connection.rollback();
+    logger.error("Error editing CO payment", err);
+    return res.status(500).json({ message: "Failed to edit payment" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+router.delete("/change-orders/:coId/payments/:paymentId", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, requireAccountOwner, async (req, res) => {
+  const coId = Number(req.params.coId);
+  const paymentId = Number(req.params.paymentId);
+  const changedBy = res.locals.id;
+  if (!coId || !paymentId) return res.status(400).json({ message: "Invalid ids" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureChangeOrderPaymentTables(connection);
+    await connection.beginTransaction();
+    const [prev] = await connection.query(
+      `SELECT method, check_number, payment_date, amount FROM change_order_payments WHERE id = ? AND change_order_id = ? LIMIT 1`,
+      [paymentId, coId]
+    );
+    if (!prev.length) { await connection.rollback(); return res.status(404).json({ message: "Payment not found" }); }
+    const oldAmount = Number(prev[0].amount);
+    await connection.query(`DELETE FROM change_order_payments WHERE id = ? AND change_order_id = ?`, [paymentId, coId]);
+    const paidAmount = await adjustCoPaidAmount(connection, coId, -oldAmount);
+    await connection.query(
+      `INSERT INTO change_order_payment_audit (payment_id, change_order_id, action, old_value, new_value, changed_by, changed_at)
+       VALUES (?,?, 'delete', ?, NULL, ?, NOW())`,
+      [paymentId, coId,
+        JSON.stringify({ method: prev[0].method, check_number: prev[0].check_number, payment_date: prev[0].payment_date, amount: oldAmount }),
+        changedBy ?? null]
+    );
+    await connection.commit();
+    return res.json({ id: paymentId, paid_amount: paidAmount });
+  } catch (err) {
+    if (connection) await connection.rollback();
+    logger.error("Error deleting CO payment", err);
+    return res.status(500).json({ message: "Failed to delete payment" });
   } finally {
     if (connection) connection.release();
   }

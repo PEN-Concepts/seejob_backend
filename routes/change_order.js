@@ -12,6 +12,7 @@ const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp, nowFor, todayFor, getUserTz } = require("../common/timdate");
 const PDFDocument = require("pdfkit");
 const { v4: uuidv4 } = require("uuid");
+const { ensureChangeOrderBudgetColumns } = require("../services/dbMigrations");
 
 async function sendInviteEmail(toEmail, clientName) {
   if (!toEmail) return;
@@ -388,11 +389,14 @@ router.post('/change-orders', auth.authenticateToken, denyExpiredFreeWrites, asy
       company_name,
       company_address,
       company_logo,
+      job_id,
       items,
     } = req.body;
 
     const safeCompanyId = company_id ? Number(company_id) : 0;
     const safeStatus = status || 'DRAFT';
+    // job_id links a Change Order to a job so signed COs feed that job's Budget.
+    const safeJobId = job_id != null && job_id !== '' && !isNaN(Number(job_id)) ? Number(job_id) : null;
 
     if (!client_name) {
       return res.status(200).json({ code: '400', message: 'client_name is required', data: {} });
@@ -432,6 +436,7 @@ router.post('/change-orders', auth.authenticateToken, denyExpiredFreeWrites, asy
     const publicToken = uuidv4();
 
     connection = await pool.getConnection();
+    await ensureChangeOrderBudgetColumns(connection);
     await connection.beginTransaction();
 
     const insertSql = `INSERT INTO change_orders (
@@ -451,6 +456,7 @@ router.post('/change-orders', auth.authenticateToken, denyExpiredFreeWrites, asy
       company_name,
       company_address,
       company_logo,
+      job_id,
       subtotal_amount,
       total_cost_amount,
       gross_profit_amount,
@@ -459,7 +465,7 @@ router.post('/change-orders', auth.authenticateToken, denyExpiredFreeWrites, asy
       public_token,
       created_at,
       updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 
     const [insertResult] = await connection.execute(insertSql, [
       safeCompanyId,
@@ -478,6 +484,7 @@ router.post('/change-orders', auth.authenticateToken, denyExpiredFreeWrites, asy
       company_name || null,
       company_address || null,
       company_logo || null,
+      safeJobId,
       subtotal_amount,
       total_cost_amount,
       gross_profit_amount,
@@ -798,6 +805,7 @@ router.put('/change-orders/:id', auth.authenticateToken, async (req, res) => {
       company_name,
       company_address,
       company_logo,
+      job_id,
       items,
     } = req.body;
 
@@ -810,6 +818,8 @@ router.put('/change-orders/:id', auth.authenticateToken, async (req, res) => {
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(200).json({ code: '400', message: 'At least one line item is required', data: {} });
     }
+
+    const safeJobId = job_id != null && job_id !== '' && !isNaN(Number(job_id)) ? Number(job_id) : null;
 
     const computeLine = (it) => {
       const qty = Number(it.qty ?? 0);
@@ -837,6 +847,7 @@ router.put('/change-orders/:id', auth.authenticateToken, async (req, res) => {
     const grand_total_amount = subtotal_amount;
 
     connection = await pool.getConnection();
+    await ensureChangeOrderBudgetColumns(connection);
     await connection.beginTransaction();
 
     const [existing] = await connection.execute(
@@ -863,6 +874,7 @@ router.put('/change-orders/:id', auth.authenticateToken, async (req, res) => {
            company_name = ?,
            company_address = ?,
            company_logo = ?,
+           job_id = ?,
            subtotal_amount = ?,
            total_cost_amount = ?,
            gross_profit_amount = ?,
@@ -884,6 +896,7 @@ router.put('/change-orders/:id', auth.authenticateToken, async (req, res) => {
         company_name || null,
         company_address || null,
         company_logo || null,
+        safeJobId,
         subtotal_amount,
         total_cost_amount,
         gross_profit_amount,
