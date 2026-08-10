@@ -1093,35 +1093,38 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
 
 
 router.get("/get_client", auth.authenticateToken, async (req, res) => {
-  const loggedInUserId = req.user.id;
-  //console.log(loggedInUserId);
+  // Account-wide, matching the Contacts list: resolve the account owner
+  // (working_id) and return the account's CLIENT contacts (category = 3). The
+  // old query only matched status='Accept' against the logged-in user directly,
+  // so account clients (stored as 'Saved' contacts, and owned account-wide) were
+  // never listed — the dropdown showed only "+ Add New Client".
+  const ownerId = res.locals.working_id || req.user.id;
   let connection;
   try {
     connection = await pool.getConnection();
 
-    const [rows] = await connection.execute(
+    const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
+    const [rows] = await connection.query(
       `
-      SELECT 
-    u.id,
-    u.name,
-    u.mobile,
-    u.email
-FROM contact c
-JOIN user u 
-    ON u.id = (
-        CASE 
-            WHEN c.request_by = ? THEN c.request_to
-            ELSE c.request_by
-        END
-    )
-WHERE 
-    (c.request_by = ? OR c.request_to = ?)
-    AND c.status = 'Accept' AND u.category = 3;
+      SELECT DISTINCT u.id, u.name, u.mobile, u.email
+      FROM contact c
+      JOIN \`user\` u ON (u.id = IF(c.request_by IN ${ACCOUNT}, c.request_to, c.request_by))
+      WHERE u.category = 3
+        AND (
+          (c.status = 'Accept' AND (c.request_by IN ${ACCOUNT} OR c.request_to IN ${ACCOUNT}))
+          OR (c.status IN ('Pending','Saved') AND c.request_by IN ${ACCOUNT})
+        )
+      ORDER BY u.name ASC
       `,
-      [loggedInUserId, loggedInUserId, loggedInUserId]
+      [ownerId, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId]
     );
 
-    res.json(rows);
+    // A person can have multiple contact rows (bidirectional / Saved+Accept) —
+    // collapse to one entry per user id.
+    const seen = new Set();
+    const out = [];
+    for (const r of rows) { if (!seen.has(r.id)) { seen.add(r.id); out.push(r); } }
+    res.json(out);
 
   } catch (error) {
     res.status(500).json({
@@ -1199,12 +1202,19 @@ router.get(
 
 //get inspectors
 router.get("/get_inspectors", auth.authenticateToken, async (req, res) => {
+  // Scope inspectors to the account (owner + employees) — the query previously
+  // had NO ownership filter, so it would surface every account's inspectors.
+  const ownerId = res.locals.working_id || req.user.id;
   let connection;
   try {
     connection = await pool.getConnection();
 
-    const [rows] = await connection.execute(
-      `SELECT * FROM user where subcategory = 13 ORDER BY created_at DESC`
+    const [rows] = await connection.query(
+      `SELECT * FROM \`user\`
+        WHERE subcategory = 13
+          AND created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+        ORDER BY created_at DESC`,
+      [ownerId, ownerId]
     );
     res.json(rows);
   } catch (err) {
