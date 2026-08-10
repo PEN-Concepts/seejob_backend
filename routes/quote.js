@@ -711,7 +711,9 @@ router.get('/quotes', auth.authenticateToken, requireQuoteAccess, async (req, re
 
     const params = [effectiveCreatorId];
 if (loggedInEmail) {
-      where[0] = `(created_by_user_id = ? OR LOWER(client_email) = ?)`;
+      // Clients (matched by email) must NEVER see DRAFT documents — only the
+      // creator sees their own drafts. Mirrors the change-orders list.
+      where[0] = `(created_by_user_id = ? OR (LOWER(client_email) = ? AND status <> 'DRAFT'))`;
       params.push(loggedInEmail);
     }
     if (q) {
