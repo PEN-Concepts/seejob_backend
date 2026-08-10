@@ -315,6 +315,22 @@ const ITEMS = [
   ['16-210', 'Fire Alarm System', 'C'],
   ['16-220', 'Data/Telecom Rough-In', 'C'],
   ['16-230', 'Site Lighting (Commercial)', 'C'],
+
+  // ---- Additions 2026-08-08 (owner CCP): Project Supervision + allowance items.
+  //      Appended (not inserted) so existing rows' sort_order is unchanged; new
+  //      codes are the next free slot in each division, no collisions. ----
+  ['01-660', 'Project Supervision', 'B'],
+  ['05-220', 'Balcony Railing Allowance', 'B'],
+  ['05-230', 'Wrought Iron Allowance', 'B'],
+  ['06-240', 'Finish Lumber Allowance', 'B'],
+  ['06-250', 'Finish Carpentry Allowance', 'B'],
+  ['09-270', 'Tile & Grout Allowance', 'B'],
+  ['09-280', 'Flooring Allowance', 'B'],
+  ['10-240', 'Fireplace Allowance', 'B'],
+  ['10-250', 'Bath Accessories Allowance', 'B'],
+  ['11-220', 'Appliance Allowance', 'B'],
+  ['15-250', 'Plumbing Fixture Allowance', 'B'],
+  ['16-240', 'Light Fixture Allowance', 'B'],
 ];
 
 // Normalized rows for insertion: { division_id, code, name, applicability, sort_order }.

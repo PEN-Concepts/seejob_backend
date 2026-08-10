@@ -118,6 +118,22 @@ async function ensureInHouseColumn(connection) {
   inHouseEnsured = true;
 }
 
+// Job Budget summary-card percentages, stored per line item like `contingency`
+// (same value across a job's rows, updated by job_id). overhead_percent (O&P,
+// calc off Building Cost) + gl_percent (General liability, calc off Client
+// budget). Additive, idempotent.
+let budgetPercentEnsured = false;
+async function ensureBudgetPercentColumns(connection) {
+  if (budgetPercentEnsured) return;
+  for (const col of ['overhead_percent', 'gl_percent']) {
+    const [cols] = await connection.query(`SHOW COLUMNS FROM division_lineitems LIKE '${col}'`);
+    if (!cols.length) {
+      await connection.query(`ALTER TABLE division_lineitems ADD COLUMN ${col} DECIMAL(7,3) NOT NULL DEFAULT 0`);
+    }
+  }
+  budgetPercentEnsured = true;
+}
+
 // Subcontractor payments recorded against a budget line item's sub_cost.
 // `division_lineitem_payments` holds the live payment rows; every create/edit/
 // delete is also logged to `division_lineitem_payment_audit` (old/new JSON
@@ -947,6 +963,7 @@ module.exports = {
   ensureOwnerTypeColumns,
   ensureSubCostColumn,
   ensureInHouseColumn,
+  ensureBudgetPercentColumns,
   ensurePaymentsTables,
   ensureJobNumberColumn,
   backfillJobNumbers,
