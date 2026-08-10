@@ -1093,7 +1093,7 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
     connection = await pool.getConnection();
     const ownerId = await resolveBillingUserId(connection, userId);
     const [rows] = await connection.query(
-      `SELECT id, job_name AS name, job_number
+      `SELECT id, name, job_number
          FROM job
         WHERE status = 1
           AND (created_by = ? OR created_by IN (SELECT id FROM \`user\` WHERE created_by = ?))
