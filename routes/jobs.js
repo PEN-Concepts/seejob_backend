@@ -1098,10 +1098,20 @@ router.get("/get_client", auth.authenticateToken, async (req, res) => {
   // old query only matched status='Accept' against the logged-in user directly,
   // so account clients (stored as 'Saved' contacts, and owned account-wide) were
   // never listed — the dropdown showed only "+ Add New Client".
-  const ownerId = res.locals.working_id || req.user.id;
   let connection;
   try {
     connection = await pool.getConnection();
+
+    // Resolve the TOP account owner (the GC), not the signed-in sub-user: an
+    // employee/admin under the GC must see the WHOLE company's clients — including
+    // ones the GC OWNER created (e.g. an invited client). `res.locals.working_id`
+    // can resolve to the sub-user itself (e.g. 86), which rooted the account at the
+    // sub-user and hid the owner's clients (e.g. Joshua, created_by = the GC = 74).
+    const [[ownerRow]] = await connection.query(
+      'SELECT COALESCE(created_by, id) AS ownerId FROM `user` WHERE id = ? LIMIT 1',
+      [req.user.id]
+    );
+    const ownerId = Number(ownerRow && ownerRow.ownerId) || res.locals.working_id || req.user.id;
 
     const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
     // An account's clients get linked TWO ways, and the dropdown must show both:
