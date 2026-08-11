@@ -1630,9 +1630,16 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
     let hasActiveSubscription = false;
     let subscription = null;
     let features = [];
+    // hasAccess = "this account may use the app right now" — true for an active
+    // subscription, a live free trial, a paying account, OR an owner-exempt/
+    // internal account. Mirrors utils/access.js. The login flow uses this to gate
+    // Subs/Clients so they are NOT locked out during the GC owner's free trial
+    // (a trial grants access even with no card / no active subscription yet).
+    let hasAccess = false;
 
     if (subRows.length) {
       hasActiveSubscription = true;
+      hasAccess = true;
       subscription = subRows[0];
 
       const [featureRows] = await connection.query(
@@ -1652,7 +1659,8 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
       } catch (e) {
         mode = "paid";
       }
-      if (mode === "paid" || mode === "trial_active") {
+      hasAccess = mode === "paid" || mode === "trial_active";
+      if (hasAccess) {
         const [allRows] = await connection.query(
           "SELECT DISTINCT feature_key FROM plan_features"
         );
@@ -1693,6 +1701,7 @@ router.get("/billing/status", authenticateToken, async (req, res) => {
       hasPaymentMethod,
       paymentMethod,
       hasActiveSubscription,
+      hasAccess,
       subscription,
       features,
       needs_reverification: needsReverification,

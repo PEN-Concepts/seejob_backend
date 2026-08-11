@@ -282,6 +282,21 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     const bs103 = await request(app).get('/api/payments/billing/status').set('Authorization', tok(103));
     ok(bs103.body && bs103.body.needs_reverification === true, 'billing/status: flagged user (103) -> needs_reverification true', JSON.stringify({ nr: bs103.body && bs103.body.needs_reverification, has: bs103.body && bs103.body.hasActiveSubscription }));
     ok(bs103.body && !!bs103.body.reverification_due_at, 'billing/status: returns the grace deadline for the banner', String(bs103.body && bs103.body.reverification_due_at));
+
+    // --- hasAccess: gates Sub/Client login so they are NOT locked out during the GC's trial ---
+    const bs101 = await request(app).get('/api/payments/billing/status').set('Authorization', tok(101));
+    ok(bs101.body && bs101.body.hasAccess === true && bs101.body.hasActiveSubscription === false,
+      'billing/status: TRIAL account -> hasAccess true even with NO active subscription (collaborator not locked out during GC trial)',
+      JSON.stringify({ hasAccess: bs101.body && bs101.body.hasAccess, hasSub: bs101.body && bs101.body.hasActiveSubscription }));
+    const bs102 = await request(app).get('/api/payments/billing/status').set('Authorization', tok(102));
+    ok(bs102.body && bs102.body.hasAccess === false,
+      'billing/status: EXPIRED-free account -> hasAccess false (collaborator correctly blocked once trial is over)',
+      JSON.stringify({ hasAccess: bs102.body && bs102.body.hasAccess }));
+    const bs100acc = await request(app).get('/api/payments/billing/status').set('Authorization', tok(100));
+    ok(bs100acc.body && bs100acc.body.hasAccess === true,
+      'billing/status: OWNER-EXEMPT account -> hasAccess true',
+      JSON.stringify({ hasAccess: bs100acc.body && bs100acc.body.hasAccess }));
+
     // Owner-exempt (100): flag it, but they must NOT be prompted.
     await conn.query("UPDATE subscriptions SET user_id=100, needs_reverification=1, status='canceled' WHERE authorize_subscription_id='ARBGOLD'");
     const bs100 = await request(app).get('/api/payments/billing/status').set('Authorization', tok(100));
