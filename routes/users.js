@@ -9,7 +9,7 @@ const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS } = require("../utils/access");
-const { ensureOwnerTypeColumns } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureContactAuthorityColumn } = require("../services/dbMigrations");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -1535,6 +1535,31 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
 
   try {
     connection = await pool.getConnection();
+
+    // ── Contact-book VISIBILITY (data-exposure fix) ──────────────────────────
+    // This endpoint feeds every "Assign To" / person picker. Previously it scoped
+    // the contact/employee/team branches to `working_user_id` (the GC OWNER), so a
+    // sub-user (client/sub/employee — whose working_id resolves to the owner) saw
+    // the OWNER'S ENTIRE contact network. New model:
+    //   • The account OWNER, and Employees explicitly granted authority
+    //     (can_view_all_contacts=1), see the WHOLE account book (scope = owner).
+    //   • Everyone else (clients, subcontractors, employees WITHOUT authority) see
+    //     only THEIR OWN contacts + themselves + the account owner (scope = self).
+    // The "owner" UNION branch always uses working_user_id, so restricted users
+    // still see the GC (Poul) — just not his other subs/clients/employees.
+    await ensureContactAuthorityColumn(connection);
+    const isOwner = working_user_id === user_id;
+    let canViewAll = isOwner;
+    if (!isOwner) {
+      const [[me]] = await connection.query(
+        "SELECT category, can_view_all_contacts FROM `user` WHERE id = ? LIMIT 1",
+        [user_id]
+      );
+      // Authority is grantable ONLY to Employees (category 1); clients/subs never.
+      canViewAll = Number(me && me.category) === 1 && Number(me && me.can_view_all_contacts) === 1;
+    }
+    const scope_id = canViewAll ? working_user_id : user_id;
+
     const query = `
     (
       SELECT
@@ -1705,15 +1730,15 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
     `;
 
     const [rows] = await connection.query(query, [
-      working_user_id,
+      scope_id,         // contact branch 1  (self OR whole account)
       user_id,
-      working_user_id,
+      scope_id,         // contact branch 2
       user_id,
-      working_user_id,
+      scope_id,         // employees branch
       user_id,
-      user_id,          // "self" branch
-      working_user_id,  // "account owner" branch
-      working_user_id,
+      user_id,          // "self" branch (always the caller)
+      working_user_id,  // "account owner" branch (always the GC → restricted users still see Poul)
+      scope_id,         // teams branch
       user_id,
     ]);
 

@@ -844,6 +844,27 @@ async function dropUserMobileUniqueIndex(connection) {
 // 'placeholder_client'. Additive + idempotent; new rows are stamped at their
 // insert site, existing rows are backfilled once from the strongest signal.
 let accountSourceEnsured = false;
+let contactAuthorityEnsured = false;
+
+/**
+ * Per-EMPLOYEE "authority" flag: when 1, an employee may see the WHOLE account's
+ * contact book (all subs/clients/employees) in Assign-To pickers; when 0 (default)
+ * they — like clients and subcontractors — see only their own contacts + the
+ * account owner. Only the owner can grant it, and only to Employees. Clients/subs
+ * are NEVER granted it. (There was no existing column/right that meant this.)
+ */
+async function ensureContactAuthorityColumn(connection) {
+  if (contactAuthorityEnsured) return;
+  const [cols] = await connection.query(
+    "SHOW COLUMNS FROM `user` LIKE 'can_view_all_contacts'"
+  );
+  if (!cols.length) {
+    await connection.query(
+      "ALTER TABLE `user` ADD COLUMN can_view_all_contacts TINYINT(1) NOT NULL DEFAULT 0"
+    );
+  }
+  contactAuthorityEnsured = true;
+}
 async function ensureUserAccountSourceColumn(connection) {
   if (accountSourceEnsured) return;
   const [cols] = await connection.query(
@@ -1053,6 +1074,7 @@ module.exports = {
   seedSuggestedItems,
   ensureGanttStageProgressTable,
   ensureUserAccountSourceColumn,
+  ensureContactAuthorityColumn,
   ensureUserFirstLoginColumn,
   ensureSubscriptionPaymentColumns,
   ensurePaymentReceiptsTable,
