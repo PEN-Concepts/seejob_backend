@@ -11,7 +11,12 @@ router.get("/getcategory", async (req, res) => {
     try {
         connection = await pool.getConnection();
 
-        query = "SELECT * FROM category where id <> 1 order by id Desc";
+        // Public sign-up "I am a" dropdown. ONLY General contractor (4), Client
+        // (3), and Subcontractor (2) may be self-selected. Employee (1) and Admin
+        // (5) are excluded — Admin especially, since letting an anonymous person
+        // pick it is a privilege-escalation hole. Enforced again server-side in
+        // users.js /register (PUBLIC_SIGNUP_CATEGORIES).
+        query = "SELECT * FROM category where id IN (2, 3, 4) order by id Desc";
         const [rows] = await connection.query(query);
         res.status(200).json({ code: "200", message: "getcategory data successfully", data: rows });
         return;

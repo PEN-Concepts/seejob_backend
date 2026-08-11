@@ -433,45 +433,67 @@ router.post("/register", async (req, res) => {
   const r = req.body;
   let connection;
 
+  // SECURITY: public sign-up may ONLY create these account types. Never Employee
+  // (1) or Admin (5) — those are provisioned internally, not by an anonymous
+  // person filling out the public form. Defence-in-depth behind the dropdown
+  // filter (publics.js /getcategory), so a hand-crafted request can't self-grant
+  // Admin even if the UI is bypassed.
+  const PUBLIC_SIGNUP_CATEGORIES = new Set([2, 3, 4]);
+  if (!PUBLIC_SIGNUP_CATEGORIES.has(Number(r.category))) {
+    return res.status(403).json({
+      code: "403",
+      message: "This account type cannot be created from public sign-up.",
+      data: {},
+    });
+  }
+
   try {
     connection = await pool.getConnection();
 
     // ðŸ”¥ PASSWORD LOGIC
-    let plainPassword = null;
-    let hashedPassword = null;
-
-    if (Number(r.category) === 5) {
-      plainPassword = generateRandomPassword(10);
-      hashedPassword = await bcrypt.hash(plainPassword, 10);
-    }
+    // Always store a NON-NULL password hash. Public users sign in via OTP and
+    // never use this password, but `user.password` is NOT NULL in prod — passing
+    // null here is exactly what threw ER_BAD_NULL_ERROR and returned "Internal
+    // server error" for every sign-up. Generating a random hash satisfies the
+    // constraint without ever leaving an empty/guessable password on the row.
+    const plainPassword = generateRandomPassword(10);
+    const hashedPassword = await bcrypt.hash(plainPassword, 10);
 
     // ðŸ”¥ OTP
     const otp = generateOTP();
 
     // ðŸ”¥ INSERT USER
+    // Column set mirrors the proven-working internal create-user insert (which
+    // inserts these same columns in prod every day). The old public insert
+    // OMITTED street/city/state/zipcode/contact_note (all present & NOT NULL in
+    // prod) and bound employment_type/rate, which is what broke sign-up. Public
+    // callers don't supply address fields, so they default to empty strings.
     const query = `
-      INSERT INTO user 
-      (name, email, password, role, mobile, category, subcategory, business, trade, otp, otp_status, created_at, employment_type, rate, social_security, created_by, must_change_password)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO user
+      (name, email, password, role, mobile, category, subcategory, business, trade, social_security, street, city, state, zipcode, contact_note, otp, otp_status, created_at, created_by, must_change_password)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const [resultInsert] = await connection.query(query, [
       r.name,
       r.email,
       hashedPassword,
-      r.subcategory, // role
+      r.subcategory, // role (mirrors the internal create-user insert)
       r.mobile,
       r.category,
       r.subcategory,
       r.business_name,
       r.trade,
+      r.social_security_num || r.social_security || "",
+      r.street_address || "",
+      r.city || "",
+      r.state || "",
+      r.zipcode || "",
+      r.contact_notes || "",
       otp,
       1,
       currentTimestamp,
-      r.employment_type,
-      r.rate,
-      r.social_security,
-      r.created_by,
+      r.created_by || null,
       1 // âœ… ALWAYS FORCE PASSWORD CHANGE
     ]);
 
