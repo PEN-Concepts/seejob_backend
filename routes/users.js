@@ -581,6 +581,7 @@ router.post("/login-pin", async (req, res) => {
       name: user.name,
       email: user.email,
       role: user.role,
+      category: user.category ?? null, // reliable client discriminator (3 = client)
       working_id:
         [2,3,4,5].includes(user.role) ? user.created_by : user.id,
       otp_status: user.otp_status,
@@ -661,6 +662,7 @@ router.post("/login", async (req, res) => {
         u.image,
         u.status,
         u.role,
+        u.category,
         u.otp_status,
         u.created_by,
         u.must_change_password,
@@ -796,6 +798,7 @@ const rights = userRightsRows || [];
       name,
       email,
       role,
+      category: user.category ?? null, // reliable client discriminator (3 = client)
       rights,
       working_id,
       otp_status,
@@ -913,11 +916,12 @@ router.post("/login-otp-verify", async (req, res) => {
           u.name, 
           u.email, 
           u.image, 
-          u.status, 
+          u.status,
           u.role,
-          u.otp_status, 
-          u.created_by, 
-          u.must_change_password, 
+          u.category,
+          u.otp_status,
+          u.created_by,
+          u.must_change_password,
           u.pin_hash
        FROM user u
        WHERE u.email = ?
@@ -1023,6 +1027,10 @@ router.post("/login-otp-verify", async (req, res) => {
       name,
       email: normalizedEmail,
       role,
+      // category is the reliable account-type discriminator (3 = client). role is
+      // overloaded (clients AND some owners share role=3), so the frontend uses
+      // Category to gate the client-restricted experience.
+      category: user.category ?? null,
       rights,
       working_id,
       otp_status: 0,
