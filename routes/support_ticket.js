@@ -5,6 +5,7 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const logger = require('../common/logger');
+const auth = require('../services/authentication');
 
 // Local multer setup (do not use shared fileUpload.js)
 const storage = multer.diskStorage({
@@ -90,11 +91,16 @@ router.post('/ticket', upload.single('attachment'), async (req, res) => {
   }
 });
 
-// GET /support_ticket - list all tickets (most recent first)
+// GET /support_ticket - list the CALLING user's own tickets (most recent first).
+// Previously this returned every ticket in the DB to any caller (no auth, no
+// filter), so e.g. a brand-new subcontractor saw the owner's support tickets.
+// Now scoped to created_by = the authenticated user.
 const listTickets = async (req, res) => {
   try {
+    const userId = Number(req.user && req.user.id) || 0;
     const [rows] = await pool.query(
-      'SELECT id, client_email, client_contact, subject,status_id, message, attachment, created_at, created_by FROM support_ticket ORDER BY id DESC'
+      'SELECT id, client_email, client_contact, subject, status_id, message, attachment, created_at, created_by FROM support_ticket WHERE created_by = ? ORDER BY id DESC',
+      [userId]
     );
     return res.status(200).json(rows);
   } catch (err) {
@@ -103,8 +109,9 @@ const listTickets = async (req, res) => {
   }
 };
 
-// Support both / and /ticket paths for GET
-router.get('/ticket', listTickets);
-router.get('/', listTickets);
+// Support both / and /ticket paths for GET (authenticated: a caller only ever
+// sees their own tickets).
+router.get('/ticket', auth.authenticateToken, listTickets);
+router.get('/', auth.authenticateToken, listTickets);
 
 module.exports = router;
