@@ -1104,19 +1104,31 @@ router.get("/get_client", auth.authenticateToken, async (req, res) => {
     connection = await pool.getConnection();
 
     const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
+    // An account's clients get linked TWO ways, and the dropdown must show both:
+    //   (a) a `contact` row (manually-saved clients: Accept/Saved/Pending), and
+    //   (b) an account SUB-USER (created_by in the account) — how INVITED clients
+    //       are attached (account_source='invite'), which have NO contact row.
+    // The original fix only covered (a), so invited clients (e.g. one who accepted
+    // an invite and signed in) were missing from "Select Client".
     const [rows] = await connection.query(
       `
-      SELECT DISTINCT u.id, u.name, u.mobile, u.email
-      FROM contact c
-      JOIN \`user\` u ON (u.id = IF(c.request_by IN ${ACCOUNT}, c.request_to, c.request_by))
-      WHERE u.category = 3
-        AND (
-          (c.status = 'Accept' AND (c.request_by IN ${ACCOUNT} OR c.request_to IN ${ACCOUNT}))
-          OR (c.status IN ('Pending','Saved') AND c.request_by IN ${ACCOUNT})
-        )
-      ORDER BY u.name ASC
+      SELECT id, name, mobile, email FROM (
+        SELECT DISTINCT u.id, u.name, u.mobile, u.email
+        FROM contact c
+        JOIN \`user\` u ON (u.id = IF(c.request_by IN ${ACCOUNT}, c.request_to, c.request_by))
+        WHERE u.category = 3
+          AND (
+            (c.status = 'Accept' AND (c.request_by IN ${ACCOUNT} OR c.request_to IN ${ACCOUNT}))
+            OR (c.status IN ('Pending','Saved') AND c.request_by IN ${ACCOUNT})
+          )
+        UNION
+        SELECT u.id, u.name, u.mobile, u.email
+        FROM \`user\` u
+        WHERE u.category = 3 AND u.status = 1 AND u.created_by IN ${ACCOUNT}
+      ) x
+      ORDER BY name ASC
       `,
-      [ownerId, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId]
+      [ownerId, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId]
     );
 
     // A person can have multiple contact rows (bidirectional / Saved+Accept) —

@@ -2238,12 +2238,17 @@ const inviteMailer = nodemailer.createTransport({
 });
 
 async function sendContactInviteEmail(toEmail, inviterName) {
+  // The invited person's SeeJobRun profile ALREADY exists (created the moment they
+  // were added as a contact), so the link goes to SIGN-IN (email + one-time code),
+  // NOT a sign-up / create-account flow. Applies to EVERY invited type — client,
+  // subcontractor, employee — so no one is confused by a "Sign Up" prompt.
+  const signInUrl = 'https://seejobrun.com/user-dashboard/login';
   await inviteMailer.sendMail({
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
     to: toEmail,
-    subject: 'Invitation to Join SeeJobRun',
-    text: `${inviterName} invited you to join SeeJobRun. Please sign up and accept the invitation at: https://seejobrun.com/signup`,
-    html: `<p>Hello,</p><p><strong>${inviterName}</strong> invited you to join SeeJobRun.</p><p><a href="https://seejobrun.com/signup">Click here to sign up and accept the invitation.</a></p>`,
+    subject: 'You have been added to SeeJobRun',
+    text: `${inviterName} added you to SeeJobRun. Your account is ready — sign in with your email (${toEmail}) and the one-time code we'll send you: ${signInUrl}`,
+    html: `<p>Hello,</p><p><strong>${inviterName}</strong> added you to SeeJobRun. Your account is ready.</p><p><a href="${signInUrl}">Click here to sign in</a> with your email (<strong>${toEmail}</strong>) — we'll email you a one-time sign-in code.</p>`,
   });
 }
 
@@ -2522,12 +2527,10 @@ router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req,
     if (!contactUser || !contactUser.email || contactUser.email.endsWith('@no-email.invalid')) {
       return res.status(404).json({ message: 'This contact has no email on file yet — add one in Edit first.' });
     }
-    // Never (re)send an invite to a Client — the invite link has no valid
-    // destination until the client portal login exists. Scoped to clients only;
-    // subcontractor/staff invites still work.
-    if (Number(contactUser.category) === 3 || Number(contactUser.role) === 3) {
-      return res.status(400).json({ email_sent: false, message: 'Client invitations are paused until the client portal is available.' });
-    }
+    // Client invites are now ENABLED — the client portal exists and the invite
+    // link points at the sign-in (email + OTP) flow (see sendContactInviteEmail).
+    // The prior "paused for clients" gate is removed; the manual "Invite" pill
+    // sends for clients, subcontractors and staff alike.
 
     const [[existingInvite]] = await connection.query(
       `SELECT id FROM invited_contacts WHERE email = ? LIMIT 1`, [contactUser.email]
