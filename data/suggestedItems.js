@@ -331,6 +331,18 @@ const ITEMS = [
   ['11-220', 'Appliance Allowance', 'B'],
   ['15-250', 'Plumbing Fixture Allowance', 'B'],
   ['16-240', 'Light Fixture Allowance', 'B'],
+
+  // ---- Additions 2026-08-11 (owner CCP): division content additions. Appended
+  //      (not inserted) so existing rows' sort_order is unchanged; each code is a
+  //      free slot in its division (no collisions). 06-125 intentionally REUSES
+  //      the code Poul already entered for his custom "Rough Framing" line, so the
+  //      Budget UI's exact-code chip-added detection recognizes that line and never
+  //      creates a duplicate row. Distinct from 06-100 "Rough Framing Lumber". ----
+  ['06-125', 'Rough Framing', 'B'],
+  ['07-260', 'Insulation', 'R'],
+  ['07-270', 'Deck Coating', 'B'],
+  ['08-260', 'Mirrors & Shower Doors', 'B'],
+  ['09-290', 'Solid Surface Material Allowance', 'B'],
 ];
 
 // Normalized rows for insertion: { division_id, code, name, applicability, sort_order }.

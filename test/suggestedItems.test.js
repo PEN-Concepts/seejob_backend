@@ -1,10 +1,10 @@
 /* Suggested-items reference library — validates the new schema + seed + the
  * serving-endpoint filter logic against REAL MySQL (mysql-memory-server):
- *   - ensureSuggestedItemsTable creates the table and auto-seeds all 270 items;
+ *   - ensureSuggestedItemsTable creates the table and auto-seeds all 287 items;
  *   - every row links to a division (division_id === code numeric prefix);
  *   - the endpoint's job_type filter is correct (residential = R+B, commercial
  *     = C+B, none = all) on Division 02;
- *   - seedSuggestedItems is idempotent (re-run keeps 270, no dup codes).
+ *   - seedSuggestedItems is idempotent (re-run keeps 287, no dup codes).
  * Run: cd <worktree> && NODE_PATH=<backend>/node_modules node test/suggestedItems.test.js
  */
 'use strict';
@@ -35,7 +35,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // ---- create + auto-seed ----
     await ensureSuggestedItemsTable(conn);
     const [[{ c }]] = await conn.query('SELECT COUNT(*) AS c FROM suggested_items');
-    ok(Number(c) === ROWS.length && Number(c) === 270, `auto-seed inserted all ${ROWS.length} items`, String(c));
+    ok(Number(c) === ROWS.length, `auto-seed inserted all ${ROWS.length} items`, String(c));
 
     // ---- span + per-division ----
     const [byDiv] = await conn.query('SELECT division_id, COUNT(*) c FROM suggested_items GROUP BY division_id ORDER BY division_id');
@@ -68,14 +68,14 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // ---- idempotent re-seed (owner endpoint path) ----
     const n = await seedSuggestedItems(conn);
     const [[{ c2 }]] = await conn.query('SELECT COUNT(*) AS c2 FROM suggested_items');
-    ok(n === 270 && Number(c2) === 270, 're-seed is idempotent (still 270 rows, no duplication)', String(c2));
+    ok(n === ROWS.length && Number(c2) === ROWS.length, `re-seed is idempotent (still ${ROWS.length} rows, no duplication)`, String(c2));
     const [[dup]] = await conn.query('SELECT COUNT(*) c FROM (SELECT code FROM suggested_items GROUP BY code HAVING COUNT(*)>1) t');
     ok(Number(dup.c) === 0, 'no duplicate codes after re-seed', JSON.stringify(dup));
 
     // ---- tag distribution sanity ----
     const [tags] = await conn.query("SELECT applicability, COUNT(*) c FROM suggested_items GROUP BY applicability");
     const tagMap = Object.fromEntries(tags.map((t) => [t.applicability, Number(t.c)]));
-    ok(tagMap.B === 121 && tagMap.R === 74 && tagMap.C === 75, 'tag split B=121 R=74 C=75', JSON.stringify(tagMap));
+    ok(tagMap.B === 137 && tagMap.R === 75 && tagMap.C === 75, 'tag split B=137 R=75 C=75', JSON.stringify(tagMap));
   } catch (e) {
     ok(false, 'test harness error', e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : String(e));
   } finally {
