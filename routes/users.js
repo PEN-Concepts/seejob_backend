@@ -1548,7 +1548,11 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
     // The "owner" UNION branch always uses working_user_id, so restricted users
     // still see the GC (Poul) — just not his other subs/clients/employees.
     await ensureContactAuthorityColumn(connection);
-    const isOwner = working_user_id === user_id;
+    // Owner-exempt platform accounts (poul@ / admin@oakcoast.net) are the GC's own
+    // logins and always see the full book — even though admin@oakcoast.net is stored
+    // as category 1 (employee) rather than the GC owner row.
+    const email = String(req.user?.email || "").trim().toLowerCase();
+    const isOwner = working_user_id === user_id || OWNER_EXEMPT_EMAILS.has(email);
     let canViewAll = isOwner;
     if (!isOwner) {
       const [[me]] = await connection.query(
