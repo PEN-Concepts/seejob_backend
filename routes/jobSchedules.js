@@ -217,6 +217,18 @@ router.put('/:sid/items/:iid', async (req, res) => {
       const p = b.pinned_start_date;
       sets.push('pinned_start_date = ?'); vals.push(p ? String(p).slice(0, 10) : null);
     }
+    // "Start with this item": exactly ONE start per schedule. Marking this item
+    // clears the flag from every other item AND drops this item's own deps (a
+    // start depends on nothing). Clearing (is_start:0) just unsets it.
+    if ('is_start' in b) {
+      if (b.is_start ? 1 : 0) {
+        await connection.query('UPDATE job_schedule_items SET is_start = 0 WHERE schedule_id = ? AND id <> ?', [sid, iid]);
+        await connection.query('DELETE FROM job_schedule_deps WHERE schedule_id = ? AND item_id = ?', [sid, iid]);
+        sets.push('is_start = 1');
+      } else {
+        sets.push('is_start = 0');
+      }
+    }
 
     if (sets.length) {
       vals.push(iid);
@@ -560,6 +572,12 @@ router.post('/:sid/deps', async (req, res) => {
     await connection.query(
       'INSERT IGNORE INTO job_schedule_deps (schedule_id, item_id, depends_on_item_id) VALUES (?, ?, ?)',
       [sid, itemId, dependsOn]
+    );
+    // An item that now depends on something is no longer the schedule's "Start"
+    // item — clear its start flag so the two states stay mutually exclusive.
+    await connection.query(
+      'UPDATE job_schedule_items SET is_start = 0 WHERE schedule_id = ? AND id = ?',
+      [sid, itemId]
     );
     const payloads = await cascade.recomputeSchedule(connection, sid, { changedItemId: itemId });
     await connection.commit();

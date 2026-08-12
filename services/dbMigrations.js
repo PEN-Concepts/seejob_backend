@@ -542,6 +542,10 @@ async function ensureScheduleTemplateTables(connection) {
   await ensureScheduleColumn(connection, 'schedule_template_items', 'is_inspection', 'TINYINT NOT NULL DEFAULT 0');
   await ensureScheduleColumn(connection, 'job_schedule_items', 'is_inspection', 'TINYINT NOT NULL DEFAULT 0');
   await ensureScheduleColumn(connection, 'schedule_templates', 'cloned_from_template_id', 'INT NULL');
+  // is_start: EXPLICIT "Start with this item" flag (max one row per schedule).
+  // Distinct from "has no dependencies" — an untouched item is blank, not a start.
+  // Drives the dependency-derived row order (the start item leads at position 1).
+  await ensureScheduleColumn(connection, 'job_schedule_items', 'is_start', 'TINYINT NOT NULL DEFAULT 0');
 
   await seedStandardNewHomeBuild(connection);
   await markSeedInspections(connection);
