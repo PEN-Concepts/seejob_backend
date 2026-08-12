@@ -2580,8 +2580,9 @@ router.get("/employee/:id", async (req, res) => {
           u.rate,
           u.resignation_date,
           u.resignation_reason,
-          u.exit_type,    
-          sub.name AS subcategory_name, 
+          u.exit_type,
+          u.can_view_all_contacts,
+          sub.name AS subcategory_name,
           sub.id AS subcategory_id,
           cat.name AS position,
           u.created_at AS hiringDate,
@@ -2593,10 +2594,10 @@ router.get("/employee/:id", async (req, res) => {
       LEFT JOIN employee_leaves_quota elq ON elq.emp_id = u.id
       LEFT JOIN employees_leaves el ON el.id = elq.leave_id
       WHERE u.id = ?
-      GROUP BY 
+      GROUP BY
           u.id, u.name, u.email, u.mobile, u.employment_type,
           u.rate, u.resignation_date, u.resignation_reason, u.exit_type,
-          sub.name, cat.name, u.created_at, sub.id
+          u.can_view_all_contacts, sub.name, cat.name, u.created_at, sub.id
       ORDER BY u.created_at DESC
     `,
       [id]
