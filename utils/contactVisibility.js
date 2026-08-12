@@ -14,7 +14,7 @@
  *     → scope_id = self.
  */
 const { ensureContactAuthorityColumn } = require("../services/dbMigrations");
-const { OWNER_EXEMPT_EMAILS } = require("./access");
+const { OWNER_EXEMPT_EMAILS, getAccessMode } = require("./access");
 
 async function getContactScope(connection, req) {
   const user_id = Number(req.user && req.user.id) || 0;
@@ -38,8 +38,20 @@ async function getContactScope(connection, req) {
       /* fail closed: a lookup error keeps the caller restricted */
     }
   }
+
+  // A trial-EXPIRED, non-upgraded account loses contact access + delegation, even
+  // the GC owner (their contacts are retained, just hidden until they upgrade).
+  // Owner-exempt platform accounts are never gated.
+  let expired = false;
+  if (!OWNER_EXEMPT_EMAILS.has(email)) {
+    try {
+      const mode = await getAccessMode(user_id, connection);
+      if (mode === "expired_free") { expired = true; canViewAll = false; }
+    } catch (e) { /* fail open on lookup error; still scoped below */ }
+  }
+
   const scope_id = canViewAll ? owner_id : user_id;
-  return { user_id, owner_id, canViewAll, scope_id };
+  return { user_id, owner_id, canViewAll, scope_id, expired };
 }
 
 /**
@@ -53,7 +65,11 @@ async function getContactScope(connection, req) {
  * get-task-users, so the two stay consistent.
  */
 function visibleUserPredicate(alias, scope) {
-  const { user_id, owner_id, scope_id } = scope;
+  const { user_id, owner_id, scope_id, expired } = scope;
+  // Trial-expired accounts see only themselves — no contact book at all.
+  if (expired) {
+    return { sql: `${alias}.id = ?`, params: [user_id] };
+  }
   const sql = `(
     ${alias}.id = ? OR ${alias}.id = ?
     OR ${alias}.created_by = ?

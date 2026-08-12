@@ -8,7 +8,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS } = require("../utils/access");
+const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS, getAccessMode } = require("../utils/access");
 const { ensureOwnerTypeColumns, ensureContactAuthorityColumn } = require("../services/dbMigrations");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const path = require("path");
@@ -1585,7 +1585,21 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
       // Authority is grantable ONLY to Employees (category 1); clients/subs never.
       canViewAll = Number(me && me.category) === 1 && Number(me && me.can_view_all_contacts) === 1;
     }
-    const scope_id = canViewAll ? working_user_id : user_id;
+    // A trial-EXPIRED, non-upgraded account loses contact ACCESS (and therefore
+    // delegation) — even the GC owner. Their own contacts are still stored; they
+    // simply can't see/assign them until they upgrade. Owner-exempt platform
+    // accounts are never gated. (Delegation writes are already blocked by
+    // denyExpiredFreeWrites; this empties the Assign-To picker too.)
+    let expiredLockout = false;
+    if (!OWNER_EXEMPT_EMAILS.has(email)) {
+      try {
+        const mode = await getAccessMode(user_id, connection);
+        if (mode === "expired_free") { canViewAll = false; expiredLockout = true; }
+      } catch (e) { /* fail closed: treat as no lockout, still scoped below */ }
+    }
+    // -1 matches no contact/employee/team row, so an expired account's picker
+    // collapses to just the owner branch (themselves).
+    const scope_id = expiredLockout ? -1 : (canViewAll ? working_user_id : user_id);
 
     const query = `
     (
