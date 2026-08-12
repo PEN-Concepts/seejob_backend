@@ -158,10 +158,12 @@ async function attachTaskImages(connectionOrPool, tasks) {
   }
 
   const [rows] = await connectionOrPool.query(
-    `SELECT id, task_id, CONCAT(file_path, file_name) AS filename, created_at
-     FROM tasks_images
-     WHERE task_id IN (?)
-     ORDER BY created_at ASC`,
+    `SELECT ti.id, ti.task_id, CONCAT(ti.file_path, ti.file_name) AS filename, ti.created_at,
+            COALESCE(ti.kind, 'request') AS kind, ti.uploaded_by, u.name AS uploaded_by_name
+     FROM tasks_images ti
+     LEFT JOIN user u ON u.id = ti.uploaded_by
+     WHERE ti.task_id IN (?)
+     ORDER BY ti.created_at ASC`,
     [ids]
   );
 
@@ -169,7 +171,7 @@ async function attachTaskImages(connectionOrPool, tasks) {
   for (const r of rows || []) {
     const key = Number(r.task_id);
     if (!byTaskId.has(key)) byTaskId.set(key, []);
-    byTaskId.get(key).push({ id: r.id, filename: r.filename, created_at: r.created_at });
+    byTaskId.get(key).push({ id: r.id, filename: r.filename, created_at: r.created_at, kind: r.kind, uploaded_by: r.uploaded_by, uploaded_by_name: r.uploaded_by_name });
   }
 
   tasks.forEach((t) => {
@@ -192,6 +194,8 @@ const taskSchema = Joi.object({
   time: Joi.date().optional(),
   complete_percentage: Joi.number().min(0).max(100).allow(null).optional(),
   priority: Joi.string().valid('low', 'medium', 'high').optional(),
+  is_urgent: Joi.any().optional(),               // Phase-1 Urgent escalation flag
+  completion_response: Joi.string().allow(null, '').optional(), // one-time written reply on complete
   description: Joi.string(),
   image: Joi.string().allow(null, "").max(255),
   assignee_completed: Joi.any().optional(),
@@ -440,10 +444,11 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
       const formattedTime = time ? toMySQLDateTime(time) : null;
       const finalPriority = priority ?? 'low';
 
+      const urgentFlag = (req.body.is_urgent === 1 || req.body.is_urgent === true || req.body.is_urgent === '1') ? 1 : 0;
       const sql = `
-        INSERT INTO tasks 
-        (task_name, user_id, team_id, duration_days, start_date, end_date, description, image, audio_note, assignee_completed, job_id, created_at, created_by, task_type, is_calendar_task, is_appointment_task, time, priority) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO tasks
+        (task_name, user_id, team_id, duration_days, start_date, end_date, description, image, audio_note, assignee_completed, job_id, created_at, created_by, task_type, is_calendar_task, is_appointment_task, time, priority, is_urgent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `;
 
       const values = [
@@ -465,6 +470,7 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
         is_appointment_task ?? 0,
         formattedTime,
         finalPriority,
+        urgentFlag,
       ];
 
       const [result] = await connection.query(sql, values);
@@ -727,6 +733,8 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
         t.start_date, 
         t.time,
         t.priority,
+        t.is_urgent,
+        t.assignee_seen_at,
         u.name AS createdBy,
         t.status,
         t.job_id,
@@ -1037,8 +1045,13 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       'status_note = COALESCE(?, status_note)',
       'task_type = COALESCE(?, task_type)',
       'is_calendar_task = COALESCE(?, is_calendar_task)',
-      'is_appointment_task = COALESCE(?, is_appointment_task)'
+      'is_appointment_task = COALESCE(?, is_appointment_task)',
+      'is_urgent = COALESCE(?, is_urgent)',
+      'completion_response = COALESCE(?, completion_response)'
     ];
+    const urgentUpdate = (typeof req.body.is_urgent === 'undefined')
+      ? null
+      : ((req.body.is_urgent === 1 || req.body.is_urgent === true || req.body.is_urgent === '1') ? 1 : 0);
     const params = [
       task_name,
       newUser,
@@ -1059,6 +1072,8 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       task_type,
       is_calendar_task,
       is_appointment_task,
+      urgentUpdate,
+      (typeof req.body.completion_response === 'undefined') ? null : (req.body.completion_response || ''),
     ];
 
     if (hasJobId) {
@@ -1365,14 +1380,18 @@ router.post('/upload-photos/:taskId', auth.authenticateToken, denyExpiredFreeWri
       return res.status(400).json({ message: 'No files uploaded' });
     }
     const taskId = req.params.taskId;
+    // Default 'request' (photos added when creating/editing the task); the client
+    // may pass kind='response' but completion photos normally use /assignee-photo.
+    const kind = req.body && req.body.kind === 'response' ? 'response' : 'request';
+    const uploader = (req.user && req.user.id) || null;
     const inserted = [];
     for (const file of req.files) {
       const filePath = path.posix.join('tasks', String(taskId)) + '/';
       const fileName = file.filename;
       const relPath = `${filePath}${fileName}`;
       const [result] = await pool.query(
-        `INSERT INTO tasks_images (task_id, file_path, file_name) VALUES (?, ?, ?)`,
-        [taskId, filePath, fileName]
+        `INSERT INTO tasks_images (task_id, file_path, file_name, kind, uploaded_by) VALUES (?, ?, ?, ?, ?)`,
+        [taskId, filePath, fileName, kind, uploader]
       );
       inserted.push({ id: result.insertId, filename: relPath });
     }
@@ -1413,18 +1432,15 @@ router.post('/assignee-photo/:taskId', auth.authenticateToken, upload.array('pho
     for (const file of req.files) {
       const filePath = path.posix.join('tasks', String(taskId)) + '/';
       const fileName = file.filename;
+      // Completion photos are RESPONSE photos (kind='response') so the gallery
+      // can group them under "RESPONSE · [name], [time]".
       const [result] = await pool.query(
-        `INSERT INTO tasks_images (task_id, file_path, file_name) VALUES (?, ?, ?)`,
-        [taskId, filePath, fileName]
+        `INSERT INTO tasks_images (task_id, file_path, file_name, kind, uploaded_by) VALUES (?, ?, ?, 'response', ?)`,
+        [taskId, filePath, fileName, req.user.id]
       );
       inserted.push({ id: result.insertId, filename: `${filePath}${fileName}` });
     }
-    if (inserted.length > 0) {
-      await pool.query(
-        `UPDATE tasks SET image = ? WHERE id = ? AND (image IS NULL OR image = '')`,
-        [inserted[0].filename, taskId]
-      );
-    }
+    // Response photos never touch the legacy tasks.image (the request thumbnail).
     res.status(200).json({ message: 'Photos uploaded', images: inserted });
   } catch (err) {
     logger.error("assignee-photo upload:", err);
@@ -1432,17 +1448,46 @@ router.post('/assignee-photo/:taskId', auth.authenticateToken, upload.array('pho
   }
 });
 
-// Get all images for a task
+// Get all images for a task. Returns kind ('request'|'response') + uploader name
+// + time so the frontend gallery can group under REQUEST · [name], [time] and
+// RESPONSE · [name], [time].
 router.get('/images/:taskId', auth.authenticateToken, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT id, CONCAT(file_path, file_name) AS filename, created_at FROM tasks_images WHERE task_id = ? ORDER BY created_at ASC`,
+      `SELECT ti.id, CONCAT(ti.file_path, ti.file_name) AS filename, ti.created_at,
+              COALESCE(ti.kind, 'request') AS kind, ti.uploaded_by, u.name AS uploaded_by_name
+         FROM tasks_images ti
+         LEFT JOIN user u ON u.id = ti.uploaded_by
+        WHERE ti.task_id = ?
+        ORDER BY ti.created_at ASC`,
       [req.params.taskId]
     );
     res.status(200).json(rows);
   } catch (err) {
     logger.error("Error fetching task images:", err);
     res.status(500).json({ message: 'Failed to fetch images', error: err.message });
+  }
+});
+
+// Mark a task SEEN by its assignee — fires ONLY when the assignee genuinely opens
+// the task detail (frontend calls this on detail-open, not on push delivery /
+// dismissal / list visibility). Stamps assignee_seen_at once (first open wins);
+// a no-op if already seen or if the caller isn't the task's assignee.
+router.post('/:id/seen', auth.authenticateToken, async (req, res) => {
+  const taskId = Number(req.params.id);
+  const uid = Number(req.user && req.user.id);
+  if (!taskId || !uid) return res.status(400).json({ message: 'Invalid request' });
+  try {
+    const [[t]] = await pool.query('SELECT id, user_id, assignee_seen_at FROM tasks WHERE id = ? LIMIT 1', [taskId]);
+    if (!t) return res.status(404).json({ message: 'Task not found' });
+    if (Number(t.user_id) === uid && !t.assignee_seen_at) {
+      await pool.query('UPDATE tasks SET assignee_seen_at = NOW() WHERE id = ? AND assignee_seen_at IS NULL', [taskId]);
+    }
+    const [[fresh]] = await pool.query('SELECT assignee_seen_at FROM tasks WHERE id = ? LIMIT 1', [taskId]);
+    return res.json({ seen_at: fresh ? fresh.assignee_seen_at : null });
+  } catch (err) {
+    logger.error('mark seen error: ' + err.message);
+    return res.status(500).json({ message: 'Server error' });
   }
 });
 

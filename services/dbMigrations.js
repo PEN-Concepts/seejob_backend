@@ -559,6 +559,29 @@ async function ensureScheduleColumn(connection, table, column, definition) {
   }
 }
 
+// Task Manager Phase-1 columns (visual/UX redesign — single-assignee):
+//  tasks.is_urgent            — the new Urgent escalation flag (distinct red push);
+//                               deliberately SEPARATE from the legacy `priority`
+//                               field (old gold star = "high priority", not urgent).
+//  tasks.assignee_seen_at     — stamped once when the assignee genuinely OPENS the
+//                               task detail (not on delivery/dismissal) → "Seen".
+//  tasks.completion_response  — the one optional written reply submitted with Mark
+//                               Complete (single one-time submission, not editable).
+//  tasks_images.kind          — 'request' (default, created with the task) vs
+//                               'response' (uploaded at completion) so the photo
+//                               gallery can group REQUEST vs RESPONSE.
+//  tasks_images.uploaded_by   — who added the photo (for the gallery's "· [name]").
+let taskManagerColumnsEnsured = false;
+async function ensureTaskManagerColumns(connection) {
+  if (taskManagerColumnsEnsured) return;
+  await ensureScheduleColumn(connection, 'tasks', 'is_urgent', 'TINYINT NOT NULL DEFAULT 0');
+  await ensureScheduleColumn(connection, 'tasks', 'assignee_seen_at', 'DATETIME NULL');
+  await ensureScheduleColumn(connection, 'tasks', 'completion_response', 'TEXT NULL');
+  await ensureScheduleColumn(connection, 'tasks_images', 'kind', "VARCHAR(10) NOT NULL DEFAULT 'request'");
+  await ensureScheduleColumn(connection, 'tasks_images', 'uploaded_by', 'INT NULL');
+  taskManagerColumnsEnsured = true;
+}
+
 // Flag + rename the seed's inspection items on an ALREADY-seeded database (prod),
 // where the seed rows still carry the old "Inspection …" names. Idempotent: matches
 // on the OLD name, so it renames once and is a no-op forever after (and a no-op on a
@@ -1105,4 +1128,5 @@ module.exports = {
   ensureSubscriptionReverifyColumn,
   ensureReverifyEmailLogTable,
   ensureWebhookEventsTable,
+  ensureTaskManagerColumns,
 };
