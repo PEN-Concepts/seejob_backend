@@ -4,7 +4,7 @@ const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
 const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
-const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS } = require("../utils/access");
+const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJobData } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
 
 // Payment methods a subcontractor payment can be recorded under.
@@ -148,7 +148,11 @@ function requirePlanFeatures(allowedKeys) {
   };
 }
 
-const requireJobBudgetFeature = requirePlanFeatures(["job_budget", "budget"]);
+// Budget + Billing are off-limits to Subcontractors/Clients on ANY job. Every
+// budget route already runs through requireJobBudgetFeature (after auth), so
+// prepending denyRestrictedJobData here guards them all in one place (Express
+// flattens the array). req.user is populated by the preceding authenticateToken.
+const requireJobBudgetFeature = [denyRestrictedJobData, requirePlanFeatures(["job_budget", "budget"])];
 
 // Budget is now PLATINUM-ONLY (task #84). Tier gate on the whole router, in
 // addition to the per-route plan-feature check below. Owner-exempt accounts are

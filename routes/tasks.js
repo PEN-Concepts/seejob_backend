@@ -6,7 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const auth = require("../services/authentication");
-const { denyExpiredFreeWrites, isSameAccount, getAccessMode, resolveOwnerId } = require("../utils/access");
+const { denyExpiredFreeWrites, isSameAccount, getAccessMode, resolveOwnerId, denyRestrictedJobData } = require("../utils/access");
 
 // For an expired_free user, keep ONLY tasks on FOREIGN (other-account) jobs/leads
 // they collaborate on — hide everything on their own account's jobs/leads and
@@ -552,7 +552,7 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
 });
 
 // READ all job tasks
-router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
+router.get("/all_job_task/:id", auth.authenticateToken, denyRestrictedJobData, async (req, res) => {
   // Support single or comma-separated list of job IDs, e.g. "10" or "10,9,8"
   const idsParam = req.params.id;
   const jobIds = (typeof idsParam === "string" && idsParam.trim() !== "")
@@ -638,7 +638,7 @@ router.get("/all_job_task/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // READ all lead tasks
-router.get("/all_lead_task/:id", auth.authenticateToken, async (req, res) => {
+router.get("/all_lead_task/:id", auth.authenticateToken, denyRestrictedJobData, async (req, res) => {
   const idsParam = req.params.id;
   const jobIds = (typeof idsParam === "string" && idsParam.trim() !== "")
     ? idsParam

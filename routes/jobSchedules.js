@@ -13,7 +13,7 @@ const logger = require('../common/logger');
 const engine = require('../services/scheduleEngine');
 const cascade = require('../services/scheduleCascade');
 const notify = require('../services/notify');
-const { requirePlan } = require('../utils/access');
+const { requirePlan, denyRestrictedJobData } = require('../utils/access');
 const { ensureScheduleTemplateTables } = require('../services/dbMigrations');
 const { getTimeStamp } = require('../common/timdate');
 
@@ -33,7 +33,8 @@ router.use(async (req, res, next) => {
 
 // PLATINUM-ONLY GATE: every job-schedule operation requires the Platinum plan (server-side
 // 403). authenticateToken runs first so requirePlan can read req.user.
-router.use(auth.authenticateToken, requirePlan('platinum'));
+// Gantt Scheduler data is off-limits to Subcontractors/Clients on ANY job.
+router.use(auth.authenticateToken, denyRestrictedJobData, requirePlan('platinum'));
 
 function dispatchAll(payloads) {
   for (const p of payloads || []) {

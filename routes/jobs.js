@@ -23,7 +23,7 @@ function ownerTypeOf(v) {
 }
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
-const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS } = require("../utils/access");
+const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData } = require("../utils/access");
 const jobSchema = Joi.object({
   type: Joi.string().valid("Residential", "Commercial").required(),
   name: Joi.string().max(100).required(),
@@ -1560,7 +1560,7 @@ router.post("/stages", auth.authenticateToken, denyExpiredFreeWrites, async (req
     if (connection) connection.release();
   }
 });
-router.get("/stages/:job_id", auth.authenticateToken, blockExpiredOwnRecord((r) => r.params.job_id, (r) => r.query.owner_type), async (req, res) => {
+router.get("/stages/:job_id", auth.authenticateToken, denyRestrictedJobData, blockExpiredOwnRecord((r) => r.params.job_id, (r) => r.query.owner_type), async (req, res) => {
   const job_id = req.params.job_id;
   const ownerType = ownerTypeOf(req.query.owner_type);
 
@@ -2353,7 +2353,7 @@ async function ensureDocShareColumn(connection) {
   }
 }
 
-router.get("/get-files", auth.authenticateToken, async (req, res) => {
+router.get("/get-files", auth.authenticateToken, denyRestrictedJobData, async (req, res) => {
   const { job_id } = req.query;
   let connection;
 

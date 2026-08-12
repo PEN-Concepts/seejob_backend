@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
-const { blockExpiredOwnJob, denyExpiredFreeWrites } = require("../utils/access");
+const { blockExpiredOwnJob, denyExpiredFreeWrites, denyRestrictedJobData } = require("../utils/access");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -548,7 +548,7 @@ router.post('/change-orders', auth.authenticateToken, denyExpiredFreeWrites, asy
   }
 });
 
-router.get('/change-orders', auth.authenticateToken, async (req, res) => {
+router.get('/change-orders', auth.authenticateToken, denyRestrictedJobData, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;
@@ -611,7 +611,7 @@ router.get('/change-orders', auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get('/change-orders/:id', auth.authenticateToken, async (req, res) => {
+router.get('/change-orders/:id', auth.authenticateToken, denyRestrictedJobData, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;

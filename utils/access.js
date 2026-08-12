@@ -523,6 +523,30 @@ function denyExpiredFreeWrites(req, res, next) {
     });
 }
 
+/**
+ * Express middleware: block WITHIN-JOB data that a Subcontractor (category 2) or
+ * Client (category 3) must never see, on ANY job — Documents, Pictures, Contracts,
+ * Budget, Billing, Stages, the full Task list, and the Gantt Scheduler. This is a
+ * real SERVER-SIDE guard (a 403), so the restriction can't be bypassed by calling
+ * the API directly even though the UI already hides these tabs. Owner (4),
+ * employees (1), and owner-exempt platform accounts pass. FAILS CLOSED on an
+ * unknown category is NOT desired here (employees have category 1 and must pass),
+ * so we only block the two restricted categories explicitly.
+ */
+function denyRestrictedJobData(req, res, next) {
+  const category = Number(req.user && req.user.category);
+  const email = String((req.user && req.user.email) || "").trim().toLowerCase();
+  if ((category === 2 || category === 3) && !OWNER_EXEMPT_EMAILS.has(email)) {
+    return res.status(403).json({
+      code: "403",
+      success: false,
+      message: "This information is not available for your account type.",
+      data: {},
+    });
+  }
+  return next();
+}
+
 module.exports = {
   TRIAL_DAYS,
   OWNER_EXEMPT_EMAILS,
@@ -537,6 +561,7 @@ module.exports = {
   blockExpiredOwnJob,
   blockExpiredOwnRecord,
   denyExpiredFreeWrites,
+  denyRestrictedJobData,
   PLAN_LEVELS,
   getActivePlanLevel,
   requirePlan,

@@ -2448,6 +2448,7 @@ router.get("/get-user/:id", auth.authenticateToken, async (req, res) => {
         u.contact_note,
         u.status,
         u.contact_available,
+        u.can_view_all_contacts,
         u.time_zone,
         u.timezone
       FROM user u
@@ -2612,7 +2613,7 @@ router.get("/employee/:id", async (req, res) => {
   }
 });
 
-router.put("/employee/:id", async (req, res) => {
+router.put("/employee/:id", auth.authenticateToken, async (req, res) => {
   const id = req.params.id;
   const {
     name,
@@ -2624,14 +2625,25 @@ router.put("/employee/:id", async (req, res) => {
     hiring_date,
     leave_ids = [],
     created_by,
+    can_view_all_contacts,
   } = req.body;
 
   //const created_by = res.locals.id; // âœ… assuming this is from auth middleware
   const currentTimestamp = getTimeStamp(); // âœ… your timestamp helper
 
+  // "Authority" grant: only the ACCOUNT OWNER may change whether an employee can
+  // see the whole contact book. When present, coerce to 0/1; otherwise null =
+  // leave unchanged. can_view_all_contacts only takes effect for category-1
+  // employees (see utils/contactVisibility), so it can never widen a client/sub.
+  const authorityValue =
+    can_view_all_contacts === undefined || can_view_all_contacts === null || can_view_all_contacts === ""
+      ? null
+      : Number(can_view_all_contacts) ? 1 : 0;
+
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureContactAuthorityColumn(connection);
     await connection.beginTransaction();
 
     // âœ… Update employee info
@@ -2645,10 +2657,11 @@ router.put("/employee/:id", async (req, res) => {
         subcategory = ?,
         employment_type = ?,
         rate = ?,
+        can_view_all_contacts = COALESCE(?, can_view_all_contacts),
         created_at = COALESCE(?, created_at)
       WHERE id = ?
       `,
-      [name, email, mobile, subcategory, employment_type, rate, hiring_date || null, id]
+      [name, email, mobile, subcategory, employment_type, rate, authorityValue, hiring_date || null, id]
     );
 
     // âœ… Refresh employee leaves

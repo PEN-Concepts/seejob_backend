@@ -5,7 +5,7 @@ const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
-const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites, OWNER_EXEMPT_EMAILS, resolveOwnerId } = require("../utils/access");
+const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites, OWNER_EXEMPT_EMAILS, resolveOwnerId, denyRestrictedJobData } = require("../utils/access");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
@@ -687,7 +687,7 @@ router.post('/quotes', auth.authenticateToken, requireQuoteAccess, denyExpiredFr
   }
 });
 
-router.get('/quotes', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.get('/quotes', auth.authenticateToken, denyRestrictedJobData, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;
@@ -736,7 +736,7 @@ if (loggedInEmail) {
   }
 });
 
-router.get('/quotes/:id', auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.get('/quotes/:id', auth.authenticateToken, denyRestrictedJobData, requireQuoteAccess, async (req, res) => {
   let connection;
   try {
     const userId = res.locals.id;

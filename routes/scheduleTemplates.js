@@ -14,7 +14,7 @@ const logger = require('../common/logger');
 const engine = require('../services/scheduleEngine');
 const cascade = require('../services/scheduleCascade');
 const notify = require('../services/notify');
-const { requirePlan } = require('../utils/access');
+const { requirePlan, denyRestrictedJobData } = require('../utils/access');
 const { ensureScheduleTemplateTables } = require('../services/dbMigrations');
 
 function accountOf(req) {
@@ -39,7 +39,8 @@ router.use(async (req, res, next) => {
 // PLATINUM-ONLY GATE: the entire Schedule Template feature (browse/edit/apply) requires
 // the Gold plan. Server-side 403 — not just a hidden UI button. authenticateToken
 // runs first so requirePlan can read req.user; it replaces the per-route auth.
-router.use(auth.authenticateToken, requirePlan('platinum'));
+// Schedule templates (Gantt) are off-limits to Subcontractors/Clients.
+router.use(auth.authenticateToken, denyRestrictedJobData, requirePlan('platinum'));
 
 // Load a template the caller is allowed to EDIT (must own it — not the shared seed).
 async function loadOwnedTemplate(connection, id, accountId) {
