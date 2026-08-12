@@ -2046,69 +2046,107 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
         ? userRows[0].created_by
         : loggedInUserId;
 
+    // CLIENT-only (Round 8): a Client's task list must show ONLY the jobs/leads
+    // and tasks actually assigned to THEM — not the owner's whole account (which
+    // is what the managerId-based branches below return, and why "My Daily Tasks"
+    // showed the owner's 26 tasks). Gate strictly on category 3; Subcontractors
+    // (category 2) are intentionally UNCHANGED this round. The assignee clause a
+    // client gets = assigned-to-me OR assigned-to-a-team-I'm-on.
+    const email = String(req.user?.email || "").trim().toLowerCase();
+    const isClientViewer = Number(req.user && req.user.category) === 3 && !OWNER_EXEMPT_EMAILS.has(email);
+    const clientTaskAssignee = `(
+      t.user_id = ?
+      OR (t.team_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM team_user tu WHERE tu.team_id = t.team_id AND tu.user_id = ?
+          ))
+    )`;
 
-    const [jobs] = await connection.query(
-      `SELECT
-         j.id,
-         j.name,
-         j.job_address AS address,
-         j.status,
-         j.color,
-         j.created_by,
-         uj.name AS created_by_name
-       FROM job j
-       LEFT JOIN user uj ON uj.id = j.created_by
-       LEFT JOIN job_contacts jc ON jc.job_id = j.id AND jc.contact_id = ?
-       WHERE
-         (
-           j.created_by = ?
-           OR j.created_by = ?
-           OR j.id IN (
-             SELECT job_id
-             FROM job_contacts
-             WHERE contact_id = ?
+    let jobsSql, jobsParams;
+    if (isClientViewer) {
+      jobsSql = `SELECT j.id, j.name, j.job_address AS address, j.status, j.color, j.created_by, uj.name AS created_by_name
+         FROM job j
+         LEFT JOIN user uj ON uj.id = j.created_by
+         WHERE j.id IN (
+             SELECT DISTINCT t.job_id FROM tasks t
+             WHERE LOWER(t.task_type) = 'job' AND t.job_id IS NOT NULL
+               AND (t.user_id = ? OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
            )
-           OR j.id IN (
-             SELECT DISTINCT job_id
-             FROM tasks
-             WHERE user_id = ? OR created_by = ?
+           AND j.status = 1
+         ORDER BY j.sort_order ASC, j.id ASC`;
+      jobsParams = [loggedInUserId, loggedInUserId];
+    } else {
+      jobsSql = `SELECT j.id, j.name, j.job_address AS address, j.status, j.color, j.created_by, uj.name AS created_by_name
+         FROM job j
+         LEFT JOIN user uj ON uj.id = j.created_by
+         LEFT JOIN job_contacts jc ON jc.job_id = j.id AND jc.contact_id = ?
+         WHERE
+           (
+             j.created_by = ?
+             OR j.created_by = ?
+             OR j.id IN (SELECT job_id FROM job_contacts WHERE contact_id = ?)
+             OR j.id IN (SELECT DISTINCT job_id FROM tasks WHERE user_id = ? OR created_by = ?)
+             OR j.id IN (
+               SELECT DISTINCT t.job_id FROM tasks t
+               JOIN team_user tu ON tu.team_id = t.team_id
+               WHERE t.team_id IS NOT NULL AND tu.user_id = ?
+             )
            )
-           OR j.id IN (
-             -- Jobs that have any task assigned to a team the user belongs to
-             SELECT DISTINCT t.job_id
-             FROM tasks t
-             JOIN team_user tu ON tu.team_id = t.team_id
-             WHERE t.team_id IS NOT NULL AND tu.user_id = ?
-           )
-         )
-         AND j.status = 1
-       ORDER BY j.sort_order ASC, j.id ASC`,
-      [loggedInUserId, managerId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId]
-    );
+           AND j.status = 1
+         ORDER BY j.sort_order ASC, j.id ASC`;
+      jobsParams = [loggedInUserId, managerId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId];
+    }
+    const [jobs] = await connection.query(jobsSql, jobsParams);
 
-    const [leads] = await connection.query(
-      `SELECT l.id, l.lead_name, l.project_street_address, l.status, l.user_id AS created_by, u.name AS created_by_name
-       FROM leads l
-       LEFT JOIN user u ON u.id = l.user_id
-       WHERE (
-           l.user_id = ?
-           OR l.id IN (
-             SELECT DISTINCT t.job_id
-             FROM tasks t
-             JOIN team_user tu ON tu.team_id = t.team_id
-             WHERE LOWER(t.task_type) = 'lead'
-               AND t.team_id IS NOT NULL
-               AND tu.user_id = ?
+    let leadsSql, leadsParams;
+    if (isClientViewer) {
+      leadsSql = `SELECT l.id, l.lead_name, l.project_street_address, l.status, l.user_id AS created_by, u.name AS created_by_name
+         FROM leads l
+         LEFT JOIN user u ON u.id = l.user_id
+         WHERE l.id IN (
+             SELECT DISTINCT t.job_id FROM tasks t
+             WHERE LOWER(t.task_type) = 'lead' AND t.job_id IS NOT NULL
+               AND (t.user_id = ? OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
            )
-         )
-         AND (l.status IS NULL OR l.status <> 3)
-         AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')
-       ORDER BY l.created_at DESC`,
-      [managerId, loggedInUserId]
-    );
+         ORDER BY l.created_at DESC`;
+      leadsParams = [loggedInUserId, loggedInUserId];
+    } else {
+      leadsSql = `SELECT l.id, l.lead_name, l.project_street_address, l.status, l.user_id AS created_by, u.name AS created_by_name
+         FROM leads l
+         LEFT JOIN user u ON u.id = l.user_id
+         WHERE (
+             l.user_id = ?
+             OR l.id IN (
+               SELECT DISTINCT t.job_id FROM tasks t
+               JOIN team_user tu ON tu.team_id = t.team_id
+               WHERE LOWER(t.task_type) = 'lead' AND t.team_id IS NOT NULL AND tu.user_id = ?
+             )
+           )
+           AND (l.status IS NULL OR l.status <> 3)
+           AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')
+         ORDER BY l.created_at DESC`;
+      leadsParams = [managerId, loggedInUserId];
+    }
+    const [leads] = await connection.query(leadsSql, leadsParams);
 
     const jobIds = jobs.map((j) => j.id);
     const leadIds = leads.map((l) => l.id);
+
+    // Assignee filter reused by the job/lead/no-job task queries below. A CLIENT
+    // gets assignee-only (their tasks + team tasks); everyone else keeps the
+    // account-wide branch (owner + owner's sub-users). This is the fix for the
+    // "client sees the owner's 26 tasks" bug.
+    const taskAssigneeSql = isClientViewer
+      ? clientTaskAssignee
+      : `(
+        t.user_id = ?
+        OR t.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+        OR (t.team_id IS NOT NULL AND EXISTS (
+              SELECT 1 FROM team_user tu WHERE tu.team_id = t.team_id AND tu.user_id = ?
+            ))
+      )`;
+    const taskAssigneeParams = isClientViewer
+      ? [loggedInUserId, loggedInUserId]
+      : [loggedInUserId, managerId, managerId, loggedInUserId];
 
     const jobTasksByJobId = {};
     const leadTasksByLeadId = {};
@@ -2123,16 +2161,9 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
          WHERE LOWER(t.task_type) = 'job'
            AND t.job_id IN (?)
            ${archivedClause}
-           AND (
-             t.user_id = ?
-             OR t.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
-             OR (t.team_id IS NOT NULL AND EXISTS (
-                   SELECT 1 FROM team_user tu
-                   WHERE tu.team_id = t.team_id AND tu.user_id = ?
-                 ))
-           )
+           AND ${taskAssigneeSql}
          ORDER BY t.status ASC, t.created_at DESC`,
-        [jobIds, loggedInUserId, managerId, managerId, loggedInUserId]
+        [jobIds, ...taskAssigneeParams]
       );
 
       for (const t of jobTasks) {
@@ -2151,16 +2182,9 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
          WHERE LOWER(t.task_type) = 'lead'
            AND t.job_id IN (?)
            ${archivedClause}
-           AND (
-             t.user_id = ?
-             OR t.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
-             OR (t.team_id IS NOT NULL AND EXISTS (
-                   SELECT 1 FROM team_user tu
-                   WHERE tu.team_id = t.team_id AND tu.user_id = ?
-                 ))
-           )
+           AND ${taskAssigneeSql}
          ORDER BY t.status ASC, t.created_at DESC`,
-        [leadIds, loggedInUserId, managerId, managerId, loggedInUserId]
+        [leadIds, ...taskAssigneeParams]
       );
 
       for (const t of leadTasks) {
@@ -2182,16 +2206,9 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
        WHERE j.id IS NULL
          AND COALESCE(LOWER(t.task_type), 'task') <> 'lead'
          ${archivedClause}
-         AND (
-           t.user_id = ?
-           OR t.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
-           OR (t.team_id IS NOT NULL AND EXISTS (
-                 SELECT 1 FROM team_user tu
-                 WHERE tu.team_id = t.team_id AND tu.user_id = ?
-               ))
-         )
+         AND ${taskAssigneeSql}
        ORDER BY t.status ASC, t.created_at DESC`,
-      [loggedInUserId, managerId, managerId, loggedInUserId]
+      [...taskAssigneeParams]
     );
 
     if (jobIds.length) {
