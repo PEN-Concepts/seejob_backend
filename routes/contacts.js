@@ -6,6 +6,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { denyExpiredFreeWrites, getAccessMode } = require("../utils/access");
+const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { contactSchema } = require("../models/contact");
 
@@ -16,12 +17,17 @@ router.get("/search/:key", auth.authenticateToken, async (req, res) => {
     let connection;
     try {
         connection = await pool.getConnection();
+        // VISIBILITY: restrict search to the caller's own contact book (see
+        // utils/contactVisibility) — previously this searched the ENTIRE user table.
+        const scope = await getContactScope(connection, req);
+        const vis = visibleUserPredicate("u", scope);
         const query = `
             SELECT u.id, u.name, u.email, u.mobile
             FROM user u
-            WHERE u.name LIKE ? OR u.mobile LIKE ? OR u.email LIKE ?
+            WHERE (u.name LIKE ? OR u.mobile LIKE ? OR u.email LIKE ?)
+              AND ${vis.sql}
         `;
-        const [rows] = await connection.query(query, [searchKey, searchKey, searchKey]);
+        const [rows] = await connection.query(query, [searchKey, searchKey, searchKey, ...vis.params]);
         res.status(200).json({ code: "200", message: "Search contact successfully", data: rows });
     } catch (error) {
         logger.error("Search contact error:", error);
@@ -37,8 +43,11 @@ router.get("/getuserbycategory/:id", auth.authenticateToken, async (req, res) =>
     let connection;
     try {
         connection = await pool.getConnection();
-        query = "SELECT u.id, u.name, u.email, u.mobile FROM user u where u.category = ? order by u.id asc";
-        const [rows] = await connection.query(query, [id]);
+        // VISIBILITY: only the caller's own contact book (was the ENTIRE user table).
+        const scope = await getContactScope(connection, req);
+        const vis = visibleUserPredicate("u", scope);
+        query = `SELECT u.id, u.name, u.email, u.mobile FROM user u where u.category = ? AND ${vis.sql} order by u.id asc`;
+        const [rows] = await connection.query(query, [id, ...vis.params]);
         res.status(200).json({ code: "200", message: "getuserbycategory data successfully", data: rows });
         return;
     } catch (error) {
@@ -57,8 +66,11 @@ router.get("/getuserbysubcategory/:id", auth.authenticateToken, async (req, res)
     let connection;
     try {
         connection = await pool.getConnection();
-        query = "SELECT u.id, u.name, u.email, u.mobile FROM user u where u.subcategory = ? order by u.id asc";
-        const [rows] = await connection.query(query, [id]);
+        // VISIBILITY: only the caller's own contact book (was the ENTIRE user table).
+        const scope = await getContactScope(connection, req);
+        const vis = visibleUserPredicate("u", scope);
+        query = `SELECT u.id, u.name, u.email, u.mobile FROM user u where u.subcategory = ? AND ${vis.sql} order by u.id asc`;
+        const [rows] = await connection.query(query, [id, ...vis.params]);
         res.status(200).json({ code: "200", message: "getuserbysubcategory data successfully", data: rows });
         return;
     } catch (error) {

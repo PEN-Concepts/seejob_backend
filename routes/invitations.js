@@ -7,6 +7,7 @@ const Joi = require("joi");
 const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const { getAccessMode, resolveOwnerId, denyExpiredFreeWrites } = require("../utils/access");
+const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 
 // For an expired_free user, keep ONLY appointments created by ANOTHER account
 // (i.e. ones they were invited to). Their OWN account's appointments are locked
@@ -52,7 +53,14 @@ router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
-    const [rows] = await connection.execute(`SELECT * FROM user where status = 1 ORDER BY created_at DESC`);
+    // VISIBILITY: only the caller's own contact book (was `SELECT * FROM user` —
+    // the ENTIRE database). See utils/contactVisibility.
+    const scope = await getContactScope(connection, req);
+    const vis = visibleUserPredicate("u", scope);
+    const [rows] = await connection.query(
+      `SELECT u.* FROM user u WHERE u.status = 1 AND ${vis.sql} ORDER BY u.created_at DESC`,
+      vis.params
+    );
     res.status(200).json(rows);
   } catch (err) {
     res.status(500).json({ message: 'Database error', error: err.message });

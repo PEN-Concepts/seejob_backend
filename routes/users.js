@@ -10,6 +10,7 @@ const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { ensureOwnerTypeColumns, ensureContactAuthorityColumn } = require("../services/dbMigrations");
+const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -2848,6 +2849,9 @@ router.get("/getforemanusers", auth.authenticateToken, async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
+    // VISIBILITY: only the caller's own contact book (was every role-3 user DB-wide).
+    const scope = await getContactScope(connection, req);
+    const vis = visibleUserPredicate("u", scope);
     const query = `
       SELECT u.id, u.name, c.name as category, sc.name as subcategory, u.email, r.name as role_name,
              u.image, u.mobile
@@ -2855,9 +2859,9 @@ router.get("/getforemanusers", auth.authenticateToken, async (req, res) => {
       JOIN category c ON c.id = u.category
       JOIN subcategory sc ON sc.id = u.subcategory
       JOIN role r ON r.id = u.role
-      where u.role = 3
+      where u.role = 3 AND ${vis.sql}
     `;
-    const [rows] = await connection.query(query);
+    const [rows] = await connection.query(query, vis.params);
     res.status(200).json({
       code: "200",
       message: "All users fetched successfully",

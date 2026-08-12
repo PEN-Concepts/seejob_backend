@@ -6,6 +6,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites, OWNER_EXEMPT_EMAILS, resolveOwnerId } = require("../utils/access");
+const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
 const multer = require("multer");
@@ -1365,7 +1366,10 @@ router.get("/get_all_users", auth.authenticateToken, requireQuoteAccess, async (
     const created_by = res.locals.id;
     connection = await pool.getConnection();
 
-    const [rows] = await connection.execute(
+    // VISIBILITY: only the caller's own contact book (was every user except self).
+    const scope = await getContactScope(connection, req);
+    const vis = visibleUserPredicate("u", scope);
+    const [rows] = await connection.query(
       `SELECT u.id, u.name, u.email, u.mobile, u.subcategory, u.category,
               s.name AS subcategory_name, c.name AS role,
               (SELECT j.address FROM job j
@@ -1374,9 +1378,9 @@ router.get("/get_all_users", auth.authenticateToken, requireQuoteAccess, async (
        FROM user u
        LEFT JOIN subcategory s ON u.subcategory = s.id
        LEFT JOIN category c ON u.category = c.id
-       WHERE u.id != ?
+       WHERE u.id != ? AND ${vis.sql}
        ORDER BY u.name ASC`,
-      [created_by]
+      [created_by, ...vis.params]
     );
     res.status(200).json(rows);
   } catch (err) {

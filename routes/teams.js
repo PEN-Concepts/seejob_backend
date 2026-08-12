@@ -9,6 +9,7 @@ const multer = require("multer");
 const fs = require("fs");
 const auth = require("../services/authentication");
 const { denyExpiredFreeWrites } = require("../utils/access");
+const { getContactScope } = require("../utils/contactVisibility");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 // helper to convert incoming date (ISO or date string) -> 'YYYY-MM-DD' or null
@@ -231,9 +232,24 @@ router.get("/all", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
+    // VISIBILITY: teams feed the Appointment "Invite" picker. Previously this
+    // returned EVERY team in the DB, so a client/sub saw the owner's whole team
+    // roster. Full-visibility callers (owner / owner-exempt / authority employees)
+    // see every team in the account (created by the owner or any of his sub-users);
+    // restricted callers see only teams they created or belong to.
+    const { owner_id, user_id, canViewAll } = await getContactScope(connection, req);
+    let scopeSql, scopeParams;
+    if (canViewAll) {
+      scopeSql = `WHERE (t.created_by = ? OR t.created_by IN (SELECT id FROM \`user\` WHERE created_by = ?))`;
+      scopeParams = [owner_id, owner_id];
+    } else {
+      scopeSql = `WHERE (t.created_by = ? OR t.id IN (SELECT team_id FROM team_user WHERE user_id = ?))`;
+      scopeParams = [user_id, user_id];
+    }
+
     // First, get teams with job + leader info
-    const [teams] = await connection.execute(
-      `SELECT 
+    const [teams] = await connection.query(
+      `SELECT
           t.id AS team_id,
           t.team_name,
           t.team_color,
@@ -246,7 +262,9 @@ router.get("/all", auth.authenticateToken, async (req, res) => {
        FROM teams t
        LEFT JOIN job j ON t.job_id = j.id
        LEFT JOIN user u ON t.team_leader = u.id
-       ORDER BY t.id DESC`
+       ${scopeSql}
+       ORDER BY t.id DESC`,
+      scopeParams
     );
 
     // Now, fetch members for each team
