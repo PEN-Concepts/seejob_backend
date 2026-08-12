@@ -578,59 +578,71 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
         ? userRows[0].created_by
         : loggedInUserId;
 
-    // Jobs accessible by this user (same rule as /jobs)
-    const [jobs] = await connection.execute(
+    // JOB VISIBILITY for the calendar / Project-Schedule options. A Subcontractor
+    // or Client (category 2/3) may see a job ONLY if they have a task assigned to
+    // them under it (directly or via a team) — NOT the owner's whole job list.
+    // This is the endpoint that was leaking the owner's Leads + Archived jobs onto
+    // a client's Master Calendar. Owner (4) and employees (1) keep the account view.
+    const viewerCategory = Number(req.user && req.user.category);
+    const isRestrictedViewer = viewerCategory === 2 || viewerCategory === 3;
+
+    let jobsWhere, jobsParams;
+    if (isRestrictedViewer) {
+      jobsWhere = `j.id IN (
+        SELECT DISTINCT t.job_id FROM tasks t
+        WHERE t.job_id IS NOT NULL AND LOWER(t.task_type) = 'job'
+          AND (t.user_id = ? OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
+      )`;
+      jobsParams = [loggedInUserId, loggedInUserId];
+    } else {
+      jobsWhere = `(
+        j.created_by = ?
+        OR j.id IN (SELECT job_id FROM job_contacts WHERE contact_id IN (?, ?))
+        OR j.id IN (SELECT DISTINCT job_id FROM tasks WHERE user_id = ? OR created_by = ?)
+      )`;
+      jobsParams = [managerId, loggedInUserId, managerId, loggedInUserId, managerId];
+    }
+
+    const [jobs] = await connection.query(
       `
         SELECT
-          j.id,
-          j.name,
-          j.address,
-          j.city,
-          j.state,
-          j.zipcode,
-          j.contract_status,
-          j.type,
-          j.status,
-          j.color
+          j.id, j.name, j.address, j.city, j.state, j.zipcode,
+          j.contract_status, j.type, j.status, j.color
         FROM job j
-        WHERE
-          (
-            j.created_by = ?
-            OR j.id IN (
-              SELECT job_id
-              FROM job_contacts
-              WHERE contact_id IN (?, ?)
-            )
-            OR j.id IN (
-              SELECT DISTINCT job_id
-              FROM tasks
-              WHERE user_id = ? OR created_by = ?
-            )
-          )
+        WHERE ${jobsWhere}
         ORDER BY j.sort_order ASC, j.id ASC
       `,
-      [managerId, loggedInUserId, managerId, loggedInUserId, managerId]
+      jobsParams
     );
 
-    // Leads for this manager
+    // Leads follow the same rule: a restricted viewer sees a lead ONLY if they
+    // have a task assigned to them under it (task_type='lead', job_id = lead id).
+    // Per spec the assigned-task rule applies regardless of status (incl. archived),
+    // so the archived/status filters apply only to the owner/employee account view.
+    let leadsWhere, leadsParams;
+    if (isRestrictedViewer) {
+      leadsWhere = `l.id IN (
+        SELECT DISTINCT t.job_id FROM tasks t
+        WHERE t.job_id IS NOT NULL AND LOWER(t.task_type) = 'lead'
+          AND (t.user_id = ? OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
+      )`;
+      leadsParams = [loggedInUserId, loggedInUserId];
+    } else {
+      leadsWhere = `l.user_id = ?
+        AND (l.status IS NULL OR l.status <> '3')
+        AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')`;
+      leadsParams = [managerId];
+    }
     const [leads] = await connection.query(
       `
         SELECT
-          l.id,
-          l.lead_name,
-          l.lead_type,
-          l.status,
-          l.project_street_address,
-          l.project_town,
-          l.project_state,
-          l.leads_zipcode
+          l.id, l.lead_name, l.lead_type, l.status,
+          l.project_street_address, l.project_town, l.project_state, l.leads_zipcode
         FROM leads l
-        WHERE l.user_id = ?
-          AND (l.status IS NULL OR l.status <> '3')
-          AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')
+        WHERE ${leadsWhere}
         ORDER BY l.created_at DESC
       `,
-      [managerId]
+      leadsParams
     );
 
     const normalize = (v) => (v == null ? "" : String(v)).trim();
