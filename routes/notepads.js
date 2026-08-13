@@ -11,7 +11,22 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require('nodemailer');
 var auth = require("../services/authentication");
+const { isSameAccount } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
+
+// Notepad entries are owned via notepad.user_id; groups via notepad_groups.created_by.
+async function notepadOwnedByCaller(callerId, notepadId) {
+  if (notepadId == null || notepadId === "") return false;
+  const [[row]] = await pool.query("SELECT user_id FROM notepad WHERE id = ? LIMIT 1", [Number(notepadId)]);
+  if (!row) return false;
+  return isSameAccount(callerId, row.user_id);
+}
+async function notepadGroupOwnedByCaller(callerId, groupId) {
+  if (groupId == null || groupId === "") return false;
+  const [[row]] = await pool.query("SELECT created_by FROM notepad_groups WHERE id = ? LIMIT 1", [Number(groupId)]);
+  if (!row) return false;
+  return isSameAccount(callerId, row.created_by);
+}
 
 
 const mime = require('mime-types');
@@ -101,7 +116,7 @@ router.post('/add', auth.authenticateToken, async (req, res) => {
 
 
 router.get('/fetch', auth.authenticateToken, async (req, res) => {
-  const user_id = req.query.user_id; // coming from Angular query param
+  const user_id = req.user.id; // SECURITY: force to caller (was ?user_id= IDOR)
   let connection;
 
   if (!user_id) {
@@ -289,7 +304,7 @@ router.post(
 
 router.get('/all/:id', auth.authenticateToken, async (req, res) => {
   let connection;
-  const user_id = req.params.id;
+  const user_id = req.user.id; // SECURITY: force to caller (was /all/:id IDOR)
 
   try {
     connection = await pool.getConnection();
@@ -365,6 +380,10 @@ router.post(
     const { job_id, nudge, notepad_id, startDate, endDate, description } = req.body;
     if (!notepad_id) {
       return res.status(400).json({ message: 'Missing notepad_id (primary key)' });
+    }
+    // SECURITY: only edit your own account's notepad entry (was IDOR by id).
+    if (!(await notepadOwnedByCaller(req.user.id, notepad_id))) {
+      return res.status(403).json({ message: 'This note does not belong to your account.' });
     }
 
     const imageFiles = req.files?.image || [];
@@ -570,7 +589,7 @@ router.post('/addgroup', auth.authenticateToken, async (req, res) => {
 //   }
 // });
 router.get('/get-groups-with-users', auth.authenticateToken, async (req, res) => {
-  const user_id = req.query.user_id;
+  const user_id = req.user.id; // SECURITY: force to caller (was ?user_id= IDOR)
   let connection;
 
   if (!user_id) {
@@ -637,7 +656,10 @@ router.get('/get-groups-with-users', auth.authenticateToken, async (req, res) =>
 router.put('/updategroup/:id', auth.authenticateToken, async (req, res) => {
 
   const groupId = req.params.id;
-  console.log(groupId);
+  // SECURITY: only edit a group in your own account (was IDOR by id).
+  if (!(await notepadGroupOwnedByCaller(req.user.id, groupId))) {
+    return res.status(403).json({ message: 'This group does not belong to your account.' });
+  }
   const { name, user_ids } = req.body;
   // const updated_by = res.locals.id;
    const updated_by = 1
@@ -707,6 +729,10 @@ router.put('/update-group-favourite', auth.authenticateToken, async (req, res) =
   if (typeof group_id === 'undefined' || typeof add_to_favourite === 'undefined') {
     return res.status(400).json({ message: 'Invalid request payload' });
   }
+  // SECURITY: only favourite a group in your own account (was IDOR by id).
+  if (!(await notepadGroupOwnedByCaller(req.user.id, group_id))) {
+    return res.status(403).json({ message: 'This group does not belong to your account.' });
+  }
 
   let connection;
   try {
@@ -727,6 +753,10 @@ router.post('/update-single-field', auth.authenticateToken, upload.single('image
   const { notepad_id, job_id, nudge, image, audio } = req.body;
 
   if (!notepad_id) return res.status(400).json({ message: 'Missing ID' });
+  // SECURITY: only edit your own account's note (was IDOR by id).
+  if (!(await notepadOwnedByCaller(req.user.id, notepad_id))) {
+    return res.status(403).json({ message: 'This note does not belong to your account.' });
+  }
 
   const fields = [];
   const values = [];
@@ -784,6 +814,10 @@ router.post('/delete-image', auth.authenticateToken, async (req, res) => {
 
   if (!notepad_id || !filename) {
     return res.status(400).json({ message: 'Missing required fields' });
+  }
+  // SECURITY: only delete images from your own account's note (was IDOR by id).
+  if (!(await notepadOwnedByCaller(req.user.id, notepad_id))) {
+    return res.status(403).json({ message: 'This note does not belong to your account.' });
   }
 
   let connection;
