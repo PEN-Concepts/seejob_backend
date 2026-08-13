@@ -13,7 +13,7 @@ const logger = require('../common/logger');
 const engine = require('../services/scheduleEngine');
 const cascade = require('../services/scheduleCascade');
 const notify = require('../services/notify');
-const { requirePlan, denyRestrictedJobData } = require('../utils/access');
+const { requirePlan, denyRestrictedJobData, isSameAccount } = require('../utils/access');
 const { ensureScheduleTemplateTables } = require('../services/dbMigrations');
 const { getTimeStamp } = require('../common/timdate');
 
@@ -35,6 +35,54 @@ router.use(async (req, res, next) => {
 // 403). authenticateToken runs first so requirePlan can read req.user.
 // Gantt Scheduler data is off-limits to Subcontractors/Clients on ANY job.
 router.use(auth.authenticateToken, denyRestrictedJobData, requirePlan('platinum'));
+
+// ── Cross-account isolation for ALL Gantt/schedule data ────────────────────────
+// A schedule hangs off a job (or lead). Previously any Platinum account could
+// read/rewrite/wipe another company's Gantt by passing a foreign :sid / :jobId
+// (and its nested :iid/:depId). These guards resolve each id to its parent
+// job/lead FROM THE DB and require it to belong to the caller's account. Fail
+// CLOSED (403). :iid/:depId are always nested under a verified :sid.
+async function ownsScheduleOwner(userId, ownerId, ownerType) {
+  if (ownerId == null || ownerId === '') return false;
+  const isLead = String(ownerType || 'job').toLowerCase() === 'lead';
+  const table = isLead ? 'leads' : 'job';
+  const col = isLead ? 'user_id' : 'created_by';
+  const [[row]] = await pool.query(
+    `SELECT ${col} AS owner FROM ${table} WHERE id = ? LIMIT 1`,
+    [Number(ownerId)]
+  );
+  if (!row) return false;
+  return isSameAccount(userId, row.owner);
+}
+function scheduleForbidden(res, msg) {
+  return res.status(403).json({ success: false, code: '403', message: msg });
+}
+router.param('sid', async (req, res, next, sid) => {
+  try {
+    const [[s]] = await pool.query(
+      'SELECT job_id, owner_type FROM job_schedules WHERE id = ? LIMIT 1',
+      [Number(sid)]
+    );
+    if (!s) return res.status(404).json({ success: false, message: 'Schedule not found' });
+    if (!(await ownsScheduleOwner(req.user.id, s.job_id, s.owner_type)))
+      return scheduleForbidden(res, 'This schedule does not belong to your account.');
+    return next();
+  } catch (e) {
+    logger.error('jobSchedules sid guard: ' + e.message);
+    return scheduleForbidden(res, 'Forbidden');
+  }
+});
+router.param('jobId', async (req, res, next, jobId) => {
+  try {
+    const ownerType = (req.query && req.query.owner_type) || 'job';
+    if (!(await ownsScheduleOwner(req.user.id, jobId, ownerType)))
+      return scheduleForbidden(res, 'This job does not belong to your account.');
+    return next();
+  } catch (e) {
+    logger.error('jobSchedules jobId guard: ' + e.message);
+    return scheduleForbidden(res, 'Forbidden');
+  }
+});
 
 function dispatchAll(payloads) {
   for (const p of payloads || []) {
@@ -70,6 +118,9 @@ router.post('/blank', async (req, res) => {
   const jobId = Number(req.body && req.body.job_id);
   const ownerType = req.body && req.body.owner_type === 'lead' ? 'lead' : 'job';
   if (!jobId) return res.status(400).json({ success: false, message: 'job_id is required' });
+  // SECURITY: only create a schedule on a job/lead in the caller's own account.
+  if (!(await ownsScheduleOwner(req.user.id, jobId, ownerType)))
+    return scheduleForbidden(res, 'This job does not belong to your account.');
   let connection;
   try {
     connection = await pool.getConnection();
