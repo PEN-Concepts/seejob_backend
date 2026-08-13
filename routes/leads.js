@@ -39,6 +39,52 @@ client_email: Joi.string().allow('', null).optional(),
 client_phone: Joi.string().allow('', null).optional(),
 });
 
+// Does the lead belong to the caller's account? Leads are owned via leads.user_id.
+async function leadOwnedByCaller(userId, leadId) {
+  if (leadId == null || leadId === "") return false;
+  const [[row]] = await pool.query("SELECT user_id FROM leads WHERE id = ? LIMIT 1", [Number(leadId)]);
+  if (!row) return false;
+  return isSameAccount(userId, row.user_id);
+}
+// Cross-account guard for lead-scoped routes. getLeadId(req) locates the lead id
+// (param/body/query). 404 if missing, 403 if another account's. Fail CLOSED.
+function requireLeadOwnership(getLeadId) {
+  return async (req, res, next) => {
+    try {
+      let leadId;
+      try { leadId = getLeadId(req); } catch (_) { leadId = null; }
+      if (leadId == null || leadId === "") return next();
+      const [[row]] = await pool.query("SELECT user_id FROM leads WHERE id = ? LIMIT 1", [Number(leadId)]);
+      if (!row) return res.status(404).json({ message: "Lead not found" });
+      if (!(await isSameAccount(req.user.id, row.user_id)))
+        return res.status(403).json({ message: "This lead does not belong to your account." });
+      return next();
+    } catch (e) {
+      logger.error("requireLeadOwnership: " + e.message);
+      return res.status(403).json({ message: "Forbidden" });
+    }
+  };
+}
+
+// Guard a route whose :param is a CHILD record id (note/todo/file); resolve its
+// parent lead and require account ownership. Fail CLOSED.
+function requireChildLeadOwnership(table, idParam) {
+  return async (req, res, next) => {
+    try {
+      const id = req.params[idParam];
+      if (id == null || id === "") return next();
+      const [[row]] = await pool.query(`SELECT lead_id FROM ${table} WHERE id = ? LIMIT 1`, [Number(id)]);
+      if (!row) return res.status(404).json({ message: "Not found" });
+      if (!(await leadOwnedByCaller(req.user.id, row.lead_id)))
+        return res.status(403).json({ message: "This record does not belong to your account." });
+      return next();
+    } catch (e) {
+      logger.error("requireChildLeadOwnership: " + e.message);
+      return res.status(403).json({ message: "Forbidden" });
+    }
+  };
+}
+
 router.post("/leads/create", auth.authenticateToken, async (req, res) => {
   try {
     const { error } = leadsSchema.validate(req.body);
@@ -112,7 +158,7 @@ router.post("/leads/create", auth.authenticateToken, async (req, res) => {
       next_phase,
       finance_method,
       created_at,
-      user_id
+      req.user.id, // SECURITY: owner is the authenticated caller (was body user_id)
     ];
 
     // Safety net: mysql2 throws on undefined bind params. Any field the client
@@ -133,7 +179,9 @@ router.post("/leads/create", auth.authenticateToken, async (req, res) => {
 
 // GET all leads with  user_id filter
 router.get("/leads/all/:id", auth.authenticateToken, async (req, res) => {
-  const user_id = req.params.id;
+  // SECURITY: return only the CALLER's account leads (was IDOR — dump any user's
+  // leads + client PII by passing their id).
+  const wid = Number(req.user.working_id) || Number(req.user.id);
   // ?archived=1 returns ONLY archived leads (for the Archive tab); default
   // returns active leads and EXCLUDES bid_status='Archived'.
   const onlyArchived =
@@ -155,11 +203,11 @@ router.get("/leads/all/:id", auth.authenticateToken, async (req, res) => {
         COALESCE(u.mobile, l.client_phone) AS client_phone
       FROM leads l
       LEFT JOIN user u ON u.id = l.client_id
-      WHERE l.user_id = ?
+      WHERE l.user_id IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
         AND (l.status IS NULL OR l.status <> '3')
         ${archiveClause}
       ORDER BY l.created_at DESC
-    `, [ user_id]);
+    `, [wid, wid]);
 
     res.status(200).json(rows);
   } catch (err) {
@@ -172,7 +220,7 @@ router.get("/leads/all/:id", auth.authenticateToken, async (req, res) => {
 
 
 // READ single lead
-router.get("/leads/:id",auth.authenticateToken, async (req, res) => {
+router.get("/leads/:id",auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   try {
     // const sql = `
     //   SELECT 
@@ -251,7 +299,7 @@ router.put("/leads/update/:id", auth.authenticateToken, async (req, res) => {
 });
 
 //update only bid status
-router.patch("/leads/update-status/:id", auth.authenticateToken, async (req, res) => {
+router.patch("/leads/update-status/:id", auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   const { bid_status } = req.body;
 
   if (!bid_status) return res.status(400).json({ message: "Bid status is required" });
@@ -282,7 +330,7 @@ router.patch("/leads/update-status/:id", auth.authenticateToken, async (req, res
 });
 
 // Unarchive: restore the pre-archive bid_status (fallback 'Waiting') and clear it.
-router.patch("/leads/unarchive/:id", auth.authenticateToken, async (req, res) => {
+router.patch("/leads/unarchive/:id", auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   try {
     const [[row]] = await pool.query(
       `SELECT prior_bid_status FROM leads WHERE id = ?`,
@@ -303,7 +351,7 @@ router.patch("/leads/unarchive/:id", auth.authenticateToken, async (req, res) =>
 });
 
 // update only next phase
-router.patch("/leads/update-phase/:id", auth.authenticateToken, async (req, res) => {
+router.patch("/leads/update-phase/:id", auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   const { next_phase } = req.body;
   if (!next_phase) return res.status(400).json({ message: "Next phase is required" });
 
@@ -323,7 +371,7 @@ router.patch("/leads/update-phase/:id", auth.authenticateToken, async (req, res)
 });
 
 // DELETE lead
-router.delete("/leads/delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/leads/delete/:id", auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   try {
     const [result] = await pool.query("DELETE FROM leads WHERE id = ?", [req.params.id]);
     if (result.affectedRows === 0) return res.status(404).json({ message: "Lead not found" });
@@ -336,7 +384,7 @@ router.delete("/leads/delete/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // leads_comments get
-router.get('/leads/:id/comments', auth.authenticateToken, async (req, res) => {
+router.get('/leads/:id/comments', auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   try {
     const sql = `
       SELECT * FROM lead_comments
@@ -352,7 +400,7 @@ router.get('/leads/:id/comments', auth.authenticateToken, async (req, res) => {
 });
 
 // leads_comments post
-router.post('/leads/:id/comments', auth.authenticateToken, async (req, res) => {
+router.post('/leads/:id/comments', auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   const { comment } = req.body;
   const lead_id = req.params.id;
 
@@ -384,7 +432,7 @@ async function ensureLeadNoteDateColumn() {
   leadNoteDateEnsured = true;
 }
 
-router.post('/leads/:id/notes/create', auth.authenticateToken, async (req, res) => {
+router.post('/leads/:id/notes/create', auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   const { title, description, meeting_date } = req.body;
   const lead_id = req.params.id;
 
@@ -407,7 +455,7 @@ router.post('/leads/:id/notes/create', auth.authenticateToken, async (req, res) 
 });
 
 // Get notes for a specific lead
-router.get('/leads/:id/notes', auth.authenticateToken, async (req, res) => {
+router.get('/leads/:id/notes', auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   const lead_id = req.params.id;
 
   try {
@@ -427,7 +475,7 @@ router.get('/leads/:id/notes', auth.authenticateToken, async (req, res) => {
 });
 
 // leads_notes post
-router.put('/leads/notes/update/:noteId', auth.authenticateToken, async (req, res) => {
+router.put('/leads/notes/update/:noteId', auth.authenticateToken, requireChildLeadOwnership('lead_notes', 'noteId'), async (req, res) => {
   const { title, description } = req.body;
   const noteId = req.params.noteId;
 
@@ -447,7 +495,7 @@ router.put('/leads/notes/update/:noteId', auth.authenticateToken, async (req, re
 
 
 // leads_notes delete
-router.delete('/leads/notes/delete/:noteId', auth.authenticateToken, async (req, res) => {
+router.delete('/leads/notes/delete/:noteId', auth.authenticateToken, requireChildLeadOwnership('lead_notes', 'noteId'), async (req, res) => {
   const noteId = req.params.noteId;
 
   try {
@@ -474,7 +522,7 @@ const leadsToDoSchema = Joi.object({
 });
 
 // CREATE a leads_to_do item
-router.post("/leads-to-do/create", auth.authenticateToken, async (req, res) => {
+router.post("/leads-to-do/create", auth.authenticateToken, requireLeadOwnership((r) => r.body.lead_id), async (req, res) => {
     try {
         const { error } = leadsToDoSchema.validate(req.body);
         if (error) return res.status(400).json({ message: error.details[0].message });
@@ -498,8 +546,11 @@ router.post("/leads-to-do/create", auth.authenticateToken, async (req, res) => {
 // READ all leads_to_do
 router.get("/leads-to-do/all", auth.authenticateToken, async (req, res) => {
     try {
+        // SECURITY: only this account's lead-todos (was a global dump of every
+        // account's lead-todos + lead descriptions).
+        const wid = Number(req.user.working_id) || Number(req.user.id);
         const sql = `
-            SELECT 
+            SELECT
                 t.id,
                 t.lead_id,
                 t.task_name,
@@ -510,9 +561,10 @@ router.get("/leads-to-do/all", auth.authenticateToken, async (req, res) => {
                 t.created_at
             FROM leads_to_do t
             LEFT JOIN leads l ON t.lead_id = l.id
+            WHERE l.user_id IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
             ORDER BY t.created_at DESC
         `;
-        const [rows] = await pool.query(sql);
+        const [rows] = await pool.query(sql, [wid, wid]);
         res.status(200).json(rows);
     } catch (err) {
         logger.error("Error fetching leads_to_do", err);
@@ -521,7 +573,7 @@ router.get("/leads-to-do/all", auth.authenticateToken, async (req, res) => {
 });
 
 // READ single leads_to_do
-router.get("/leads-to-do/:id", auth.authenticateToken, async (req, res) => {
+router.get("/leads-to-do/:id", auth.authenticateToken, requireChildLeadOwnership('leads_to_do', 'id'), async (req, res) => {
     try {
         const sql = `
             SELECT 
@@ -547,7 +599,7 @@ router.get("/leads-to-do/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // UPDATE leads_to_do
-router.put("/leads-to-do/update/:id", auth.authenticateToken, async (req, res) => {
+router.put("/leads-to-do/update/:id", auth.authenticateToken, requireChildLeadOwnership('leads_to_do', 'id'), async (req, res) => {
     try {
         const { error } = leadsToDoSchema.validate(req.body);
         if (error) return res.status(400).json({ message: error.details[0].message });
@@ -571,7 +623,7 @@ router.put("/leads-to-do/update/:id", auth.authenticateToken, async (req, res) =
 });
 
 // DELETE leads_to_do
-router.delete("/leads-to-do/delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/leads-to-do/delete/:id", auth.authenticateToken, requireChildLeadOwnership('leads_to_do', 'id'), async (req, res) => {
     try {
         const [result] = await pool.query("DELETE FROM leads_to_do WHERE id = ?", [req.params.id]);
         if (result.affectedRows === 0) return res.status(404).json({ message: "Leads To-Do not found" });
@@ -585,7 +637,7 @@ router.delete("/leads-to-do/delete/:id", auth.authenticateToken, async (req, res
 // ------------------ leads_to_do Section ends------------------
 
 // PUT /api/leads/update-budget
-router.put('/update-budget', auth.authenticateToken, async (req, res) => {
+router.put('/update-budget', auth.authenticateToken, requireLeadOwnership((r) => r.body.id), async (req, res) => {
   const { id, budget, job_budget, finance_method } = req.body;
 
   if (!id) {
@@ -607,7 +659,7 @@ router.put('/update-budget', auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) => {
+router.post("/convert-to-job/:leadId", auth.authenticateToken, requireLeadOwnership((r) => r.params.leadId), async (req, res) => {
   const leadId = req.params.leadId;
   const userId = req.user.id; // assuming JWT contains user id
 
@@ -701,7 +753,7 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, async (req, res) 
 
 
 // routes/leads.js
-router.put("/leads/:id", auth.authenticateToken, async (req, res) => {
+router.put("/leads/:id", auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   const id = req.params.id;
 
   const {
@@ -748,7 +800,7 @@ router.put("/leads/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // Delete a lead by ID
-router.delete("/Delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/Delete/:id", auth.authenticateToken, requireLeadOwnership((r) => r.params.id), async (req, res) => {
   const leadId = req.params.id;
   const userId = req.user.id; // Get user ID from the authenticated token
 
@@ -831,6 +883,11 @@ router.post(
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ message: "No files uploaded" });
     }
+    // SECURITY: only upload to a lead in the caller's account (job_id here is the
+    // lead id). Was IDOR — attach files to any account's lead.
+    if (!(await leadOwnedByCaller(userId, job_id))) {
+      return res.status(403).json({ message: "This lead does not belong to your account." });
+    }
 
     let connection;
     try {
@@ -884,7 +941,7 @@ async function ensureLeadDocShareColumn(connection) {
   }
 }
 
-router.get("/get-files", auth.authenticateToken, async (req, res) => {
+router.get("/get-files", auth.authenticateToken, requireLeadOwnership((r) => r.query.lead_id), async (req, res) => {
   const { job_id } = req.query;
   let connection;
 
@@ -914,7 +971,7 @@ router.get("/get-files", auth.authenticateToken, async (req, res) => {
 
 // Toggle a lead document's "shared with subs" flag (mirrors the job-file share
 // endpoint). Gated by id only, matching the existing lead file endpoints.
-router.patch("/lead-file/:id/share", auth.authenticateToken, async (req, res) => {
+router.patch("/lead-file/:id/share", auth.authenticateToken, requireChildLeadOwnership("lead_documents", "id"), async (req, res) => {
   const fileId = req.params.id;
   const shared = req.body?.shared ? 1 : 0;
   let connection;
@@ -938,7 +995,7 @@ router.patch("/lead-file/:id/share", auth.authenticateToken, async (req, res) =>
   }
 });
 
-router.post("/delete-file", auth.authenticateToken, async (req, res) => {
+router.post("/delete-file", auth.authenticateToken, requireLeadOwnership((r) => r.body.lead_id), async (req, res) => {
   const { job_id, name, type } = req.body;
   let connection;
 
