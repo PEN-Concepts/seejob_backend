@@ -24,6 +24,48 @@ function ownerTypeOf(v) {
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
 const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData } = require("../utils/access");
+// Cross-account guard: the job/lead the request targets must belong to the
+// caller's account. getJobId(req) locates the id (param/query/body); optional
+// getOwnerType(req) yields 'job'|'lead'. 404 if missing, 403 if another account's.
+// Fail CLOSED. Apply AFTER auth.authenticateToken. When no id is present it passes
+// through (the handler's own validation reports the missing id).
+// Does the job/lead belong to the caller's account? For in-handler checks on
+// records (stages/materials/etc.) whose parent job id is resolved from the DB.
+async function jobOwnedByCaller(userId, jobId, ownerType) {
+  if (jobId == null || jobId === "") return false;
+  const isLead = String(ownerType || "job").toLowerCase() === "lead";
+  const [[row]] = await pool.query(
+    `SELECT ${isLead ? "user_id" : "created_by"} AS owner FROM ${isLead ? "leads" : "job"} WHERE id = ? LIMIT 1`,
+    [Number(jobId)]
+  );
+  if (!row) return false;
+  return isSameAccount(userId, row.owner);
+}
+
+function requireJobOwnership(getJobId, getOwnerType) {
+  return async (req, res, next) => {
+    try {
+      let jobId;
+      try { jobId = getJobId(req); } catch (_) { jobId = null; }
+      if (jobId == null || jobId === "") return next();
+      let ownerType = "job";
+      try { ownerType = getOwnerType ? getOwnerType(req) : "job"; } catch (_) {}
+      const isLead = String(ownerType || "job").toLowerCase() === "lead";
+      const [[row]] = await pool.query(
+        `SELECT ${isLead ? "user_id" : "created_by"} AS owner FROM ${isLead ? "leads" : "job"} WHERE id = ? LIMIT 1`,
+        [Number(jobId)]
+      );
+      if (!row) return res.status(404).json({ success: false, message: (isLead ? "Lead" : "Job") + " not found" });
+      if (!(await isSameAccount(req.user.id, row.owner)))
+        return res.status(403).json({ success: false, code: "403", message: "This " + (isLead ? "lead" : "job") + " does not belong to your account." });
+      return next();
+    } catch (e) {
+      logger.error("requireJobOwnership: " + e.message);
+      return res.status(403).json({ success: false, code: "403", message: "Forbidden" });
+    }
+  };
+}
+
 const jobSchema = Joi.object({
   type: Joi.string().valid("Residential", "Commercial").required(),
   name: Joi.string().max(100).required(),
@@ -361,7 +403,7 @@ async function ensureClientContact(connection, { createdBy, name, email, mobile 
 
 // ---- /send-invite route ------------------------------------------------
 
-router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, requireJobOwnership((r) => r.body.job_id), async (req, res) => {
   const { error, value } = inviteSchema.validate(req.body);
   if (error) {
     return res.status(400).json({ message: error.details[0].message });
@@ -1525,7 +1567,7 @@ router.patch("/jobs/:id/status", auth.authenticateToken, denyExpiredFreeWrites, 
   }
 });
 
-router.post("/stages", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.post("/stages", auth.authenticateToken, denyExpiredFreeWrites, requireJobOwnership((r) => r.body.job_id, (r) => r.body.owner_type), async (req, res) => {
  
   const signedin_user = res.locals.id;
   const currentTimestamp = getTimeStamp();
@@ -1560,7 +1602,7 @@ router.post("/stages", auth.authenticateToken, denyExpiredFreeWrites, async (req
     if (connection) connection.release();
   }
 });
-router.get("/stages/:job_id", auth.authenticateToken, denyRestrictedJobData, blockExpiredOwnRecord((r) => r.params.job_id, (r) => r.query.owner_type), async (req, res) => {
+router.get("/stages/:job_id", auth.authenticateToken, denyRestrictedJobData, blockExpiredOwnRecord((r) => r.params.job_id, (r) => r.query.owner_type), requireJobOwnership((r) => r.params.job_id, (r) => r.query.owner_type), async (req, res) => {
   const job_id = req.params.job_id;
   const ownerType = ownerTypeOf(req.query.owner_type);
 
@@ -1584,6 +1626,14 @@ router.get("/stages/:job_id", auth.authenticateToken, denyRestrictedJobData, blo
 
 router.put("/stages/:id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   const stageId = req.params.id;
+
+  // SECURITY: only edit a stage on a job/lead in the caller's account (was IDOR).
+  {
+    const [[st]] = await pool.query("SELECT job_id, owner_type FROM stages WHERE id = ? LIMIT 1", [stageId]);
+    if (!st) return res.status(404).json({ message: "Stage not found" });
+    if (!(await jobOwnedByCaller(req.user.id, st.job_id, st.owner_type)))
+      return res.status(403).json({ message: "This stage does not belong to your account." });
+  }
 
 
   const { error, value } = stageSchema.validate(req.body);
@@ -1620,7 +1670,7 @@ router.put("/stages/:id", auth.authenticateToken, denyExpiredFreeWrites, async (
 // (a Gantt trade has no % field). Keyed by the trade's job_schedule_items id.
 
 // Read every saved percent for a job's Gantt trades → [{ schedule_item_id, percent }].
-router.get("/gantt-stage-progress/:job_id", auth.authenticateToken, async (req, res) => {
+router.get("/gantt-stage-progress/:job_id", auth.authenticateToken, requireJobOwnership((r) => r.params.job_id), async (req, res) => {
   const jobId = Number(req.params.job_id);
   const ownerType = ownerTypeOf(req.query.owner_type);
   if (!jobId) return res.status(400).json({ message: "job_id is required" });
@@ -1675,7 +1725,7 @@ router.put("/gantt-stage-progress/:item_id", auth.authenticateToken, denyExpired
 });
 
 
-router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites, requireJobOwnership((r) => r.params.jobId), async (req, res) => {
   const jobId = Number(req.params.jobId);
   if (!jobId) {
     return res.status(400).json({ message: "jobId is required" });
@@ -2272,7 +2322,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/get-job-address/:id", auth.authenticateToken, async (req, res) => {
+router.get("/get-job-address/:id", auth.authenticateToken, requireJobOwnership((r) => r.params.id), async (req, res) => {
   const jobId = req.params.id;
   let connection;
 
@@ -2370,7 +2420,7 @@ async function ensureDocShareColumn(connection) {
   }
 }
 
-router.get("/get-files", auth.authenticateToken, denyRestrictedJobData, async (req, res) => {
+router.get("/get-files", auth.authenticateToken, denyRestrictedJobData, requireJobOwnership((r) => r.query.job_id), async (req, res) => {
   const { job_id } = req.query;
   let connection;
 
@@ -2484,6 +2534,7 @@ router.delete("/job-file/:id", auth.authenticateToken, denyExpiredFreeWrites, as
 router.post(
   "/convert-to-lead/:jobId",
   auth.authenticateToken,
+  requireJobOwnership((r) => r.params.jobId),
   async (req, res) => {
     const jobId = req.params.jobId;
     const userId = req.user.id;
@@ -2643,7 +2694,7 @@ router.delete("/delete/:id", auth.authenticateToken, denyExpiredFreeWrites, asyn
   }
 });
 
-router.get("/materials", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.owner_type), async (req, res) => {
+router.get("/materials", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.owner_type), requireJobOwnership((r) => r.query.job_id, (r) => r.query.owner_type), async (req, res) => {
   let connection;
   const { job_id } = req.query;
   const ownerType = ownerTypeOf(req.query.owner_type);
@@ -2685,7 +2736,7 @@ router.get("/materials", auth.authenticateToken, blockExpiredOwnRecord((r) => r.
   }
 });
 
-router.post("/materials", auth.authenticateToken, denyExpiredFreeWrites, enforcePlanFeatureForMaterials, async (req, res) => {
+router.post("/materials", auth.authenticateToken, denyExpiredFreeWrites, enforcePlanFeatureForMaterials, requireJobOwnership((r) => r.body.job_id, (r) => r.body.owner_type), async (req, res) => {
   const { error, value } = materialSchema.validate(req.body);
 
   if (error) {
@@ -2743,12 +2794,15 @@ router.put("/materials/:id", auth.authenticateToken, denyExpiredFreeWrites, enfo
     connection = await pool.getConnection();
 
     const [existing] = await connection.execute(
-      "SELECT id FROM materials WHERE id = ?",
+      "SELECT id, job_id, owner_type FROM materials WHERE id = ?",
       [id]
     );
     if (existing.length === 0) {
       return res.status(404).json({ code: "NOT_FOUND", message: "Material not found" });
     }
+    // SECURITY: only edit a material on a job/lead in the caller's account (was IDOR).
+    if (!(await jobOwnedByCaller(req.user.id, existing[0].job_id, existing[0].owner_type)))
+      return res.status(403).json({ code: "403", message: "This material does not belong to your account." });
 
     await connection.execute(
       `UPDATE materials SET item_type = ?, room = ?, material = ?, manufacturer = ?, size = ?, color = ?
@@ -2780,7 +2834,7 @@ router.delete("/materials/:id", auth.authenticateToken, denyExpiredFreeWrites, e
     connection = await pool.getConnection();
 
     const [existing] = await connection.execute(
-      "SELECT id FROM materials WHERE id = ?",
+      "SELECT id, job_id, owner_type FROM materials WHERE id = ?",
       [id]
     );
 
@@ -2791,6 +2845,9 @@ router.delete("/materials/:id", auth.authenticateToken, denyExpiredFreeWrites, e
       });
     }
 
+    // SECURITY: only delete a material on a job/lead in the caller's account (was IDOR).
+    if (!(await jobOwnedByCaller(req.user.id, existing[0].job_id, existing[0].owner_type)))
+      return res.status(403).json({ code: "403", message: "This material does not belong to your account." });
     await connection.execute("DELETE FROM materials WHERE id = ?", [id]);
 
     res.status(200).json({
