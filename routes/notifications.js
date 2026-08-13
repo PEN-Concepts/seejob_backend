@@ -72,8 +72,9 @@ router.put("/mark-as-read/:id", auth.authenticateToken, async (req, res) => {
     connection = await pool.getConnection();
 
     const [result] = await connection.query(
-      "UPDATE notifications SET status = 0 WHERE id = ?",
-      [id]
+      // SECURITY: only the recipient may mark their own notification read (was IDOR).
+      "UPDATE notifications SET status = 0 WHERE id = ? AND receiver_id = ?",
+      [id, req.user.id]
     );
 
     if (result.affectedRows > 0) {
@@ -107,7 +108,8 @@ router.get(
   "/unread-task/:userId",
   auth.authenticateToken,
   async (req, res) => {
-    const userId = Number(req.params.userId);
+    // SECURITY: read only the caller's own task notifications (was IDOR via param).
+    const userId = Number(req.user.id);
 
     if (!userId) {
       return res.status(400).json({ message: "Invalid userId" });

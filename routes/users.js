@@ -1169,10 +1169,14 @@ router.post("/test-push", auth.authenticateToken, async (req, res) => {
   }
 });
 router.post("/saveDeviceToken", auth.authenticateToken, async (req, res) => {
-  const { user_id, fcm_token } = req.body;
+  const { fcm_token } = req.body;
+  // SECURITY: a push-notification device token may ONLY be registered for the
+  // caller themselves (was: any body user_id → register attacker's token under a
+  // victim / hijack a victim's notifications).
+  const user_id = req.user.id;
 
   if (!user_id || !fcm_token) {
-    return res.status(400).json({ code: "400", message: "user_id and fcm_token required" });
+    return res.status(400).json({ code: "400", message: "fcm_token required" });
   }
 
   let connection;
@@ -2476,6 +2480,11 @@ router.post("/forgot-password", async (req, res) => {
 
 router.get("/get-user/:id", auth.authenticateToken, async (req, res) => {
   let user_id = req.params.id;
+  // SECURITY: only view yourself or a user in your own account (was IDOR — any
+  // user's full profile incl. social_security by id).
+  if (Number(user_id) !== Number(req.user.id) && !(await isSameAccount(req.user.id, user_id))) {
+    return res.status(403).json({ code: "403", message: "This user is not in your account." });
+  }
   let connection;
   try {
     connection = await pool.getConnection();
@@ -2616,6 +2625,10 @@ router.post("/update-password", async (req, res) => {
 });
 router.get("/employee/:id", auth.authenticateToken, async (req, res) => {
   const id = req.params.id;
+  // SECURITY: only read an employee in your own account (was IDOR PII read).
+  if (!(await isSameAccount(req.user.id, id))) {
+    return res.status(403).json({ code: "403", message: "This employee is not in your account." });
+  }
   let connection;
 
   try {
@@ -2683,6 +2696,11 @@ router.get("/employee/:id", auth.authenticateToken, async (req, res) => {
 
 router.put("/employee/:id", auth.authenticateToken, async (req, res) => {
   const id = req.params.id;
+  // SECURITY: only edit an employee in your own account (was IDOR — edit any
+  // employee's email + flip can_view_all_contacts authority = takeover pivot).
+  if (!(await isSameAccount(req.user.id, id))) {
+    return res.status(403).json({ code: "403", message: "This employee is not in your account." });
+  }
   const {
     name,
     email,
