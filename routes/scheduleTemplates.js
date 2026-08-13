@@ -14,7 +14,7 @@ const logger = require('../common/logger');
 const engine = require('../services/scheduleEngine');
 const cascade = require('../services/scheduleCascade');
 const notify = require('../services/notify');
-const { requirePlan, denyRestrictedJobData } = require('../utils/access');
+const { requirePlan, denyRestrictedJobData, isSameAccount } = require('../utils/access');
 const { ensureScheduleTemplateTables } = require('../services/dbMigrations');
 
 function accountOf(req) {
@@ -565,6 +565,19 @@ router.post('/:id/apply', async (req, res) => {
     if (!tpl || tpl.status !== 'active') return res.status(404).json({ success: false, message: 'Template not found' });
     if (tpl.account_owner_id != null && Number(tpl.account_owner_id) !== Number(accountId)) {
       return res.status(403).json({ success: false, message: 'Not your template' });
+    }
+
+    // SECURITY: the TARGET job/lead must also belong to the caller's account —
+    // otherwise a template could be applied onto another company's job (creating
+    // a schedule + tasks + stages on it).
+    const jobTable = ownerType === 'lead' ? 'leads' : 'job';
+    const jobCol = ownerType === 'lead' ? 'user_id' : 'created_by';
+    const [[jobRow]] = await connection.query(
+      `SELECT ${jobCol} AS owner FROM ${jobTable} WHERE id = ? LIMIT 1`,
+      [jobId]
+    );
+    if (!jobRow || !(await isSameAccount(req.user.id, jobRow.owner))) {
+      return res.status(403).json({ success: false, message: 'This job does not belong to your account.' });
     }
 
     await connection.beginTransaction();

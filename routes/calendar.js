@@ -4,16 +4,30 @@ const pool = require('../config/connection');
 const auth = require('../services/authentication');
 const gcal = require('../services/googleCalendar');
 const logger = require('../common/logger');
-const { denyExpiredFreeWrites } = require('../utils/access');
+const { denyExpiredFreeWrites, isSameAccount } = require('../utils/access');
+
+// Account-scope for master_calendar_tasks (per-account trade list, owned via
+// created_by). Limits to the caller's account = the owner (working_id) + its
+// employees. Splice `.sql` into a WHERE and spread `.params`.
+function mcAccountScope(req) {
+  const wid = Number(req.user && req.user.working_id) || Number(req.user && req.user.id) || 0;
+  return {
+    sql: '(created_by = ? OR created_by IN (SELECT id FROM `user` WHERE created_by = ?))',
+    params: [wid, wid],
+  };
+}
 
 // GET /calendar/master-tasks
 router.get('/master-tasks', auth.authenticateToken, async (req, res) => {
   const connection = await pool.getConnection();
   try {
+    const scope = mcAccountScope(req);
     const [rows] = await connection.query(
       `SELECT id, title, COALESCE(sort_order, 0) AS sort_order, created_by, created_at, updated_at
        FROM master_calendar_tasks
-       ORDER BY sort_order ASC, id ASC`
+       WHERE ${scope.sql}
+       ORDER BY sort_order ASC, id ASC`,
+      scope.params
     );
     res.status(200).json({ success: true, data: rows });
   } catch (err) {
@@ -76,6 +90,12 @@ router.put('/master-tasks/:id', auth.authenticateToken, denyExpiredFreeWrites, a
 
   const connection = await pool.getConnection();
   try {
+    // SECURITY: only edit a master task in the caller's own account (was IDOR).
+    const [[owned]] = await connection.query('SELECT created_by FROM master_calendar_tasks WHERE id = ? LIMIT 1', [id]);
+    if (!owned) return res.status(404).json({ success: false, message: 'Task not found' });
+    if (!(await isSameAccount(req.user.id, owned.created_by))) {
+      return res.status(403).json({ success: false, message: 'This task does not belong to your account.' });
+    }
     const sql = `UPDATE master_calendar_tasks SET ${fields.join(', ')}, updated_at = NOW() WHERE id = ?`;
     params.push(id);
     await connection.query(sql, params);
@@ -105,9 +125,12 @@ router.put('/master-tasks/reorder', auth.authenticateToken, denyExpiredFreeWrite
       const id = Number(item && item.id);
       const sortOrder = Number(item && item.sort_order);
       if (!id || isNaN(id) || isNaN(sortOrder)) continue;
+      // SECURITY: reorder only affects the caller's own account's tasks (foreign
+      // ids no-op via the account-scoped WHERE).
+      const scope = mcAccountScope(req);
       await connection.query(
-        'UPDATE master_calendar_tasks SET sort_order = ?, updated_at = NOW() WHERE id = ? LIMIT 1',
-        [sortOrder, id]
+        `UPDATE master_calendar_tasks SET sort_order = ?, updated_at = NOW() WHERE id = ? AND ${scope.sql}`,
+        [sortOrder, id, ...scope.params]
       );
     }
     await connection.commit();
@@ -127,7 +150,15 @@ router.delete('/master-tasks/:id', auth.authenticateToken, denyExpiredFreeWrites
   if (!id || isNaN(id)) return res.status(400).json({ success: false, message: 'Invalid id' });
   const connection = await pool.getConnection();
   try {
-    await connection.query('DELETE FROM master_calendar_tasks WHERE id = ? LIMIT 1', [id]);
+    // SECURITY: only delete a master task in the caller's own account (was IDOR).
+    const scope = mcAccountScope(req);
+    const [result] = await connection.query(
+      `DELETE FROM master_calendar_tasks WHERE id = ? AND ${scope.sql} LIMIT 1`,
+      [id, ...scope.params]
+    );
+    if (!result.affectedRows) {
+      return res.status(404).json({ success: false, message: 'Task not found' });
+    }
     res.status(200).json({ success: true });
   } catch (err) {
     logger.error('DELETE /calendar/master-tasks/:id error', err);
