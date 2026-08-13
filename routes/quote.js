@@ -76,18 +76,8 @@ async function sendInviteEmail(toEmail, inviterName) {
   }
 }
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: true, // true if using port 465
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false, // allow self-signed certs if needed
-  },
-});
+// Shared, provider-switchable transport (see services/mailer.js).
+const transporter = require('../services/mailer').transporter;
 
 // ── D2: Quote Manager backend plan/permission gate ──────────────────────────
 // The frontend (auth-guard.service.ts) allows the Quote Manager route when the

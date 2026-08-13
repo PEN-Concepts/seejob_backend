@@ -27,18 +27,8 @@ async function sendInviteEmail(toEmail, clientName) {
   await transporter.sendMail(mailOptions);
 }
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: true, // true if using port 465
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false, // allow self-signed certs if needed
-  },
-});
+// Shared, provider-switchable transport (see services/mailer.js).
+const transporter = require('../services/mailer').transporter;
 
 // ============ PUBLIC (no auth) routes for external client change order preview ============
 

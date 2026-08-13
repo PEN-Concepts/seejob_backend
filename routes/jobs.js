@@ -163,18 +163,8 @@ const materialSchema = Joi.object({
   color: Joi.string().max(45).allow(null, ""),
 });
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: true, // true if using port 465
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false, // allow self-signed certs if needed
-  },
-});
+// Shared, provider-switchable transport (see services/mailer.js).
+const transporter = require('../services/mailer').transporter;
 
 // Optional: verify transporter
 transporter.verify((err, success) => {

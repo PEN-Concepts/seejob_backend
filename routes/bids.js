@@ -66,13 +66,8 @@ const storage = multer.diskStorage({
 const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
 
 // ---- branded email (no-reply from See Job Run, reusing the SMTP system) ----
-const mailer = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: true,
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  tls: { rejectUnauthorized: false },
-});
+// Shared, provider-switchable transport (see services/mailer.js).
+const mailer = require('../services/mailer').transporter;
 async function sendBidInviteEmail(toEmail, company, title, comments) {
   if (!toEmail) return;
   try {

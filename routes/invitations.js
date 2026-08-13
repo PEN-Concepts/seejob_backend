@@ -2257,13 +2257,8 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
 // Creates (or finds) the user, applies profile fields, and links a contact
 // row. send_invite=true emails an invitation (status 'Pending');
 // send_invite=false just stores them (status 'Saved').
-const inviteMailer = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: true,
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  tls: { rejectUnauthorized: false },
-});
+// Shared, provider-switchable transport (see services/mailer.js).
+const inviteMailer = require('../services/mailer').transporter;
 
 async function sendContactInviteEmail(toEmail, inviterName) {
   // The invited person's SeeJobRun profile ALREADY exists (created the moment they

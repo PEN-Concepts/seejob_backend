@@ -16,18 +16,10 @@ const admin = require('../config/firebase-admin');
 const logger = require('../common/logger');
 
 // Lazily build a single SMTP transport (same config as routes/invitations.js).
-let mailer = null;
+// Shared, provider-switchable transport (SMTP today, SES via env flip). See
+// services/mailer.js — replaces the per-file inline SMTP transport.
 function getMailer() {
-  if (!mailer) {
-    mailer = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: parseInt(process.env.SMTP_PORT, 10),
-      secure: true,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-      tls: { rejectUnauthorized: false },
-    });
-  }
-  return mailer;
+  return require('./mailer').transporter;
 }
 
 async function sendEmail(to, subject, text, html) {

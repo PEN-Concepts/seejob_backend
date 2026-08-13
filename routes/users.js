@@ -189,23 +189,9 @@ router.get("/my-rights", auth.authenticateToken, async (req, res) => {
 
 const localupload = multer({ storage: storage });
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: true, // true if using port 465
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false, // allow self-signed certs if needed
-  },
-  // Fail fast instead of hanging forever when the SMTP server is unreachable
-  // (protects awaited sendOTPEmail callers from blocking their request).
-  connectionTimeout: 10000, // ms to establish the TCP connection
-  greetingTimeout: 10000,   // ms to wait for the SMTP greeting
-  socketTimeout: 15000,     // ms of socket inactivity before aborting
-});
+// Shared, provider-switchable transport (SMTP today, SES via env flip). See
+// services/mailer.js — replaces the per-file inline SMTP transport.
+const transporter = require('../services/mailer').transporter;
 
 // Optional: verify transporter
 transporter.verify((err, success) => {

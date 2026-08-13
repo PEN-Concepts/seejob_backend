@@ -16,26 +16,9 @@ const admin = require("../config/firebase-admin");
 const crypto = require("crypto");
 
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT),
-  secure: true, // true if using port 465
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false, // allow self-signed certs if needed
-  },
-  // Fail fast instead of hanging forever when the SMTP server is unreachable.
-  // Without these, an unreachable/dead SMTP host blocks routes that await
-  // sendMail (e.g. login-otp-request) indefinitely, leaving the login screen
-  // stuck on "Sending...". These bound the connect/greeting/idle waits so the
-  // request rejects (and the UI shows an error) within ~10-15s.
-  connectionTimeout: 10000, // ms to establish the TCP connection
-  greetingTimeout: 10000,   // ms to wait for the SMTP greeting
-  socketTimeout: 15000,     // ms of socket inactivity before aborting
-});
+// Shared, provider-switchable transport (SMTP today, SES via env flip). See
+// services/mailer.js — replaces the per-file inline SMTP transport.
+const transporter = require('../services/mailer').transporter;
 
 // Optional: verify transporter
 transporter.verify((err, success) => {
