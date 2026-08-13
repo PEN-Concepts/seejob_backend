@@ -564,7 +564,7 @@ router.get("/leads-to-do/all", auth.authenticateToken, async (req, res) => {
             WHERE l.user_id IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
             ORDER BY t.created_at DESC
         `;
-        const [rows] = await pool.query(sql, [wid, wid]);
+        const [rows] = await pool.execute(sql, [wid, wid]);
         res.status(200).json(rows);
     } catch (err) {
         logger.error("Error fetching leads_to_do", err);
