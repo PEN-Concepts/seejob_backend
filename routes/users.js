@@ -18,6 +18,7 @@ const nodemailer = require("nodemailer");
 require("dotenv").config();
 const { sendNotificationToUser } = require('./notifier');
 const admin = require("../config/firebase-admin");
+const notify = require("../services/notify");
 const crypto = require("crypto");
 
 // Set up multer storage
@@ -1122,6 +1123,48 @@ router.get("/push-status", auth.authenticateToken, async (req, res) => {
     });
   } catch (err) {
     logger.error("push-status error: " + err.message);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// Owner-only: fire a REAL push to your OWN devices so you can see exactly how a
+// task-assignment notification renders in your tray. Uses the same data-only
+// `sendPushToUser` path the create-task flow uses, so `urgent=1` exercises the
+// service worker's red "🔴 URGENT —" rendering (vs the normal gold alert).
+// Sends only to the caller's own tokens — never to anyone else.
+router.post("/test-push", auth.authenticateToken, async (req, res) => {
+  try {
+    const [urows] = await pool.query("SELECT email, name FROM `user` WHERE id = ? LIMIT 1", [req.user.id]);
+    const email = String((urows && urows[0] && urows[0].email) || "").toLowerCase();
+    if (!OWNER_EXEMPT_EMAILS.has(email)) {
+      return res.status(403).json({ code: "FORBIDDEN", message: "Owner only." });
+    }
+    // Default to urgent so the red styling is what gets exercised; pass
+    // {urgent:false} to preview the normal gold alert instead.
+    const u = (req.body || {});
+    const urgent = !(u.urgent === false || u.urgent === "0" || u.urgent === 0);
+    const [[tok]] = await pool.query(
+      "SELECT COUNT(*) AS c FROM user_device_tokens WHERE user_id = ?",
+      [req.user.id]
+    );
+    if (!tok || !tok.c) {
+      return res.status(409).json({
+        code: "NO_DEVICE",
+        message: "No registered device token for this account. Open the app on your phone with notifications enabled first.",
+      });
+    }
+    await notify.sendPushToUser(pool, req.user.id, {
+      title: urgent ? "Urgent Task" : "New Task Assigned",
+      body: urgent
+        ? "TEST: this is how an URGENT task assignment looks."
+        : "TEST: this is how a normal task assignment looks.",
+      url: "task",
+      type: "task",
+      urgent,
+    });
+    return res.json({ ok: true, sentToUserId: req.user.id, deviceTokens: tok.c, urgent });
+  } catch (err) {
+    logger.error("test-push error: " + err.message);
     return res.status(500).json({ message: "Internal server error" });
   }
 });
