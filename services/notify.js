@@ -49,7 +49,7 @@ async function sendEmail(to, subject, text, html) {
 // Data-only FCM push to every device token a user has; prune tokens FCM reports as
 // dead. Adapted from cron/sendReminders.js sendToUser. `conn` may be a pool or a
 // transaction connection; defaults to the shared pool.
-async function sendPushToUser(conn, userId, { title, body, url, type }) {
+async function sendPushToUser(conn, userId, { title, body, url, type, urgent }) {
   const db = conn || pool;
   try {
     const [rows] = await db.query(
@@ -66,6 +66,10 @@ async function sendPushToUser(conn, userId, { title, body, url, type }) {
             title: String(title || 'Schedule update'),
             body: String(body || ''),
             url: String(url || 'calendar'),
+            // '1' → the service worker renders a visually distinct RED urgent
+            // notification (vs the normal gold). Data-only message, so the SW
+            // owns the styling.
+            urgent: urgent ? '1' : '0',
           },
           webpush: { headers: { Urgency: 'high' } },
         });

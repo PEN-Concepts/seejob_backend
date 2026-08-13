@@ -479,6 +479,7 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
       insertedTasks.push({
         id: result.insertId,
         task_name,
+        is_urgent: urgentFlag,
         user_id: finalUserId,
         team_id,
         duration_days: finalDurationDays,
@@ -523,16 +524,22 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
       const byUser = new Map();
       for (const t of insertedTasks) {
         if (!t.user_id || String(t.user_id) === String(signedin_user)) continue;
-        if (!byUser.has(t.user_id)) byUser.set(t.user_id, []);
-        byUser.get(t.user_id).push(t.task_name);
+        if (!byUser.has(t.user_id)) byUser.set(t.user_id, { names: [], urgent: false });
+        const g = byUser.get(t.user_id);
+        g.names.push(t.task_name);
+        if (Number(t.is_urgent) === 1) g.urgent = true; // any urgent task → red push
       }
-      for (const [uid, names] of byUser) {
+      for (const [uid, g] of byUser) {
+        const names = g.names;
         const content = names.length === 1
           ? `${actorName} assigned you a task: "${names[0]}".`
           : `${actorName} assigned you ${names.length} tasks.`;
         try {
           await notify.insertNotification(connection, { senderId: signedin_user, receiverId: uid, content, url: '/task' });
-          await notify.sendPushToUser(connection, uid, { title: 'New Task Assigned', body: content, url: 'task', type: 'task' });
+          await notify.sendPushToUser(connection, uid, {
+            title: g.urgent ? 'Urgent Task' : 'New Task Assigned',
+            body: content, url: 'task', type: 'task', urgent: g.urgent,
+          });
         } catch (e) { logger.error('task-assign notify (user ' + uid + '): ' + e.message); }
       }
     } catch (e) { logger.error('task-assign notify: ' + e.message); }
