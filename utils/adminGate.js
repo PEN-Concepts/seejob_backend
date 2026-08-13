@@ -85,4 +85,28 @@ async function requireAccountOwner(req, res, next) {
   }
 }
 
-module.exports = { SUPER_ADMIN_ID, isAdminUser, requireAdmin, requireAccountOwner };
+/**
+ * Gate for the platform-admin API (admin_contactRequest.js: user_list, admin-user
+ * create/edit, account status toggles, admin inboxes). Passes when EITHER the
+ * caller holds a valid admin-panel JWT (`user_type === 'admin'`, issued only after
+ * a valid admin_users OTP login) OR is an owner-exempt / super-admin user. This
+ * closes the prior holes where these endpoints were unauthenticated or reachable
+ * with any normal user token (which enabled create-admin → OTP → admin-JWT
+ * privilege escalation). Apply AFTER auth.authenticateToken. Fails CLOSED.
+ */
+async function requireAdminPanel(req, res, next) {
+  const userId = req.user && req.user.id ? req.user.id : (res.locals && res.locals.id);
+  if (!userId) {
+    return res.status(401).json({ code: "401", message: "Unauthorized", data: {} });
+  }
+  try {
+    if (req.user && req.user.user_type === "admin") return next();
+    if (await isAdminUser(userId)) return next();
+    return res.status(403).json({ code: "403", message: "Forbidden", data: {} });
+  } catch (err) {
+    logger.error("requireAdminPanel error: " + err.message);
+    return res.status(403).json({ code: "403", message: "Forbidden", data: {} }); // fail closed
+  }
+}
+
+module.exports = { SUPER_ADMIN_ID, isAdminUser, requireAdmin, requireAccountOwner, requireAdminPanel };

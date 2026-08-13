@@ -6,7 +6,7 @@ const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
-const { getAccessMode, resolveOwnerId, denyExpiredFreeWrites } = require("../utils/access");
+const { getAccessMode, resolveOwnerId, isSameAccount, denyExpiredFreeWrites } = require("../utils/access");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 
 // For an expired_free user, keep ONLY appointments created by ANOTHER account
@@ -813,11 +813,16 @@ router.get('/getsubcategory/:categoryId', auth.authenticateToken, async (req, re
 //   }
 // });
 
-router.post('/assign-rights', async (req, res) => {  
+router.post('/assign-rights', auth.authenticateToken, async (req, res) => {
   const { role_id, user_id, right_ids } = req.body;
 
   if (!role_id || !user_id || !Array.isArray(right_ids)) {
     return res.status(400).json({ message: 'Missing or invalid data' });
+  }
+  // SECURITY: only manage rights of a user in YOUR OWN account (was unauthenticated
+  // → anyone could grant themselves/anyone full permissions = privilege escalation).
+  if (!(await isSameAccount(req.user.id, user_id))) {
+    return res.status(403).json({ message: 'Forbidden: user is not in your account.' });
   }
 
   let connection;
@@ -1586,8 +1591,13 @@ router.put('/update_appointments/:id', async (req, res) => {
 
 
 
-router.post("/update-rights", async (req, res) => {
+router.post("/update-rights", auth.authenticateToken, async (req, res) => {
   const { user_id, right_ids } = req.body;
+  // SECURITY: was unauthenticated → arbitrary privilege grant. Only a user in the
+  // caller's own account may have their rights changed.
+  if (user_id && !(await isSameAccount(req.user.id, user_id))) {
+    return res.status(403).json({ message: "Forbidden: user is not in your account." });
+  }
 
   if (!user_id || !Array.isArray(right_ids)) {
     return res.status(400).json({ message: "Missing or invalid data" });
@@ -1647,8 +1657,13 @@ router.post("/update-rights", async (req, res) => {
   }
 });
 
-router.post("/update-resignation", async (req, res) => {
+router.post("/update-resignation", auth.authenticateToken, async (req, res) => {
   const { id, resignation_date, resignation_reason, exit_type } = req.body;
+  // SECURITY: was unauthenticated → deactivate any user. Only an employee in the
+  // caller's own account may be resigned/deactivated here.
+  if (id && !(await isSameAccount(req.user.id, id))) {
+    return res.status(403).json({ code: "403", message: "Forbidden: user is not in your account." });
+  }
 
   if (!id)
     return res.status(400).json({
@@ -1691,8 +1706,13 @@ router.post("/update-resignation", async (req, res) => {
   }
 });
 
-router.post("/reactivate-employee", async (req, res) => {
+router.post("/reactivate-employee", auth.authenticateToken, async (req, res) => {
   const { id } = req.body;
+  // SECURITY: was unauthenticated → reactivate any user. Only an employee in the
+  // caller's own account may be reactivated here.
+  if (id && !(await isSameAccount(req.user.id, id))) {
+    return res.status(403).json({ code: "403", message: "Forbidden: user is not in your account." });
+  }
 
   if (!id) {
     return res.status(400).json({

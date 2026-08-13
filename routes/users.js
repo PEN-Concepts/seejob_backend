@@ -2571,28 +2571,38 @@ router.post("/send-recovery-email", async (req, res) => {
     if (connection) connection.release();
   }
 });
+// Forgotten-password reset. SECURITY: the reset is bound to possession of the
+// recovery OTP that /send-recovery-email emailed to the account's own address —
+// without a matching, non-null OTP the reset is rejected. This closes the prior
+// unauthenticated "set any account's password by email" account-takeover hole.
+// The OTP is single-use (nulled on success). (The OTP is verified again here even
+// though the UI already called /verify-otp, so the reset can't be driven directly.)
 router.post("/update-password", async (req, res) => {
-  const { email, password } = req.body;
+  const { email, password, otp } = req.body;
 
-  if (!email || !password)
+  if (!email || !password || !otp)
     return res
       .status(400)
-      .json({ code: "400", message: "Missing email or password" });
+      .json({ code: "400", message: "Missing email, reset code, or password" });
 
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const [user] = await pool.query("SELECT id FROM user WHERE email = ?", [
-      email,
-    ]);
+    const [user] = await pool.query(
+      "SELECT id FROM `user` WHERE email = ? AND otp = ? AND otp IS NOT NULL LIMIT 1",
+      [email, String(otp)]
+    );
 
     if (user.length === 0)
-      return res.status(404).json({ code: "404", message: "User not found" });
+      return res
+        .status(400)
+        .json({ code: "400", message: "Invalid or expired reset code." });
 
-    await pool.query("UPDATE user SET password = ? WHERE email = ?", [
-      hashedPassword,
-      email,
-    ]);
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Consume the OTP so it can't be replayed.
+    await pool.query(
+      "UPDATE `user` SET password = ?, otp = NULL, otp_status = 0 WHERE email = ?",
+      [hashedPassword, email]
+    );
 
     return res
       .status(200)

@@ -10,6 +10,7 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require('nodemailer');
 const auth = require("../services/authentication");
+const { requireAdminPanel } = require("../utils/adminGate");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const admin = require("../config/firebase-admin");
 const crypto = require("crypto");
@@ -151,7 +152,7 @@ async function sendOTPEmail(toEmail, otp) {
   }
 }
 
-router.post("/create_admin_user", auth.authenticateToken, async (req, res) => {
+router.post("/create_admin_user", auth.authenticateToken, requireAdminPanel, async (req, res) => {
   const currentTimestamp = getTimeStamp();
   const r = req.body || {};
   let connection;
@@ -552,7 +553,7 @@ router.post("/demo_request", async (req, res) => {
   }
 });
 
-router.get("/contact_list", auth.authenticateToken, async (req, res) => {
+router.get("/contact_list", auth.authenticateToken, requireAdminPanel, async (req, res) => {
   let connection;
 
   try {
@@ -588,7 +589,7 @@ router.get("/contact_list", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/demo_request_list", auth.authenticateToken, async (req, res) => {
+router.get("/demo_request_list", auth.authenticateToken, requireAdminPanel, async (req, res) => {
   let connection;
 
   try {
@@ -624,7 +625,7 @@ router.get("/demo_request_list", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/user_list", async (req, res) => {
+router.get("/user_list", auth.authenticateToken, requireAdminPanel, async (req, res) => {
   let connection;
 
   try {
@@ -677,7 +678,7 @@ ORDER BY u.id DESC;
   }
 });
 
-router.post("/update_user_status", async (req, res) => {
+router.post("/update_user_status", auth.authenticateToken, requireAdminPanel, async (req, res) => {
   let connection;
 
   try {
@@ -748,7 +749,7 @@ router.get('/rights', auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/admin_user_list", auth.authenticateToken, async (req, res) => {
+router.get("/admin_user_list", auth.authenticateToken, requireAdminPanel, async (req, res) => {
   const loggedInUserId = req.user.id;
   let connection;
 
@@ -807,7 +808,7 @@ router.get("/admin_user_list", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/update_admin_user", auth.authenticateToken, async (req, res) => {
+router.post("/update_admin_user", auth.authenticateToken, requireAdminPanel, async (req, res) => {
   let connection;
 
   try {
@@ -932,7 +933,7 @@ router.post("/update_admin_user", auth.authenticateToken, async (req, res) => {
     if (connection) connection.release();
   }
 });
-router.get("/support_ticket_list", auth.authenticateToken, async (req, res) => {
+router.get("/support_ticket_list", auth.authenticateToken, requireAdminPanel, async (req, res) => {
   let connection;
 
   try {
