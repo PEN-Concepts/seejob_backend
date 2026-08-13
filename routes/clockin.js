@@ -4,7 +4,28 @@ const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
 const auth = require("../services/authentication");
+const { isSameAccount } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
+
+// Clock-in entries are owned via clockin.created_by (the worker). Guard by-id
+// routes so a caller can only touch time entries in their own account. Fail CLOSED.
+function requireClockinOwnership(getId) {
+  return async (req, res, next) => {
+    try {
+      let id;
+      try { id = getId(req); } catch (_) { id = null; }
+      if (id == null || id === "") return next();
+      const [[row]] = await pool.query("SELECT created_by FROM clockin WHERE id = ? LIMIT 1", [Number(id)]);
+      if (!row) return res.status(404).json({ message: "Time entry not found" });
+      if (!(await isSameAccount(req.user.id, row.created_by)))
+        return res.status(403).json({ message: "This time entry does not belong to your account." });
+      return next();
+    } catch (e) {
+      logger.error("requireClockinOwnership: " + e.message);
+      return res.status(403).json({ message: "Forbidden" });
+    }
+  };
+}
 
 const pad2 = (n) => String(n).padStart(2, '0');
 const formatLocalDate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
@@ -26,6 +47,10 @@ const parseYmdParts = (val) => {
 // get all jobs with its user login
 router.get('/jobs/:userId', auth.authenticateToken, async (req, res) => {
   const userId = req.params.userId;
+  // SECURITY: only a user in the caller's account (was IDOR — any account's jobs).
+  if (!(await isSameAccount(req.user.id, userId))) {
+    return res.status(403).json({ message: "This user is not in your account." });
+  }
 let connection;
     try {
       connection = await pool.getConnection();
@@ -53,6 +78,11 @@ let connection;
 router.get("/tasks/:jobId", auth.authenticateToken, async (req, res) => {
   try {
     const jobId = req.params.jobId;
+    // SECURITY: only tasks on a job in the caller's account (was IDOR by job id).
+    const [[job]] = await pool.query("SELECT created_by FROM job WHERE id = ? LIMIT 1", [jobId]);
+    if (!job || !(await isSameAccount(req.user.id, job.created_by))) {
+      return res.status(403).json({ message: "This job does not belong to your account." });
+    }
     const [rows] = await pool.query(
       "SELECT * FROM tasks WHERE job_id = ?",
       [jobId]
@@ -107,7 +137,7 @@ router.post('/start', auth.authenticateToken, async (req, res) => {
 });
 
 
-router.put('/stop/:id', auth.authenticateToken, async (req, res) => {
+router.put('/stop/:id', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   const clockinId = req.params.id;
   const { remarks } = req.body || {};
   const now = new Date();
@@ -231,7 +261,7 @@ const [rows] = await pool.query(
 
 // Route to START break
 
-router.post('/start-break', auth.authenticateToken, async (req, res) => {
+router.post('/start-break', auth.authenticateToken, requireClockinOwnership((r) => r.body.clockinId != null ? r.body.clockinId : r.body.clockin_id), async (req, res) => {
   const clockinId = req.body.clockinId ?? req.body.clockin_id;
   const breakType = req.body.breakType ?? req.body.break_type; 
 
@@ -272,7 +302,7 @@ router.post('/start-break', auth.authenticateToken, async (req, res) => {
 
 
 // Route to STOP break and calculate break duration
-router.put('/stop-break/:id', auth.authenticateToken, async (req, res) => {
+router.put('/stop-break/:id', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   const clockinId = req.params.id;
   const now = new Date();
 
@@ -577,6 +607,10 @@ router.get('/daily-hours', auth.authenticateToken, async (req, res) => {
 // status of is_task_active or not
 router.get('/active-clockin/:userId', auth.authenticateToken, async (req, res) => {
   const userId = req.params.userId;
+  // SECURITY: only a user in the caller's account (was IDOR — any user's timer).
+  if (!(await isSameAccount(req.user.id, userId))) {
+    return res.status(403).json({ message: "This user is not in your account." });
+  }
 let connection;
     try {
       connection = await pool.getConnection();
