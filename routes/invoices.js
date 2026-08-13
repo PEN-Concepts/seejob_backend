@@ -3,12 +3,29 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { blockExpiredOwnRecord, requirePlan } = require("../utils/access");
+const { blockExpiredOwnRecord, requirePlan, isSameAccount } = require("../utils/access");
 const { ensureInvoicesTable, assignJobNumberIfMissing } = require("../services/dbMigrations");
 
 // Client invoicing lives with Budget (Platinum). Invoice CONTENT (amounts/PDF)
 // is a separate feature; this router owns the numbering + list entry point.
 router.use(auth.authenticateToken, requirePlan("platinum"));
+
+// Cross-account isolation: every route is /:jobId — the job must belong to the
+// caller's account (invoices previously leaked/mutated any company's invoices by
+// job id). Resolves the job's owner from the DB and requires same-account. Fail
+// CLOSED (403). invoiceId is tied to jobId in the DELETE query, so this covers it.
+router.param("jobId", async (req, res, next, jobId) => {
+  try {
+    const [[job]] = await pool.query("SELECT created_by FROM job WHERE id = ? LIMIT 1", [Number(jobId)]);
+    if (!job) return res.status(404).json({ message: "Job not found" });
+    if (!(await isSameAccount(req.user.id, job.created_by)))
+      return res.status(403).json({ code: "403", message: "This job does not belong to your account." });
+    return next();
+  } catch (e) {
+    logger.error("invoices jobId guard: " + e.message);
+    return res.status(403).json({ code: "403", message: "Forbidden" });
+  }
+});
 
 // Displayed invoice number = company Job Number (min 2 digits) concatenated with
 // the per-job invoice sequence (min 3 digits). Both widths expand automatically

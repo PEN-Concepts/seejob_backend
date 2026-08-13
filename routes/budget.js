@@ -4,7 +4,7 @@ const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
 const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
-const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJobData } = require("../utils/access");
+const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, isSameAccount } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
 
 // Payment methods a subcontractor payment can be recorded under.
@@ -159,6 +159,75 @@ const requireJobBudgetFeature = [denyRestrictedJobData, requirePlanFeatures(["jo
 // level 5 so they pass; Gold accounts (even with the job_budget feature) are 403.
 // authenticateToken runs here so requirePlan can read req.user.
 router.use(auth.authenticateToken, requirePlan("platinum"));
+
+// ── Cross-account isolation for ALL budget data ────────────────────────────────
+// Budgets/invoices hang off a job (or lead). Previously any Platinum account could
+// read/write another company's financials by passing a foreign job_id / itemId /
+// coId. These guards resolve every id back to its TRUE parent job/lead FROM THE DB
+// (never trusting a client-supplied job_id) and require it to belong to the
+// caller's account. Fail CLOSED (403) — financial data must never leak on error.
+async function ownsOwnerRecord(userId, jobId, ownerType) {
+  if (jobId == null || jobId === "") return true; // presence is validated by handlers
+  const isLead = String(ownerType || "job").toLowerCase() === "lead";
+  const table = isLead ? "leads" : "job";
+  const col = isLead ? "user_id" : "created_by";
+  const [[row]] = await pool.query(
+    `SELECT ${col} AS owner FROM ${table} WHERE id = ? LIMIT 1`,
+    [Number(jobId)]
+  );
+  if (!row) return false;
+  return isSameAccount(userId, row.owner);
+}
+function budgetForbidden(res, msg) {
+  return res.status(403).json({ code: "403", success: false, message: msg, data: {} });
+}
+// job_id supplied in query/body must belong to the caller's account.
+async function requireJobIdOwnership(req, res, next) {
+  try {
+    const jobId = req.query.job_id != null ? req.query.job_id : (req.body && req.body.job_id);
+    if (jobId == null || jobId === "") return next();
+    const ownerType = req.query.job_type != null ? req.query.job_type : (req.body && req.body.job_type);
+    if (!(await ownsOwnerRecord(req.user.id, jobId, ownerType)))
+      return budgetForbidden(res, "This job does not belong to your account.");
+    return next();
+  } catch (e) {
+    logger.error("requireJobIdOwnership: " + e.message);
+    return budgetForbidden(res, "Forbidden");
+  }
+}
+// :itemId → its line item's parent job must belong to the caller's account.
+router.param("itemId", async (req, res, next, itemId) => {
+  try {
+    const [[li]] = await pool.query(
+      "SELECT job_id, owner_type FROM division_lineitems WHERE id = ? LIMIT 1",
+      [Number(itemId)]
+    );
+    if (!li) return res.status(404).json({ code: "404", success: false, message: "Line item not found", data: {} });
+    if (!(await ownsOwnerRecord(req.user.id, li.job_id, li.owner_type)))
+      return budgetForbidden(res, "This budget item does not belong to your account.");
+    return next();
+  } catch (e) {
+    logger.error("budget itemId guard: " + e.message);
+    return budgetForbidden(res, "Forbidden");
+  }
+});
+// :coId → its change order's parent job must belong to the caller's account.
+router.param("coId", async (req, res, next, coId) => {
+  try {
+    const [[co]] = await pool.query(
+      "SELECT job_id FROM change_orders WHERE id = ? LIMIT 1",
+      [Number(coId)]
+    );
+    if (!co) return res.status(404).json({ code: "404", success: false, message: "Change order not found", data: {} });
+    if (!(await ownsOwnerRecord(req.user.id, co.job_id, "job")))
+      return budgetForbidden(res, "This change order does not belong to your account.");
+    return next();
+  } catch (e) {
+    logger.error("budget coId guard: " + e.message);
+    return budgetForbidden(res, "Forbidden");
+  }
+});
+router.use(requireJobIdOwnership);
 
 
 router.get(
