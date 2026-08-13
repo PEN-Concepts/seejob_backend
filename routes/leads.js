@@ -561,7 +561,7 @@ router.get("/leads-to-do/all", auth.authenticateToken, async (req, res) => {
                 t.id,
                 t.lead_id,
                 t.task_name,
-                l.description AS lead_description,
+                l.project_description AS lead_description,
                 t.start_date,
                 t.end_date,
                 t.description,
