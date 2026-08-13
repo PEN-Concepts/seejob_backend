@@ -4,7 +4,28 @@ const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
 const auth = require("../services/authentication");
+const { isSameAccount } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
+
+// Time-logs are clockin rows (owned via clockin.created_by). Guard by-id routes so
+// a caller only touches time entries in their own account. Fail CLOSED.
+function requireClockinOwnership(getId) {
+  return async (req, res, next) => {
+    try {
+      let id;
+      try { id = getId(req); } catch (_) { id = null; }
+      if (id == null || id === "") return next();
+      const [[row]] = await pool.query("SELECT created_by FROM clockin WHERE id = ? LIMIT 1", [Number(id)]);
+      if (!row) return res.status(404).json({ message: "Time entry not found" });
+      if (!(await isSameAccount(req.user.id, row.created_by)))
+        return res.status(403).json({ message: "This time entry does not belong to your account." });
+      return next();
+    } catch (e) {
+      logger.error("requireClockinOwnership: " + e.message);
+      return res.status(403).json({ message: "Forbidden" });
+    }
+  };
+}
 
 
 // get all employees of a user
@@ -494,7 +515,7 @@ router.get("/time-logs/:userId", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.put('/time-logs/approve-job/:id(\\d+)', auth.authenticateToken, async (req, res) => {
+router.put('/time-logs/approve-job/:id(\\d+)', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   let connection;
 
   try {
@@ -531,7 +552,7 @@ router.put('/time-logs/approve-job/:id(\\d+)', auth.authenticateToken, async (re
   }
 });
 
-router.put('/time-logs/:id(\\d+)', auth.authenticateToken, async (req, res) => {
+router.put('/time-logs/:id(\\d+)', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -599,7 +620,7 @@ router.put('/time-logs/:id(\\d+)', auth.authenticateToken, async (req, res) => {
 });
 
 // Delete a single time log (clockin) by its id
-router.delete('/time-logs/:id(\\d+)', auth.authenticateToken, async (req, res) => {
+router.delete('/time-logs/:id(\\d+)', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -629,7 +650,7 @@ router.delete('/time-logs/:id(\\d+)', auth.authenticateToken, async (req, res) =
 });
 
 // Update remarks (additional_notes) for a single time log by its clockin id
-router.put('/time-logs/:id/remarks', auth.authenticateToken, async (req, res) => {
+router.put('/time-logs/:id/remarks', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -665,7 +686,7 @@ router.put('/time-logs/:id/remarks', auth.authenticateToken, async (req, res) =>
   }
 });
 
-router.put('/time-logs/self-approve/:id', auth.authenticateToken, async (req, res) => {
+router.put('/time-logs/self-approve/:id', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -700,7 +721,7 @@ router.put('/time-logs/self-approve/:id', auth.authenticateToken, async (req, re
   }
 });
 
-router.put('/time-logs/approve-job/:id', auth.authenticateToken, async (req, res) => {
+router.put('/time-logs/approve-job/:id', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   let connection;
 
   try {
@@ -766,6 +787,10 @@ function normalizeToYMD(s) {
 router.put('/time-logs/approve-week', auth.authenticateToken, async (req, res) => {
 
   const { employeeId, startDate, endDate } = req.body;
+  // SECURITY: only approve timecards for an employee in your own account.
+  if (employeeId && !(await isSameAccount(req.user.id, employeeId))) {
+    return res.status(403).json({ message: "This employee is not in your account." });
+  }
   const approvedBy = req.user.id;  // whoever is logged in
 
   if (!employeeId || !startDate || !endDate) {
@@ -798,6 +823,10 @@ router.put('/time-logs/approve-week', auth.authenticateToken, async (req, res) =
 router.put('/time-logs/payroll-week', auth.authenticateToken, async (req, res) => {
 
   const { employeeId, startDate, endDate } = req.body;
+  // SECURITY: only mark payroll for an employee in your own account.
+  if (employeeId && !(await isSameAccount(req.user.id, employeeId))) {
+    return res.status(403).json({ message: "This employee is not in your account." });
+  }
 
   const missing = [];
   if (employeeId == null || employeeId === '') missing.push('employeeId');
@@ -1129,6 +1158,10 @@ router.get('/employees-by-user', auth.authenticateToken, async (req, res) => {
     if (!employee_id || !clock_in || !clock_out || !total_hours) {
       return res.status(400).json({ message: 'Missing required fields.' });
     }
+    // SECURITY: only add a time-card entry for an employee in your own account.
+    if (!(await isSameAccount(req.user.id, employee_id))) {
+      return res.status(403).json({ message: "This employee is not in your account." });
+    }
 
     // ðŸ”¹ Convert break minutes (number) â†’ "HH:mm:ss" format
     let breakFormatted = '00:00:00';
@@ -1253,7 +1286,7 @@ ORDER BY c.start_date DESC;
   }
 });
 
-router.put('/update-time-card-entry/:id', auth.authenticateToken, async (req, res) => {
+router.put('/update-time-card-entry/:id', auth.authenticateToken, requireClockinOwnership((r) => r.params.id), async (req, res) => {
   let connection;
 
   try {
@@ -1354,6 +1387,10 @@ router.put('/time-logs/approve-day', auth.authenticateToken, async (req, res) =>
     connection = await pool.getConnection();
 
     const { employeeId, workDate } = req.body; // YYYY-MM-DD format
+    // SECURITY: only approve a day for an employee in your own account.
+    if (employeeId && !(await isSameAccount(req.user.id, employeeId))) {
+      return res.status(403).json({ message: "This employee is not in your account." });
+    }
     const approvedBy = req.user.id;
 
     if (!employeeId || !workDate) {
