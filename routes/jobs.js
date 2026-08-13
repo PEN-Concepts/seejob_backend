@@ -796,7 +796,7 @@ router.post("/jobs", auth.authenticateToken, denyExpiredFreeWrites, async (req, 
   sameAsAddress ? 1 : 0,
   contract_status,
   1, // status
-  created_by,
+  req.user.id, // SECURITY: owner is always the authenticated caller (was a client-supplied created_by)
 ];
 
   try {
@@ -1216,18 +1216,22 @@ router.get("/get_client", auth.authenticateToken, async (req, res) => {
 router.get(
   "/get_clients_with_job/:job_id",
   auth.authenticateToken,
+  requireJobOwnership((r) => r.params.job_id),
   async (req, res) => {
     const loggedInUserId = req.user.id;
     const { job_id } = req.params;
+    const wid = Number(req.user.working_id) || Number(req.user.id);
     let connection;
 
     try {
       connection = await pool.getConnection();
 
+      // SECURITY: branch 1 previously returned EVERY client on the platform —
+      // scope it to the caller's account (owner + employees).
       const query = `
         (
-          -- 1️⃣ All registered clients (category = 3)
-          SELECT 
+          -- 1️⃣ This account's registered clients (category = 3)
+          SELECT
             u.id,
             u.name,
             u.email,
@@ -1235,6 +1239,7 @@ router.get(
             'registered' AS source
           FROM user u
           WHERE u.category = 3
+            AND u.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
         )
 
         UNION ALL
@@ -1254,7 +1259,7 @@ router.get(
       `;
 
       const [rows] = await connection.query(query, [
-        job_id,
+        wid, wid, job_id,
       ]);
 
       res.status(200).json({
@@ -1308,9 +1313,13 @@ router.get("/get_client/:id", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
+    // SECURITY: only a client in the caller's account (was IDOR — any client's
+    // full row incl. email/mobile/address by id).
+    const wid = Number(req.user.working_id) || Number(req.user.id);
     const [rows] = await connection.execute(
-      `SELECT * FROM user WHERE category = 3 AND id = ?`,
-      [clientId]
+      `SELECT * FROM user WHERE category = 3 AND id = ?
+         AND created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)`,
+      [clientId, wid, wid]
     );
 
     if (rows.length === 0) {
@@ -1333,9 +1342,12 @@ router.get("/get_inspector/:id", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
+    // SECURITY: only an inspector in the caller's account (was IDOR by id).
+    const wid = Number(req.user.working_id) || Number(req.user.id);
     const [rows] = await connection.execute(
-      `SELECT * FROM user WHERE subcategory = 13 AND id = ?`,
-      [inspectorId]
+      `SELECT * FROM user WHERE subcategory = 13 AND id = ?
+         AND created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)`,
+      [inspectorId, wid, wid]
     );
 
     if (rows.length === 0) {
@@ -1692,7 +1704,7 @@ router.get("/gantt-stage-progress/:job_id", auth.authenticateToken, requireJobOw
 });
 
 // Upsert the % complete for one Gantt trade (keyed by its job_schedule_items id).
-router.put("/gantt-stage-progress/:item_id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.put("/gantt-stage-progress/:item_id", auth.authenticateToken, denyExpiredFreeWrites, requireJobOwnership((r) => r.body.job_id), async (req, res) => {
   const itemId = Number(req.params.item_id);
   const jobId = Number(req.body.job_id);
   const ownerType = ownerTypeOf(req.body.owner_type);
