@@ -317,18 +317,36 @@ const upload = multer({
 });
 
 // Send an immediate nudge to the assigned user of a task
+// Returns the task row if the caller may access it — its assignee, or a member of
+// the account that owns it — else null. Central cross-account guard for the by-id
+// task routes (was: any task reachable/mutable by id).
+async function loadAccessibleTask(userId, taskId) {
+  const [[t]] = await pool.query(
+    "SELECT id, created_by, user_id, job_id FROM tasks WHERE id = ? LIMIT 1",
+    [taskId]
+  );
+  if (!t) return null;
+  if (Number(t.user_id) === Number(userId)) return t;
+  if (await isSameAccount(userId, t.created_by)) return t;
+  return null;
+}
+
 router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   try {
     const taskId = req.params.id;
     const actorId = req.user.id;
 
     const [[task]] = await pool.query(
-      'SELECT user_id, task_name FROM tasks WHERE id=?',
+      'SELECT user_id, task_name, created_by FROM tasks WHERE id=?',
       [taskId]
     );
 
     if (!task) {
       return res.status(404).json({ message: 'Task not found' });
+    }
+    // SECURITY: only nudge a task in your own account (was IDOR nudge-spam).
+    if (!(await isSameAccount(actorId, task.created_by))) {
+      return res.status(403).json({ message: 'This task does not belong to your account.' });
     }
     if (!task.user_id) {
       return res.status(400).json({ message: 'Task has no assigned user' });
@@ -708,9 +726,15 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
     const assigneeId = req.user.id; // logged-in user 
-    const managerId = (req.query.user_id && /^\d+$/.test(String(req.query.user_id)))
-      ? Number(req.query.user_id)
-      : assigneeId;
+    // SECURITY: only honor ?user_id= if it belongs to the caller's own account
+    // (was IDOR — any user's daily tasks by passing their id).
+    let managerId = assigneeId;
+    if (req.query.user_id && /^\d+$/.test(String(req.query.user_id))) {
+      const reqId = Number(req.query.user_id);
+      if (reqId === Number(assigneeId) || (await isSameAccount(assigneeId, reqId))) {
+        managerId = reqId;
+      }
+    }
     const targetDate = (req.query.date && typeof req.query.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.query.date))
       ? req.query.date
       : null;
@@ -819,9 +843,14 @@ router.get("/:id", auth.authenticateToken, async (req, res) => {
       return res.status(404).json({ message: "Task not found" });
 
     const task = rows[0];
+    const userId = req.user && req.user.id ? req.user.id : res.locals && res.locals.id;
+    // SECURITY: only the assignee or a member of the owning account may read this
+    // task (was IDOR — any task's full detail by id).
+    if (Number(task.user_id) !== Number(userId) && !(await isSameAccount(userId, task.created_by))) {
+      return res.status(403).json({ message: "This task does not belong to your account." });
+    }
     // Expired free trial: a task on the user's OWN job/lead is locked; a task
     // assigned to them on a FOREIGN job stays readable (#4).
-    const userId = req.user && req.user.id ? req.user.id : res.locals && res.locals.id;
     const visible = await filterTasksForExpired(pool, userId, [task]);
     if (!visible.length) {
       return res.status(403).json({
@@ -1383,6 +1412,10 @@ router.post('/upload-photos/:taskId', auth.authenticateToken, denyExpiredFreeWri
     if (req.fileValidationError) {
       return res.status(400).json({ message: req.fileValidationError });
     }
+    // SECURITY: only the assignee or owning account may attach photos to a task.
+    if (!(await loadAccessibleTask(req.user.id, req.params.taskId))) {
+      return res.status(403).json({ message: 'This task does not belong to your account.' });
+    }
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ message: 'No files uploaded' });
     }
@@ -1460,6 +1493,10 @@ router.post('/assignee-photo/:taskId', auth.authenticateToken, upload.array('pho
 // RESPONSE · [name], [time].
 router.get('/images/:taskId', auth.authenticateToken, async (req, res) => {
   try {
+    // SECURITY: only the assignee or the owning account may see a task's photos.
+    if (!(await loadAccessibleTask(req.user.id, req.params.taskId))) {
+      return res.status(403).json({ message: 'This task does not belong to your account.' });
+    }
     const [rows] = await pool.query(
       `SELECT ti.id, CONCAT(ti.file_path, ti.file_name) AS filename, ti.created_at,
               COALESCE(ti.kind, 'request') AS kind, ti.uploaded_by, u.name AS uploaded_by_name
@@ -1506,6 +1543,10 @@ router.delete('/delete-image/:imageId', auth.authenticateToken, denyExpiredFreeW
       [req.params.imageId]
     );
     if (!row) return res.status(404).json({ message: 'Image not found' });
+    // SECURITY: only the assignee or owning account may delete a task's image.
+    if (!(await loadAccessibleTask(req.user.id, row.task_id))) {
+      return res.status(403).json({ message: 'This task does not belong to your account.' });
+    }
 
     const relFilename = `${row.file_path || ''}${row.file_name || ''}`;
 
