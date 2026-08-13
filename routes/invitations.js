@@ -864,6 +864,11 @@ router.post('/get-employees-by-user', auth.authenticateToken, async (req, res) =
   if (!user_id) {
     return res.status(400).json({ code: '400', message: 'Missing user_id' });
   }
+  // SECURITY: only fetch the employee roster for your OWN account (was IDOR — any
+  // owner's full roster incl. rate/exit_type by body user_id).
+  if (!(await isSameAccount(req.user.id, user_id))) {
+    return res.status(403).json({ code: '403', message: 'This account is not yours.' });
+  }
 
   let connection;
   try {
@@ -1166,6 +1171,13 @@ router.get('/by-job/:job_id', auth.authenticateToken, async (req, res) => {
 // GET /api/job-contacts/:job_id
 router.get('/job-contacts/:job_id',auth.authenticateToken, async (req, res) => {
   const job_id = req.params.job_id;
+  // SECURITY: only a job in your own account (was IDOR — any job's contacts by id).
+  {
+    const [[job]] = await pool.query("SELECT created_by FROM job WHERE id = ? LIMIT 1", [job_id]);
+    if (!job || !(await isSameAccount(req.user.id, job.created_by))) {
+      return res.status(403).json({ message: "This job does not belong to your account." });
+    }
+  }
 
   let connection;
   try {
@@ -1198,7 +1210,12 @@ router.get('/job-contacts/:job_id',auth.authenticateToken, async (req, res) => {
 
 router.get('/appointments', auth.authenticateToken, async (req, res) => {
   //const jobIds = req.query.job_ids;
-  const requestedUserId = req.query.user_id; // optional
+  let requestedUserId = req.query.user_id; // optional
+  // SECURITY: only honor ?user_id= if it belongs to the caller's own account
+  // (was IDOR — any user's appointments incl. attendee mobile + job address).
+  if (requestedUserId && !(await isSameAccount((req.user && req.user.id) || 0, requestedUserId))) {
+    requestedUserId = null;
+  }
   const authUserId = (req.user && req.user.id) || null;
   const workingId = (req.user && req.user.working_id) || null;
 
@@ -1827,6 +1844,10 @@ async function ensureLeaveType(connection, name, createdBy, defaultDays) {
 
 // Get an employee's leave categories with their per-person day allowance.
 router.get('/employee-leave/:empId', auth.authenticateToken, async (req, res) => {
+  // SECURITY: only read leave for an employee in your own account (was IDOR).
+  if (!(await isSameAccount(req.user.id, req.params.empId))) {
+    return res.status(403).json({ success: false, message: 'This employee is not in your account.' });
+  }
   let connection;
   try {
     connection = await pool.getConnection();
@@ -1864,6 +1885,10 @@ router.post('/employee-leave', auth.authenticateToken, async (req, res) => {
   const { emp_id, items } = req.body;
   if (!emp_id || !Array.isArray(items)) {
     return res.status(400).json({ success: false, message: 'emp_id and items are required' });
+  }
+  // SECURITY: only set leave for an employee in your own account (was IDOR).
+  if (!(await isSameAccount(req.user.id, emp_id))) {
+    return res.status(403).json({ success: false, message: 'This employee is not in your account.' });
   }
   let connection;
   try {
