@@ -4,6 +4,7 @@ const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
 const auth = require("../services/authentication");
+const { isSameAccount } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { ensureJobColorColumn } = require("../services/dbMigrations");
 const { pickJobColor } = require("../services/jobColorPalette");
@@ -208,11 +209,24 @@ router.put("/leads/update/:id", auth.authenticateToken, async (req, res) => {
     return res.status(400).json({ message: "Invalid request" });
   }
 
+  // SECURITY: only the owning account may edit this lead (was IDOR — any lead by id).
+  const [[lead]] = await pool.query("SELECT user_id FROM leads WHERE id = ? LIMIT 1", [leadId]);
+  if (!lead) return res.status(404).json({ message: "Lead not found" });
+  if (!(await isSameAccount(req.user.id, lead.user_id))) {
+    return res.status(403).json({ message: "This lead does not belong to your account." });
+  }
+
   const setClauses = [];
   const values = [];
 
   for (const [key, value] of Object.entries(updates)) {
-    setClauses.push(`${key} = ?`);
+    // SECURITY: the column name comes from client body keys. Allow only plain
+    // identifiers so a key can never inject SQL (previously interpolated raw →
+    // SQL injection), and backtick-quote it.
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+      return res.status(400).json({ message: `Invalid field name: ${key}` });
+    }
+    setClauses.push(`\`${key}\` = ?`);
     values.push(value);
   }
 
@@ -222,7 +236,7 @@ router.put("/leads/update/:id", auth.authenticateToken, async (req, res) => {
     WHERE id = ?
   `;
 
-  values.push(leadId); 
+  values.push(leadId);
 
   try {
     const [result] = await pool.query(sql, values);
