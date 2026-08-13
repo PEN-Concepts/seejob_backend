@@ -549,6 +549,13 @@ router.get("/leads-to-do/all", auth.authenticateToken, async (req, res) => {
         // SECURITY: only this account's lead-todos (was a global dump of every
         // account's lead-todos + lead descriptions).
         const wid = Number(req.user.working_id) || Number(req.user.id);
+        const [members] = await pool.query(
+            "SELECT id FROM `user` WHERE id = ? OR created_by = ?",
+            [wid, wid]
+        );
+        const ids = members.map((m) => Number(m.id)).filter(Boolean);
+        if (!ids.length) return res.status(200).json([]);
+        const placeholders = ids.map(() => "?").join(",");
         const sql = `
             SELECT
                 t.id,
@@ -561,10 +568,10 @@ router.get("/leads-to-do/all", auth.authenticateToken, async (req, res) => {
                 t.created_at
             FROM leads_to_do t
             LEFT JOIN leads l ON t.lead_id = l.id
-            WHERE l.user_id IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+            WHERE l.user_id IN (${placeholders})
             ORDER BY t.created_at DESC
         `;
-        const [rows] = await pool.execute(sql, [wid, wid]);
+        const [rows] = await pool.query(sql, ids);
         res.status(200).json(rows);
     } catch (err) {
         logger.error("Error fetching leads_to_do", err);
