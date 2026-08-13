@@ -289,7 +289,7 @@ router.get("/all", auth.authenticateToken, async (req, res) => {
 });
 
 
-router.delete('/teams/:id', async (req, res) => {
+router.delete('/teams/:id', auth.authenticateToken, async (req, res) => {
   let connection;
   try {
     const { id } = req.params;

@@ -385,7 +385,7 @@ function getWeekRange(offset = 0) {
   return { start: monday, end: friday };
 }
 
-router.get("/time-logs/:userId", async (req, res) => {
+router.get("/time-logs/:userId", auth.authenticateToken, async (req, res) => {
   const userId = req.params.userId;
 
   // Support explicit date range via startDate/endDate, falling back
@@ -1424,7 +1424,7 @@ router.get("/leave_request", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/leave_request", async (req, res) => {
+router.post("/leave_request", auth.authenticateToken, async (req, res) => {
   try {
     const {
       emp_id,

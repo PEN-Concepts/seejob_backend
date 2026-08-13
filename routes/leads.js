@@ -370,7 +370,7 @@ async function ensureLeadNoteDateColumn() {
   leadNoteDateEnsured = true;
 }
 
-router.post('/leads/:id/notes/create', async (req, res) => {
+router.post('/leads/:id/notes/create', auth.authenticateToken, async (req, res) => {
   const { title, description, meeting_date } = req.body;
   const lead_id = req.params.id;
 
@@ -393,7 +393,7 @@ router.post('/leads/:id/notes/create', async (req, res) => {
 });
 
 // Get notes for a specific lead
-router.get('/leads/:id/notes',  async (req, res) => {
+router.get('/leads/:id/notes', auth.authenticateToken, async (req, res) => {
   const lead_id = req.params.id;
 
   try {

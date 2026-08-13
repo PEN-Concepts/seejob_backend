@@ -1276,7 +1276,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
 
 
 // DELETE task
-router.delete("/delete/:id", async (req, res) => {
+router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
   let connection;
   try {
     const taskId = Number(req.params.id);
@@ -1353,7 +1353,7 @@ router.delete("/delete/:id", async (req, res) => {
 
 
 // Single-photo upload (legacy — also inserts into task_images)
-router.post('/upload-photo/:taskId', upload.single('photo'), async (req, res) => {
+router.post('/upload-photo/:taskId', auth.authenticateToken, upload.single('photo'), async (req, res) => {
   try {
     if (req.fileValidationError) {
       return res.status(400).json({ message: req.fileValidationError });

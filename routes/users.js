@@ -2614,7 +2614,7 @@ router.post("/update-password", async (req, res) => {
       .json({ code: "500", message: "Internal server error" });
   }
 });
-router.get("/employee/:id", async (req, res) => {
+router.get("/employee/:id", auth.authenticateToken, async (req, res) => {
   const id = req.params.id;
   let connection;
 
@@ -3075,7 +3075,7 @@ router.post(
 );
 
 // GET a specific daily report by ID
-router.get("/daily-report", async (req, res) => {
+router.get("/daily-report", auth.authenticateToken, async (req, res) => {
   let connection;
 
   try {
@@ -3270,7 +3270,7 @@ router.put(
   }
 );
 
-router.delete("/daily-report/:id", async (req, res) => {
+router.delete("/daily-report/:id", auth.authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -3307,7 +3307,7 @@ router.delete("/daily-report/:id", async (req, res) => {
 
 
 
-router.get("/employee-status/:managerId", async (req, res) => {
+router.get("/employee-status/:managerId", auth.authenticateToken, async (req, res) => {
   const { managerId } = req.params;
 
   try {
@@ -3402,7 +3402,7 @@ router.get("/employee-status/:managerId", async (req, res) => {
   }
 });
 
-router.put("/approve-leave/:leaveId", async (req, res) => {
+router.put("/approve-leave/:leaveId", auth.authenticateToken, async (req, res) => {
   try {
     const { leaveId } = req.params;
     const { approverId } = req.body;

@@ -356,6 +356,7 @@ router.get('/view_audio/:filename', (req, res) => {
 
 router.post(
   '/update',
+  auth.authenticateToken,
   upload.fields([
     { name: 'image', maxCount: 10 },
     { name: 'audio_note', maxCount: 1 }
@@ -778,7 +779,7 @@ router.get('/get-favourite-groups', auth.authenticateToken, async (req, res) => 
     res.status(500).json({ message: 'Failed to fetch favourite groups' });
   }
 });
-router.post('/delete-image', async (req, res) => {
+router.post('/delete-image', auth.authenticateToken, async (req, res) => {
   const { notepad_id, filename } = req.body;
 
   if (!notepad_id || !filename) {

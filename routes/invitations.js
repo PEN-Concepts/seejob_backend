@@ -70,7 +70,7 @@ router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
 });
 
 // Fallback: delete appointment(s) by linked task_id (idempotent)
-router.delete('/appointments/by-task/:taskId', async (req, res) => {
+router.delete('/appointments/by-task/:taskId', auth.authenticateToken, async (req, res) => {
   const taskIdRaw = req.params.taskId;
   let connection;
   try {
@@ -1307,7 +1307,7 @@ router.get('/appointments', auth.authenticateToken, async (req, res) => {
     if (connection) connection.release();
   }
 });
-router.delete('/appointments/:id', async (req, res) => {
+router.delete('/appointments/:id', auth.authenticateToken, async (req, res) => {
   const id = req.params.id;
 
   let connection;
@@ -1408,7 +1408,7 @@ router.delete('/appointments/:id', async (req, res) => {
   }
 });
 
-router.put('/update_appointments/:id', async (req, res) => {
+router.put('/update_appointments/:id', auth.authenticateToken, async (req, res) => {
   const { id } = req.params;
 
   const {

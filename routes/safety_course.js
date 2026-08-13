@@ -80,7 +80,7 @@ router.get("/getCourseStats", auth.authenticateToken, async (req, res) => {
 });
 
 // Training records for a course
-router.get("/safety-records/:courseId", async (req, res) => {
+router.get("/safety-records/:courseId", auth.authenticateToken, async (req, res) => {
   const { courseId } = req.params;
   if (!courseId) {
     return res.status(400).json({
@@ -240,7 +240,7 @@ router.get("/content/:courseId", async (req, res) => {
 });
 
 // Complete class endpoint (kept as before)
-router.post("/complete-class", async (req, res) => {
+router.post("/complete-class", auth.authenticateToken, async (req, res) => {
   const { safety_course_id, duration, created_by, attendees } = req.body;
   console.log("Duration:", duration);
 

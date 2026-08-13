@@ -655,7 +655,7 @@ let connection;
   }
 });
 
-router.get('/clockin-all',  async (req, res) => {
+router.get('/clockin-all', auth.authenticateToken, async (req, res) => {
 let connection;
     try {
       connection = await pool.getConnection();

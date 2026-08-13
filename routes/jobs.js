@@ -515,7 +515,7 @@ async function sendInviteEmail(toEmail, inviterName) {
 }
 
 // update jon order for drag and drops
-router.put("/update-job-order", async (req, res) => {
+router.put("/update-job-order", auth.authenticateToken, async (req, res) => {
   const order = req.body.order;
   if (!order || !Array.isArray(order) || order.length === 0) {
     return res.status(400).json({ success: false, message: "Invalid payload" });
