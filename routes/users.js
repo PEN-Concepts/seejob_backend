@@ -1407,6 +1407,9 @@ router.get("/getuser", auth.authenticateToken, async (req, res) => {
 
 router.get("/getallusers", auth.authenticateToken, async (req, res) => {
   const user_id = req.user.id;
+  // Account-wide: resolve the account owner so a non-owner member (employee/PA)
+  // sees the same contacts/employees/teams the owner does.
+  const working_user_id = Number(req.user.working_id || user_id);
   let connection;
 
   try {
@@ -1429,8 +1432,10 @@ router.get("/getallusers", auth.authenticateToken, async (req, res) => {
   FROM contact c
   INNER JOIN user u ON u.id = c.request_user2
   LEFT JOIN role r ON r.id = u.role
-  WHERE c.request_user1 = ?
-    AND c.status = 'Accept'
+  -- No status filter: a contact is schedulable regardless of invite/acceptance
+  -- state (Saved/Pending/Accept). Deleted contacts have no row, so they drop out
+  -- naturally. Matches get-task-users so every dropdown shows the same full list.
+  WHERE c.request_user1 IN (?, ?)
 )
 
 UNION
@@ -1451,8 +1456,7 @@ UNION
   FROM contact c
   INNER JOIN user u ON u.id = c.request_user1
   LEFT JOIN role r ON r.id = u.role
-  WHERE c.request_user2 = ?
-    AND c.status = 'Accept'
+  WHERE c.request_user2 IN (?, ?)
 )
 
 UNION
@@ -1474,7 +1478,7 @@ UNION
   LEFT JOIN role r ON r.id = u.role
   LEFT JOIN category c ON u.category = c.id
   WHERE c.id = 1
-    AND u.created_by = ?
+    AND u.created_by IN (?, ?)
     AND (
       u.exit_type IS NULL
       OR u.exit_type = ''
@@ -1499,7 +1503,7 @@ UNION
     NULL AS team_name,
     NULL AS team_color
   FROM invited_contacts ic
-  WHERE ic.created_by = ?
+  WHERE ic.created_by IN (?, ?)
     AND ic.status = 0
 )
 
@@ -1520,16 +1524,16 @@ UNION
     t.team_name,
     t.team_color
   FROM teams t
-  WHERE t.created_by = ?
+  WHERE t.created_by IN (?, ?)
 )
 `;
 
     const [rows] = await connection.query(query, [
-      user_id,
-      user_id,
-      user_id,
-      user_id,
-      user_id
+      user_id, working_user_id,   // contacts where the account sent the request
+      user_id, working_user_id,   // contacts where the account received it
+      user_id, working_user_id,   // employees created by the account
+      user_id, working_user_id,   // invited_contacts created by the account
+      user_id, working_user_id    // teams created by the account
     ]);
 
     // Attach members[] to team rows so the Task Manager assign overlay can

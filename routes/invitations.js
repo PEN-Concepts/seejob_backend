@@ -2451,8 +2451,10 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
   const list = Array.isArray(req.body && req.body.license_numbers) ? req.body.license_numbers : [];
   if (!list.length) return res.status(400).json({ message: 'No license numbers provided.' });
 
+  const ownerId = Number(res.locals.working_id || userId);
   let connection;
   const created = [];
+  const linked = [];   // existing registered users linked into my contacts
   const skipped = [];
   const failed = [];
   try {
@@ -2479,18 +2481,51 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
         const phone = info.phone || null;
         const now = getTimeStamp();
 
-        // A license is a duplicate ONLY when it matches an existing record by
-        // its unique license identity: the license number itself, or our
-        // license-derived placeholder email (lic-<num>@no-email.invalid).
-        // Phone/mobile is deliberately NOT a dedup key — two different
-        // contractors legitimately share an office phone, and two distinct
-        // license numbers must never be collapsed into one contact.
-        const [[dupe]] = await connection.query(
-          `SELECT id, name FROM \`user\` WHERE license_number = ? OR email = ? LIMIT 1`,
+        // Find any EXISTING record that shares this license identity — the
+        // license number itself, or our license-derived placeholder email.
+        // Phone/mobile is deliberately NOT a match key (offices share phones).
+        // NOTE: this looks across the whole `user` table on purpose, because a
+        // contractor may already exist as (a) my own contact, (b) a member of my
+        // account, or (c) their OWN separately-registered SeeJobRun account.
+        // What we do next depends on WHICH of those it is (see below) — being a
+        // registered user under a different account must NOT read as "already my
+        // contact".
+        const [[existing]] = await connection.query(
+          `SELECT id, name, created_by FROM \`user\` WHERE license_number = ? OR email = ? LIMIT 1`,
           [cleaned, email]
         );
-        if (dupe) {
-          skipped.push({ license_number: cleaned, name: dupe.name || name, reason: 'Already a contact' });
+        if (existing) {
+          const exId = Number(existing.id);
+          // (a) Already a login on MY account (me / the owner / one of my employees)?
+          const isAccountMember =
+            exId === ownerId || exId === userId || Number(existing.created_by) === ownerId;
+          // (b) Already LINKED as a contact of my account (any account member ↔ this user)?
+          const [[link]] = await connection.query(
+            `SELECT id FROM contact
+               WHERE (request_by  IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?) AND request_to = ?)
+                  OR (request_to  IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?) AND request_by = ?)
+               LIMIT 1`,
+            [ownerId, ownerId, exId, ownerId, ownerId, exId]
+          );
+          if (isAccountMember || link) {
+            skipped.push({
+              license_number: cleaned,
+              name: existing.name || name,
+              reason: isAccountMember ? 'Already on your account' : 'Already in your contacts',
+            });
+            continue;
+          }
+          // (c) A real user who belongs to ANOTHER account. Being registered
+          // elsewhere is NOT the same as being my contact — so add them to MY
+          // contacts by LINKING to their existing record (never duplicate the
+          // user row, never touch their profile). They become schedulable for me
+          // immediately, before they respond to anything.
+          await connection.query(
+            `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
+             VALUES (?, ?, 'Saved', NOW(), NOW())`,
+            [userId, exId]
+          );
+          linked.push({ id: exId, name: existing.name || name, license_number: cleaned });
           continue;
         }
 
@@ -2542,7 +2577,7 @@ router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, re
       }
     }
 
-    res.json({ created, skipped, failed, total: list.length });
+    res.json({ created, linked, skipped, failed, total: list.length });
   } catch (err) {
     logger.error('bulk-create-from-licenses error:', err);
     res.status(500).json({ message: 'Failed to create contacts from licenses', error: err.message });
