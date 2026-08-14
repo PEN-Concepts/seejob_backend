@@ -5,6 +5,7 @@ const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
+const { attachAssignees } = require("../services/taskAssignees");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
 
@@ -2218,6 +2219,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
         [jobIds, ...taskAssigneeParams]
       );
 
+      await attachAssignees(connection, jobTasks);
       for (const t of jobTasks) {
         const key = String(t.job_id);
         if (!jobTasksByJobId[key]) jobTasksByJobId[key] = [];
@@ -2239,6 +2241,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
         [leadIds, ...taskAssigneeParams]
       );
 
+      await attachAssignees(connection, leadTasks);
       for (const t of leadTasks) {
         const key = String(t.job_id);
         if (!leadTasksByLeadId[key]) leadTasksByLeadId[key] = [];
@@ -2262,6 +2265,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
        ORDER BY t.status ASC, t.created_at DESC`,
       [...taskAssigneeParams]
     );
+    await attachAssignees(connection, noJobTasks);
 
     if (jobIds.length) {
       const [checklistTasks] = await connection.query(

@@ -7,6 +7,7 @@ const fs = require('fs');
 const multer = require('multer');
 const auth = require("../services/authentication");
 const { denyExpiredFreeWrites, isSameAccount, getAccessMode, resolveOwnerId, denyRestrictedJobData } = require("../utils/access");
+const { attachAssignees } = require("../services/taskAssignees");
 
 // For an expired_free user, keep ONLY tasks on FOREIGN (other-account) jobs/leads
 // they collaborate on — hide everything on their own account's jobs/leads and
@@ -186,6 +187,7 @@ async function attachTaskImages(connectionOrPool, tasks) {
 const taskSchema = Joi.object({
   task_name: Joi.string().allow('', null).max(255).optional(),
   user_id: Joi.any().optional(),
+  assignees: Joi.any().optional(),               // Multi-assignee: array of user ids (user_id stays = primary)
   team_id: Joi.any().optional(),
   duration_days: Joi.number().integer().min(1).optional(),
   nudge: Joi.date().optional(),
@@ -207,6 +209,46 @@ const taskSchema = Joi.object({
   is_calendar_task: Joi.any().optional(),
   is_appointment_task: Joi.any().optional(),
 });
+
+// Multi-assignee: normalize an incoming assignees payload (array of ids, or a
+// single id) into a de-duped list of positive integers. Falls back to the legacy
+// single `user_id` when no `assignees` is sent, so old clients keep working
+// unchanged. The FIRST id is the primary (mirrored into tasks.user_id).
+function normalizeAssignees(rawAssignees, legacyUserId) {
+  let list = [];
+  if (Array.isArray(rawAssignees)) list = rawAssignees;
+  else if (rawAssignees !== undefined && rawAssignees !== null && rawAssignees !== '') list = [rawAssignees];
+  else if (legacyUserId !== undefined && legacyUserId !== null && legacyUserId !== '') list = [legacyUserId];
+  const seen = new Set();
+  const out = [];
+  for (const v of list) {
+    const n = Number(v);
+    if (Number.isInteger(n) && n > 0 && !seen.has(n)) { seen.add(n); out.push(n); }
+  }
+  return out;
+}
+
+// Replace a task's assignee set in task_assignees. Preserves each KEPT person's
+// per-person seen_at (INSERT IGNORE never touches an existing row); removes only
+// those no longer assigned. Empty list clears all rows (e.g. reassigned to a team).
+async function syncTaskAssignees(connection, taskId, userIds) {
+  if (!Array.isArray(userIds) || !userIds.length) {
+    await connection.query('DELETE FROM task_assignees WHERE task_id=?', [taskId]);
+    return;
+  }
+  const placeholders = userIds.map(() => '?').join(',');
+  await connection.query(
+    `DELETE FROM task_assignees WHERE task_id=? AND user_id NOT IN (${placeholders})`,
+    [taskId, ...userIds]
+  );
+  const rows = userIds.map(() => '(?, ?)').join(',');
+  const params = [];
+  userIds.forEach((uid) => { params.push(taskId, uid); });
+  await connection.query(
+    `INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES ${rows}`,
+    params
+  );
+}
 
 // Normalize team_id from request body. Returns Number or null.
 function normalizeTeamId(value) {
@@ -453,7 +495,12 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
       } = task;
       const team_id = normalizeTeamId(task.team_id);
       const finalDurationDays = normalizeDurationDays(duration_days);
-      const finalUserId = team_id ? null : (user_id ?? null);
+      // Multi-assignee: full set from `assignees` (or legacy single user_id).
+      // tasks.user_id stays = the PRIMARY (first) so every single-assignee query,
+      // notification, and seed-job path keeps working. Team tasks have no per-user
+      // assignees (the team is the target), matching the existing finalUserId=null.
+      const assigneeList = team_id ? [] : normalizeAssignees(task.assignees, user_id);
+      const finalUserId = team_id ? null : (assigneeList.length ? assigneeList[0] : null);
       const effectiveStartInput = start_date || new Date();
 
       // Respect provided dates; default start_date to today if missing
@@ -493,12 +540,18 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
 
       const [result] = await connection.query(sql, values);
 
+      // Seed the join table with the full assignee set (primary already mirrored
+      // into tasks.user_id above). No-op for team tasks (empty list).
+      if (assigneeList.length) {
+        await syncTaskAssignees(connection, result.insertId, assigneeList);
+      }
 
       insertedTasks.push({
         id: result.insertId,
         task_name,
         is_urgent: urgentFlag,
         user_id: finalUserId,
+        assignees: assigneeList,
         team_id,
         duration_days: finalDurationDays,
         start_date: formattedStartDate,
@@ -522,9 +575,11 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
     // name/address/homeowner only). Runs after commit so a hiccup here never
     // affects task creation; deduped per (job, sub).
     for (const t of insertedTasks) {
-      if (t.user_id && t.job_id) {
+      if (!t.job_id) continue;
+      const subs = (t.assignees && t.assignees.length) ? t.assignees : (t.user_id ? [t.user_id] : []);
+      for (const sub of subs) {
         try {
-          await maybeCreateSeedJob(connection, t.job_id, t.user_id, signedin_user);
+          await maybeCreateSeedJob(connection, t.job_id, sub, signedin_user);
         } catch (e) {
           logger.error("maybeCreateSeedJob: " + e.message);
         }
@@ -541,11 +596,15 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
       const actorName = (actorRow && actorRow.name) ? actorRow.name : 'Someone';
       const byUser = new Map();
       for (const t of insertedTasks) {
-        if (!t.user_id || String(t.user_id) === String(signedin_user)) continue;
-        if (!byUser.has(t.user_id)) byUser.set(t.user_id, { names: [], urgent: false });
-        const g = byUser.get(t.user_id);
-        g.names.push(t.task_name);
-        if (Number(t.is_urgent) === 1) g.urgent = true; // any urgent task → red push
+        // Notify EVERY assignee (multi-assignee), not just the primary.
+        const targets = (t.assignees && t.assignees.length) ? t.assignees : (t.user_id ? [t.user_id] : []);
+        for (const uid of targets) {
+          if (!uid || String(uid) === String(signedin_user)) continue;
+          if (!byUser.has(uid)) byUser.set(uid, { names: [], urgent: false });
+          const g = byUser.get(uid);
+          g.names.push(t.task_name);
+          if (Number(t.is_urgent) === 1) g.urgent = true; // any urgent task → red push
+        }
       }
       for (const [uid, g] of byUser) {
         const names = g.names;
@@ -657,6 +716,7 @@ router.get("/all_job_task/:id", auth.authenticateToken, denyRestrictedJobData, a
 
     const [rows] = await connection.query(baseSql, params);
     await attachTaskImages(connection, rows);
+    await attachAssignees(connection, rows);
 
     const visible = await filterTasksForExpired(connection, loggedInUserId, rows);
     res.status(200).json(visible);
@@ -712,6 +772,7 @@ router.get("/all_lead_task/:id", auth.authenticateToken, denyRestrictedJobData, 
       [jobIds, loggedInUserId, loggedInUserId, loggedInUserId]
     );
     await attachTaskImages(pool, rows);
+    await attachAssignees(pool, rows);
     const visible = await filterTasksForExpired(pool, loggedInUserId, rows);
     res.status(200).json(visible);
   } catch (err) {
@@ -815,6 +876,7 @@ router.get("/daily_tasks", auth.authenticateToken, async (req, res) => {
     const params = [managerId, managerId, managerId, effectiveDate];
     const [rows] = await connection.query(sql, params);
     await attachTaskImages(connection, rows);
+    await attachAssignees(connection, rows);
 
     // Expired free trial: hide the user's OWN job/lead tasks (and own no-job
     // tasks); keep only tasks assigned to them on a FOREIGN GC's job (#4).
@@ -860,6 +922,7 @@ router.get("/:id", auth.authenticateToken, async (req, res) => {
       });
     }
     await attachTaskImages(pool, [task]);
+    await attachAssignees(pool, [task]);
 
     res.status(200).json(task);
   } catch (err) {
@@ -916,7 +979,11 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       : (oldTask.team_id ?? null);
 
     const oldUser = oldTask.user_id;            // Previous assigned user
-    const newUser = incomingTeamId ? null : (user_id || null);
+    // Multi-assignee: full set from `assignees` (or legacy single user_id). The
+    // PRIMARY (first) is mirrored into tasks.user_id so all single-assignee paths
+    // keep working. Team tasks carry no per-user assignees.
+    const assigneeList = incomingTeamId ? [] : normalizeAssignees(req.body.assignees, user_id);
+    const newUser = incomingTeamId ? null : (assigneeList.length ? assigneeList[0] : null);
 
     const actorId = req.user.id;
     const actorRole = Number(req.user.role);
@@ -1002,7 +1069,17 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
         );
         canMarkAssigneeCompleted = !!teamRow && Number(teamRow.team_leader || 0) === Number(actorId);
       } else {
-        canMarkAssigneeCompleted = Number(oldTask.user_id || 0) === Number(actorId);
+        // Shared completion (multi-assignee): ANY assigned person can check the
+        // task off — the primary (tasks.user_id) OR anyone in task_assignees.
+        if (Number(oldTask.user_id || 0) === Number(actorId)) {
+          canMarkAssigneeCompleted = true;
+        } else {
+          const [memRows] = await connection.query(
+            'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ? LIMIT 1',
+            [oldTask.id, actorId]
+          );
+          canMarkAssigneeCompleted = memRows.length > 0;
+        }
       }
       if (!canMarkAssigneeCompleted) {
         await connection.rollback();
@@ -1124,6 +1201,22 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     params.push(req.params.id);
 
     await connection.query(updateSql, params);
+
+    // Multi-assignee: re-sync the join table only when the caller actually sends
+    // assignment info, so partial edits (status/date/percent) never wipe the set.
+    //  • team task            → clear per-user assignees
+    //  • `assignees` present   → authoritative full set (new multi-select client)
+    //  • legacy single reassign (user_id present AND primary changed) → collapse to that one
+    //  • otherwise             → leave the existing set untouched
+    const hasAssigneesField = Object.prototype.hasOwnProperty.call(req.body, 'assignees');
+    const hasUserIdField = Object.prototype.hasOwnProperty.call(req.body, 'user_id');
+    if (incomingTeamId) {
+      await syncTaskAssignees(connection, req.params.id, []);
+    } else if (hasAssigneesField) {
+      await syncTaskAssignees(connection, req.params.id, assigneeList);
+    } else if (hasUserIdField && Number(newUser || 0) !== Number(oldUser || 0)) {
+      await syncTaskAssignees(connection, req.params.id, newUser ? [newUser] : []);
+    }
 
     // -------------------------------------------------
     // 📅 SCHEDULE CASCADE HOOK
@@ -1524,11 +1617,27 @@ router.post('/:id/seen', auth.authenticateToken, async (req, res) => {
   try {
     const [[t]] = await pool.query('SELECT id, user_id, assignee_seen_at FROM tasks WHERE id = ? LIMIT 1', [taskId]);
     if (!t) return res.status(404).json({ message: 'Task not found' });
-    if (Number(t.user_id) === uid && !t.assignee_seen_at) {
-      await pool.query('UPDATE tasks SET assignee_seen_at = NOW() WHERE id = ? AND assignee_seen_at IS NULL', [taskId]);
+
+    // Multi-assignee "Seen" is PER-PERSON: stamp THIS caller's own task_assignees
+    // row (first open wins). The caller must actually be an assignee — the primary
+    // (tasks.user_id) or a member of task_assignees. A boss/other viewer never
+    // stamps. Legacy per-task tasks.assignee_seen_at is still kept for the primary
+    // so old single-assignee reads/clients keep working.
+    const isPrimary = Number(t.user_id) === uid;
+    let isMember = isPrimary;
+    if (!isMember) {
+      const [m] = await pool.query('SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ? LIMIT 1', [taskId, uid]);
+      isMember = m.length > 0;
     }
-    const [[fresh]] = await pool.query('SELECT assignee_seen_at FROM tasks WHERE id = ? LIMIT 1', [taskId]);
-    return res.json({ seen_at: fresh ? fresh.assignee_seen_at : null });
+    if (isMember) {
+      await pool.query('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)', [taskId, uid]);
+      await pool.query('UPDATE task_assignees SET seen_at = NOW() WHERE task_id = ? AND user_id = ? AND seen_at IS NULL', [taskId, uid]);
+      if (isPrimary && !t.assignee_seen_at) {
+        await pool.query('UPDATE tasks SET assignee_seen_at = NOW() WHERE id = ? AND assignee_seen_at IS NULL', [taskId]);
+      }
+    }
+    const [[mine]] = await pool.query('SELECT seen_at FROM task_assignees WHERE task_id = ? AND user_id = ? LIMIT 1', [taskId, uid]);
+    return res.json({ seen_at: mine ? mine.seen_at : null });
   } catch (err) {
     logger.error('mark seen error: ' + err.message);
     return res.status(500).json({ message: 'Server error' });
@@ -1601,8 +1710,18 @@ router.patch("/:id/complete", auth.authenticateToken, async (req, res) => {
       return res.status(404).json({ success: false, message: "Task not found" });
     }
 
-    // The individual assignee, or the leader of the assigned team.
-    const isAssignee = Number(task.user_id || 0) === actorId;
+    // The individual assignee, or the leader of the assigned team. Multi-assignee:
+    // the shared check-off can be done by ANY assigned person — the primary
+    // (tasks.user_id) OR anyone in task_assignees. Whoever gets there first checks
+    // it and it's done for everyone.
+    let isAssignee = Number(task.user_id || 0) === actorId;
+    if (!isAssignee) {
+      const [memRows] = await connection.query(
+        "SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ? LIMIT 1",
+        [taskId, actorId]
+      );
+      isAssignee = memRows.length > 0;
+    }
     let isTeamLeader = false;
     if (!isAssignee && task.team_id) {
       const [[teamRow]] = await connection.query(

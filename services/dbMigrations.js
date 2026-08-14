@@ -423,18 +423,24 @@ async function ensureTaskAssigneesTable(connection) {
       id INT AUTO_INCREMENT PRIMARY KEY,
       task_id INT NOT NULL,
       user_id INT NOT NULL,
+      seen_at DATETIME NULL,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uniq_task_user (task_id, user_id),
       INDEX idx_ta_task (task_id),
       INDEX idx_ta_user (user_id)
     ) ENGINE=InnoDB
   `);
-  // Backfill once (guarded by emptiness) from the legacy single-assignee column.
+  // seen_at is PER-PERSON: each assignee's own "opened it" stamp (the shared
+  // completion flag stays on tasks.status). Added via ensureScheduleColumn too so
+  // a DB whose table predates this column gets it. Idempotent.
+  await ensureScheduleColumn(connection, 'task_assignees', 'seen_at', 'DATETIME NULL');
+  // Backfill once (guarded by emptiness) from the legacy single-assignee column,
+  // carrying the existing per-task seen stamp onto that primary assignee's row.
   const [[{ n }]] = await connection.query('SELECT COUNT(*) AS n FROM task_assignees');
   if (Number(n) === 0) {
     await connection.query(
-      `INSERT IGNORE INTO task_assignees (task_id, user_id)
-       SELECT id, user_id FROM tasks WHERE user_id IS NOT NULL`
+      `INSERT IGNORE INTO task_assignees (task_id, user_id, seen_at)
+       SELECT id, user_id, assignee_seen_at FROM tasks WHERE user_id IS NOT NULL`
     );
   }
   taskAssigneesTableEnsured = true;
@@ -1159,4 +1165,5 @@ module.exports = {
   ensureReverifyEmailLogTable,
   ensureWebhookEventsTable,
   ensureTaskManagerColumns,
+  ensureTaskAssigneesTable,
 };
