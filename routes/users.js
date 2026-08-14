@@ -1576,6 +1576,7 @@ UNION
     res.status(200).json({
       code: "200",
       message: "All users fetched successfully",
+      scope: "account-wide-v1",
       data: rows
     });
   } catch (error) {
