@@ -1681,7 +1681,7 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
         LEFT JOIN role r ON r.id = u.role
         LEFT JOIN subcategory sc ON sc.id = u.subcategory
         LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
-        WHERE c.request_user1 IN (?, ?)
+        WHERE c.request_user1 IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
 
         UNION
 
@@ -1704,7 +1704,7 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
         LEFT JOIN role r ON r.id = u.role
         LEFT JOIN subcategory sc ON sc.id = u.subcategory
         LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
-        WHERE c.request_user2 IN (?, ?)
+        WHERE c.request_user2 IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
 
         UNION
 
@@ -1727,7 +1727,7 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
         LEFT JOIN subcategory sc ON sc.id = u.subcategory
         LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
         WHERE cat.id = 1
-          AND u.created_by IN (?, ?) AND (
+          AND u.created_by IN (SELECT id FROM user WHERE id = ? OR created_by = ?) AND (
             u.exit_type IS NULL
             OR u.exit_type = ''
             OR u.exit_type = '0'
@@ -1805,24 +1805,30 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
           t.team_name,
           t.team_color
       FROM teams t
-      WHERE t.created_by IN (?, ?)
+      WHERE t.created_by IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
     )
 
     ORDER BY COALESCE(name, team_name) ASC;
 
     `;
 
+    // Account-wide scope: each contact/employee/team branch resolves scope_id to the
+    // WHOLE account (the owner + everyone created_by the owner) via
+    // `IN (SELECT id FROM user WHERE id = ? OR created_by = ?)`, so a contact saved
+    // by ANY account member (e.g. an admin sub-login) is visible to the owner and to
+    // every can-view-all member — not just contacts keyed to the exact caller id.
+    // This is the SAME fix already applied to /getallusers; get-task-users (the
+    // endpoint the Task Manager assign pickers call) had been missed, which is why
+    // the owner still saw only a partial contractor count ("13"). Restricted users:
+    // scope_id = user_id, so they still resolve to self (+ anyone they created); the
+    // dedicated "self" + "owner" branches below keep them seeing themselves + the GC.
     const [rows] = await connection.query(query, [
-      scope_id,         // contact branch 1  (self OR whole account)
-      user_id,
-      scope_id,         // contact branch 2
-      user_id,
-      scope_id,         // employees branch
-      user_id,
-      user_id,          // "self" branch (always the caller)
-      working_user_id,  // "account owner" branch (always the GC → restricted users still see Poul)
-      scope_id,         // teams branch
-      user_id,
+      scope_id, scope_id,   // contact branch 1  (whole account when owner)
+      scope_id, scope_id,   // contact branch 2
+      scope_id, scope_id,   // employees branch
+      user_id,              // "self" branch (always the caller)
+      working_user_id,      // "account owner" branch (always the GC → restricted users still see Poul)
+      scope_id, scope_id,   // teams branch
     ]);
 
     // Attach members[] to team rows so the frontend can fan-out a task to
@@ -1861,6 +1867,7 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
     res.status(200).json({
       code: "200",
       message: "All users fetched successfully",
+      scope: "task-users-account-wide-v1", // deploy-verify marker: proves this fix is live
       data: rows,
     });
   } catch (error) {
