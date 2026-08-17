@@ -1093,11 +1093,16 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     }
 
     // Only GC can set final completion status
-    if (typeof status !== 'undefined' && requestedStatus === 1 && !isGC) {
+    // SECURITY: final completion (status=1) requires OWNING the account — the GC
+    // owner (isGC) or an employee acting for their GC — AND ownsTask. The old
+    // `&& !isGC` exempted role-14 actors entirely, so a role-14 user who is merely
+    // a delegated ASSIGNEE of another account's task (passed the top ownsTask||
+    // isAssignee guard as the assignee) could finalize it here instead of only
+    // raising the review signal. A delegated assignee must go through
+    // /complete (assignee_completed) like anyone else; only the owning boss finalizes.
+    if (typeof status !== 'undefined' && requestedStatus === 1) {
       const canCompleteAsGC =
-        !!managerId &&
-        managerIsGC &&
-        ownsTask;
+        ownsTask && (isGC || (!!managerId && managerIsGC));
 
       if (!canCompleteAsGC) {
         await connection.rollback();

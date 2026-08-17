@@ -61,11 +61,25 @@ const seenOf = (arr, uid) => (arr.find((a) => Number(a.user_id) === uid) || {}).
 
     // ---- Real-ish schema (production column names). `business`, NOT business_name. ----
     await conn.query('CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(80), business VARCHAR(120) NULL, role INT NULL, category INT NULL, created_by INT NULL)');
+    // tasks carries the columns PATCH /complete AND PUT /update read/write, so the
+    // real routes run unmodified against this schema.
     await conn.query(`CREATE TABLE tasks (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NULL, team_id INT NULL,
-      created_by INT NULL, status TINYINT DEFAULT 0, assignee_completed TINYINT DEFAULT 0, assignee_seen_at DATETIME NULL)`);
+      created_by INT NULL, status TINYINT DEFAULT 0, assignee_completed TINYINT DEFAULT 0, assignee_seen_at DATETIME NULL,
+      task_name VARCHAR(255) NULL, description TEXT NULL, job_id INT NULL, duration_days INT NULL,
+      start_date DATETIME NULL, end_date DATETIME NULL, time DATETIME NULL, priority VARCHAR(10) NULL,
+      complete_percentage INT NULL, image VARCHAR(255) NULL, audio_note VARCHAR(255) NULL, nudge INT NULL,
+      status_note TEXT NULL, task_type VARCHAR(20) NULL, is_calendar_task TINYINT NULL,
+      is_appointment_task TINYINT NULL, schedule_item_id INT NULL, is_urgent TINYINT NULL,
+      completion_response TEXT NULL)`);
     await conn.query(`CREATE TABLE task_assignees (id INT AUTO_INCREMENT PRIMARY KEY, task_id INT NOT NULL, user_id INT NOT NULL,
       seen_at DATETIME NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY uniq_task_user (task_id, user_id))`);
     await conn.query('CREATE TABLE teams (id INT PRIMARY KEY, team_leader INT NULL)');
+    // Safety-net tables so /update's notification / job-contact side-effects never
+    // 500 the route even if they fire (the tests keep the primary unchanged so they
+    // shouldn't, but this keeps the route honest).
+    await conn.query('CREATE TABLE notifications (id INT AUTO_INCREMENT PRIMARY KEY, sender_id INT NULL, receiver_id INT NULL, content TEXT NULL, status INT NULL, url VARCHAR(80) NULL, created_by INT NULL)');
+    await conn.query('CREATE TABLE job_contacts (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NULL, job_id INT NULL, contact_id INT NULL)');
+    await conn.query('CREATE TABLE user_device_tokens (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NULL, fcm_token VARCHAR(255) NULL)');
     // 74 = owner/GC (role 14); 372,360 = contractors under 74 (category 2 ≠ employee=1,
     // so resolveOwnerId returns SELF → NOT same account → genuinely delegated);
     // 90 = employee foreman of 74 (category 1 → resolves to owner 74, acts-as-GC);
@@ -129,6 +143,11 @@ const seenOf = (arr, uid) => (arr.find((a) => Number(a.user_id) === uid) || {}).
     let ACTOR = null;
     const authMod = require('../services/authentication');
     authMod.authenticateToken = (req, _res, next) => { req.user = ACTOR; next(); };
+    // Bypass the trial/paywall guard ONLY (we're testing completion authorization,
+    // not access tier). isSameAccount / resolveOwnerId stay REAL. Must be stubbed
+    // BEFORE requiring the router (it destructures the guard at load time).
+    const accessMod = require('../utils/access');
+    accessMod.denyExpiredFreeWrites = (_req, _res, next) => next();
     const express = require('express');
     const request = require('supertest');
     const tasksRouter = require('../routes/tasks');
@@ -148,6 +167,9 @@ const seenOf = (arr, uid) => (arr.find((a) => Number(a.user_id) === uid) || {}).
       return row;
     };
     const complete = (id) => request(server).patch(`/tasks/${id}/complete`).send({ assignee_completed: true });
+    // PUT /update finalize: send status=1 with the primary UNCHANGED (so the
+    // assignment-change notification path never fires).
+    const updateStatus = (id, primary) => request(server).put(`/tasks/update/${id}`).send({ status: 1, user_id: primary });
 
     // Case 1 — DELEGATED primary assignee checks their box → signal only, NO finalize
     ACTOR = { id: 372, role: 12 };
@@ -207,6 +229,36 @@ const seenOf = (arr, uid) => (arr.find((a) => Number(a.user_id) === uid) || {}).
     let s7 = await statusOf(id7);
     ok(r7.status === 403 && s7.status === 0 && s7.assignee_completed === 0,
        'cross-account role-14 GC: 403, task untouched (ownsTask now required for role 14)');
+
+    // ---- PUT /update completion gate (the `!isGC` bypass fix) ----
+    console.log('\nC) ROUTE LAYER — PUT /tasks/update/:id finalize (status=1) authorization');
+
+    // Case U1 — a role-14 GC who is merely a DELEGATED assignee of another account's
+    // task tries to finalize via /update. Passes the top ownsTask||isAssignee guard
+    // AS the assignee, but must NOT finalize — the old `!isGC` short-circuit let it.
+    ACTOR = { id: 998, role: 14 };
+    const [u1ins] = await conn.query('INSERT INTO tasks (user_id, created_by, status, assignee_completed) VALUES (998, 74, 0, 0)');
+    await syncTaskAssignees(conn, u1ins.insertId, [998]);
+    let ru1 = await updateStatus(u1ins.insertId, 998);
+    let su1 = await statusOf(u1ins.insertId);
+    ok(ru1.status === 403 && su1.status === 0,
+       'role-14 delegated assignee via /update: 403, status STAYS 0 (must signal via /complete, not finalize)');
+
+    // Case U2 — the account's own GC owner finalizes their task via /update → allowed.
+    ACTOR = { id: 74, role: 14 };
+    const idU2 = await mkTask(74, 372, [372]);
+    let ru2 = await updateStatus(idU2, 372);
+    let su2 = await statusOf(idU2);
+    ok(ru2.status === 200 && su2.status === 1,
+       'GC owner via /update: FINALIZES status=1 (isGC + ownsTask — legit path preserved)');
+
+    // Case U3 — an employee foreman of the GC finalizes via /update → allowed.
+    ACTOR = { id: 90, role: 5 };
+    const idU3 = await mkTask(74, 372, [372]);
+    let ru3 = await updateStatus(idU3, 372);
+    let su3 = await statusOf(idU3);
+    ok(ru3.status === 200 && su3.status === 1,
+       'foreman-of-GC via /update: FINALIZES status=1 (managerIsGC + ownsTask — legit path preserved)');
 
     console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'}: ${pass} passed, ${fail} failed`);
     process.exitCode = fail === 0 ? 0 : 1;
