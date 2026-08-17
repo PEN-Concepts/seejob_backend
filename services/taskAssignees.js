@@ -11,7 +11,7 @@ async function attachAssignees(db, tasks) {
   if (!ids.length) return tasks;
   const ph = ids.map(() => '?').join(',');
   const [rows] = await db.query(
-    `SELECT ta.task_id, ta.user_id, ta.seen_at, u.name, u.business_name
+    `SELECT ta.task_id, ta.user_id, ta.seen_at, u.name, u.business AS business_name
        FROM task_assignees ta
        JOIN \`user\` u ON u.id = ta.user_id
       WHERE ta.task_id IN (${ph})
