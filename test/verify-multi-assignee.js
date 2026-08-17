@@ -75,12 +75,11 @@ const seenOf = (arr, uid) => (arr.find((a) => Number(a.user_id) === uid) || {}).
       (372,'Rolando Torres','C & R TILE',12,2,74),
       (360,'John Bates','John Bates Painting',12,2,74),
       (90,'Foreman Bill',NULL,5,1,74),
-      (999,'External Contractor',NULL,12,2,NULL)`);
-    // NOTE: role 14 is deliberately NOT used for the external user — the /complete
-    // route grants canActAsGC to ANY role-14 actor without an account check, so a
-    // role-14 outsider would (currently) be allowed to finalize by id. That is a
-    // real cross-account authorization gap, tracked separately; here we assert the
-    // ordinary non-member (role 12) is correctly refused.
+      (999,'External Contractor',NULL,12,2,NULL),
+      (998,'External GC (other account)',NULL,14,2,NULL)`);
+    // 998 is a role-14 GC on a DIFFERENT account — used to prove the cross-account
+    // /complete fix: without the ownsTask requirement on the role-14 branch, 998
+    // could finalize account 74's tasks by id. Case 7 asserts it is now refused.
 
     console.log('A) DATA LAYER');
     // 1) Multi-assign create: assignees [372,360], primary=372 mirrored to tasks.user_id
@@ -198,6 +197,16 @@ const seenOf = (arr, uid) => (arr.find((a) => Number(a.user_id) === uid) || {}).
     let s6 = await statusOf(id6);
     ok(r6.status === 403 && s6.status === 0 && s6.assignee_completed === 0,
        'external non-member: 403, task untouched');
+
+    // Case 7 — CROSS-ACCOUNT SECURITY: a role-14 GC from ANOTHER account (not
+    // assignee, not this account's owner) must NOT be able to finalize by id.
+    // This is the fix for the /complete cross-account auth gap.
+    ACTOR = { id: 998, role: 14 };
+    let id7 = await mkTask(74, 372, [372, 360]);
+    let r7 = await complete(id7);
+    let s7 = await statusOf(id7);
+    ok(r7.status === 403 && s7.status === 0 && s7.assignee_completed === 0,
+       'cross-account role-14 GC: 403, task untouched (ownsTask now required for role 14)');
 
     console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'}: ${pass} passed, ${fail} failed`);
     process.exitCode = fail === 0 ? 0 : 1;

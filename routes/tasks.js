@@ -1735,8 +1735,15 @@ router.patch("/:id/complete", auth.authenticateToken, async (req, res) => {
     // it completes the whole task (status) and cascades to the assignee's box —
     // mirroring the web boss/PM checkbox. Assignees still only set their own box.
     const ownsTask = await isSameAccount(actorId, task.created_by, connection);
+    // SECURITY (cross-account): a GC (role 14) may act-as-boss ONLY on their own
+    // account's tasks. role 14 is per-tenant (every account owner is role 14), so
+    // WITHOUT this ownsTask requirement any GC could finalize/reopen another
+    // account's task by guessing its id. Roles 2–5 already required ownsTask; role
+    // 14 was exempt — that was the gap. A genuine assignee of a delegated task (any
+    // account) is still handled by the isAssignee branch above and only raises the
+    // review signal, never finalizes here.
     const canActAsGC =
-      actorRole === 14 || ([2, 3, 4, 5].includes(actorRole) && ownsTask);
+      [2, 3, 4, 5, 14].includes(actorRole) && ownsTask;
 
     if (!isAssignee && !isTeamLeader && !canActAsGC) {
       return res.status(403).json({
