@@ -2019,6 +2019,30 @@ router.get(
 
     try {
       connection = await pool.getConnection();
+
+      // SECURITY (cross-account): job_contacts is keyed by job_id only, so without
+      // this an account could read ANOTHER account's contacts by passing a foreign
+      // job_id. Resolve the job/lead to its owner and require the caller's account
+      // to match — matching every other job-scoped endpoint (was: no check → 200 []
+      // for a non-owned/nonexistent job, and a real leak for a populated one).
+      const isLead = owner_type === "lead";
+      const [[ownerRow]] = await connection.query(
+        isLead
+          ? "SELECT user_id AS owner FROM leads WHERE id = ? LIMIT 1"
+          : "SELECT created_by AS owner FROM job WHERE id = ? LIMIT 1",
+        [job_id]
+      );
+      if (!ownerRow) {
+        return res.status(404).json({ code: "404", message: "Job not found", data: [] });
+      }
+      if (!(await isSameAccount(req.user.id, ownerRow.owner, connection))) {
+        return res.status(403).json({
+          code: "403",
+          message: "This job does not belong to your account.",
+          data: [],
+        });
+      }
+
       await ensureOwnerTypeColumns(connection);
       const query = `
       SELECT u.id, u.name, u.email, u.image, sc.name AS subcategory, jc.id as 'jcid'
