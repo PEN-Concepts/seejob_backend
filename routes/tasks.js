@@ -1320,11 +1320,25 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       // Insert notification record
       const url = "/task";
 
-      await connection.query(
-        `INSERT INTO notifications (sender_id, receiver_id, content, status, url, created_by)
-         VALUES (?, ?, ?, 1, ?, ?)`,
-        [actorId, notifyUser, notifyMessage, url, actorId]
+      // DEDUPE: the assign picker can fire this update more than once in quick
+      // succession (per-pick save + Done/onHide commit + client-side races), which
+      // was double-sending the "assigned you a new task" push. Skip if an identical
+      // notification to this receiver was recorded in the last 15s → exactly one push.
+      const [[recentDup]] = await connection.query(
+        `SELECT id FROM notifications
+           WHERE receiver_id = ? AND sender_id = ? AND content = ? AND url = ?
+             AND created_at > (NOW() - INTERVAL 15 SECOND)
+           LIMIT 1`,
+        [notifyUser, actorId, notifyMessage, url]
       );
+
+      if (!recentDup) {
+        await connection.query(
+          `INSERT INTO notifications (sender_id, receiver_id, content, status, url, created_by)
+           VALUES (?, ?, ?, 1, ?, ?)`,
+          [actorId, notifyUser, notifyMessage, url, actorId]
+        );
+      }
       // -------------------------------------------------
         // 📇 JOB CONTACTS LOGIC (ADD / REMOVE)
         // -------------------------------------------------
@@ -1347,13 +1361,16 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
         }
 
 
-      // Send FCM push
-      const [[recipient]] = await connection.query(
-        "SELECT fcm_token FROM user_device_tokens WHERE user_id=?",
-        [notifyUser]
-      );
+      // Send FCM push (skipped when we just deduped the notification above, so the
+      // racing duplicate save doesn't fire a second push).
+      const [[recipient]] = recentDup
+        ? [[null]]
+        : await connection.query(
+            "SELECT fcm_token FROM user_device_tokens WHERE user_id=?",
+            [notifyUser]
+          );
 
-      if (recipient && recipient.fcm_token) {
+      if (!recentDup && recipient && recipient.fcm_token) {
         const fcmMessage = {
           token: recipient.fcm_token,
           notification: {
