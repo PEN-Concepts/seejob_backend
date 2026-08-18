@@ -8,6 +8,7 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { getCurrentDateTime } = require("../common/timdate");
+const { isSameAccount } = require("../utils/access");
 
 const APP_URL = "https://seejobrun.com/user-dashboard/bid-requests";
 
@@ -208,6 +209,21 @@ router.get("/:id", auth.authenticateToken, async (req, res) => {
     await ensureBidTables(conn);
     const [reqRows] = await conn.query("SELECT * FROM bid_requests WHERE id = ? LIMIT 1", [bidId]);
     if (!reqRows.length) return res.status(404).json({ message: "Bid request not found" });
+
+    // SECURITY: only the GC who owns this bid request (their account) or an invited
+    // contractor may read it — it exposes every invitee's bid_total/scope_notes.
+    // (Was unguarded: any account could read competitors' bids by id.)
+    let allowed = await isSameAccount(req.user.id, reqRows[0].gc_user_id);
+    if (!allowed) {
+      const [inv] = await conn.query(
+        "SELECT 1 FROM bid_invites WHERE bid_request_id = ? AND contractor_user_id = ? LIMIT 1",
+        [bidId, req.user.id]
+      );
+      allowed = inv.length > 0;
+    }
+    if (!allowed) {
+      return res.status(403).json({ message: "This bid request does not belong to your account." });
+    }
 
     const [docs] = await conn.query(
       `SELECT d.id, d.name, d.path, d.type FROM bid_shared_docs s

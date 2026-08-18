@@ -6,7 +6,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites, OWNER_EXEMPT_EMAILS, resolveOwnerId, denyRestrictedJobData } = require("../utils/access");
-const { ownsJob } = require("../utils/ownership");
+const { ownsJob, requireOwnsJob, requireSameAccountAsParam } = require("../utils/ownership");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
@@ -444,6 +444,7 @@ router.post('/quotes/:id/send-email', auth.authenticateToken, requireQuoteAccess
 router.get(
   "/get_Jobcontacts/:jid",
   auth.authenticateToken, requireQuoteAccess,
+  requireOwnsJob({ idFrom: "params", idKey: "jid" }),
   async (req, res) => {
     let connection;
     try {
@@ -469,7 +470,7 @@ router.get(
 );
 
 //get contacts
-router.get("/get_jobs/:user_id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.get("/get_jobs/:user_id", auth.authenticateToken, requireQuoteAccess, requireSameAccountAsParam({ idKey: "user_id" }), async (req, res) => {
   let connection;
   try {
     const user_id = req.params.user_id; // <-- from URL param
@@ -1166,6 +1167,7 @@ router.post("/create", auth.authenticateToken, requireQuoteAccess, denyExpiredFr
 router.get(
   "/list-job/:user_id/:job_id",
   auth.authenticateToken, requireQuoteAccess,
+  requireOwnsJob({ idFrom: "params", idKey: "job_id" }),
   async (req, res) => {
     let connection;
     try {
@@ -1207,6 +1209,7 @@ WHERE col.created_by=  ? and
 router.get(
   "/list/:user_id/:job_id",
   auth.authenticateToken, requireQuoteAccess,
+  requireOwnsJob({ idFrom: "params", idKey: "job_id", fixedType: "lead" }),
   async (req, res) => {
     let connection;
     try {
@@ -1330,7 +1333,7 @@ router.put("/changewith/:id", auth.authenticateToken, requireQuoteAccess, async 
   }
 });
 
-router.get("/get_employees/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.get("/get_employees/:id", auth.authenticateToken, requireQuoteAccess, requireSameAccountAsParam({ idKey: "id" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -1449,6 +1452,7 @@ router.post("/add_contact", auth.authenticateToken, requireQuoteAccess, async (r
 router.get(
   "/job_contacts/:job_id/:change_quote_type",
   auth.authenticateToken, requireQuoteAccess,
+  requireOwnsJob({ idFrom: "params", idKey: "job_id" }),
   async (req, res) => {
     let connection;
     try {
@@ -1475,7 +1479,7 @@ router.get(
   }
 );
 
-router.get("/details/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, blockExpiredOwnJob((r) => r.params.job_id), async (req, res) => {
+router.get("/details/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, requireOwnsJob({ idFrom: "params", idKey: "job_id" }), blockExpiredOwnJob((r) => r.params.job_id), async (req, res) => {
   let connection;
   try {
     const changeorder_with = res.locals.id;
@@ -1572,7 +1576,7 @@ router.get("/details/:job_id/:change_quote_type", auth.authenticateToken, requir
 });
 
 
-router.get("/lead_details/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, blockExpiredOwnRecord((r) => r.params.job_id, () => "lead"), async (req, res) => {
+router.get("/lead_details/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, requireOwnsJob({ idFrom: "params", idKey: "job_id", fixedType: "lead" }), blockExpiredOwnRecord((r) => r.params.job_id, () => "lead"), async (req, res) => {
   let connection;
   try {
     const changeorder_with = res.locals.id;

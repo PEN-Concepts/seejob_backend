@@ -5,6 +5,7 @@ const Joi = require("joi");
 const logger = require("../common/logger");
 const auth = require("../services/authentication");
 const { isSameAccount } = require("../utils/access");
+const { requireSameAccountAsParam } = require("../utils/ownership");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 // Time-logs are clockin rows (owned via clockin.created_by). Guard by-id routes so
@@ -406,7 +407,7 @@ function getWeekRange(offset = 0) {
   return { start: monday, end: friday };
 }
 
-router.get("/time-logs/:userId", auth.authenticateToken, async (req, res) => {
+router.get("/time-logs/:userId", auth.authenticateToken, requireSameAccountAsParam({ idKey: "userId" }), async (req, res) => {
   const userId = req.params.userId;
 
   // Support explicit date range via startDate/endDate, falling back
@@ -875,7 +876,7 @@ router.put('/time-logs/payroll-week', auth.authenticateToken, async (req, res) =
 });
 
 // 
-router.get('/pending-logs/:userId', auth.authenticateToken, async (req, res) => {
+router.get('/pending-logs/:userId', auth.authenticateToken, requireSameAccountAsParam({ idKey: "userId" }), async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();

@@ -4,7 +4,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { blockExpiredOwnJob, denyExpiredFreeWrites, denyRestrictedJobData } = require("../utils/access");
-const { ownsJob } = require("../utils/ownership");
+const { ownsJob, requireOwnsJob, requireSameAccountAsParam } = require("../utils/ownership");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -309,6 +309,7 @@ router.post('/change-orders/:id/send-email', auth.authenticateToken, async (req,
 router.get(
   "/get_Jobcontacts/:jid",
   auth.authenticateToken,
+  requireOwnsJob({ idFrom: "params", idKey: "jid" }),
   async (req, res) => {
     let connection;
     try {
@@ -334,7 +335,7 @@ router.get(
 );
 
 //get contacts
-router.get("/get_jobs/:user_id", auth.authenticateToken, async (req, res) => {
+router.get("/get_jobs/:user_id", auth.authenticateToken, requireSameAccountAsParam({ idKey: "user_id" }), async (req, res) => {
   let connection;
   try {
     const user_id = req.params.user_id; // <-- from URL param
@@ -1053,6 +1054,7 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req
 router.get(
   "/list/:user_id/:job_id",
   auth.authenticateToken,
+  requireOwnsJob({ idFrom: "params", idKey: "job_id" }),
   async (req, res) => {
     let connection;
     try {
@@ -1173,7 +1175,7 @@ router.put("/changewith/:id", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/get_employees/:id", auth.authenticateToken, async (req, res) => {
+router.get("/get_employees/:id", auth.authenticateToken, requireSameAccountAsParam({ idKey: "id" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -1261,6 +1263,7 @@ router.post("/add_contact", auth.authenticateToken, async (req, res) => {
 router.get(
   "/job_contacts/:job_id",
   auth.authenticateToken,
+  requireOwnsJob({ idFrom: "params", idKey: "job_id" }),
   async (req, res) => {
     let connection;
     try {
@@ -1374,7 +1377,7 @@ router.get(
 //   }
 // });
 
-router.get("/details/:job_id", auth.authenticateToken, blockExpiredOwnJob((r) => r.params.job_id), async (req, res) => {
+router.get("/details/:job_id", auth.authenticateToken, requireOwnsJob({ idFrom: "params", idKey: "job_id" }), blockExpiredOwnJob((r) => r.params.job_id), async (req, res) => {
   let connection;
   try {
     const user_id = res.locals.id; // used for with_user checks
@@ -2773,6 +2776,11 @@ router.get(
 
       if (!rows.length) {
         return res.status(404).json({ message: "No report found" });
+      }
+
+      // SECURITY: only the account that owns this report's job may download it.
+      if (!(await ownsJob(req.user.id, rows[0].job_id, connection))) {
+        return res.status(403).json({ code: "403", message: "This report does not belong to your account." });
       }
 
       const data = rows[0];

@@ -6,6 +6,7 @@ const logger = require("../common/logger");
 const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
 const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, isSameAccount } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
+const { requireOwnsJob } = require("../utils/ownership");
 
 // Payment methods a subcontractor payment can be recorded under.
 const PAYMENT_METHODS = new Set(["check", "cash", "credit_card", "venmo", "wire"]);
@@ -471,7 +472,9 @@ router.post("/contingency", auth.authenticateToken, blockExpiredOwnRecord((r) =>
 });
 
 // GET /divisions/:divisionId/lineitems
-router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, async (req, res) => {
+// SECURITY: job_id is now REQUIRED + ownership-checked. Without it this returned
+// every account's line items for the division (financial cross-account leak).
+router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, requireOwnsJob({ idFrom: "query", idKey: "job_id", typeFrom: "query", typeKey: "job_type" }), blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type), requireJobBudgetFeature, async (req, res) => {
   const { divisionId } = req.params;
   const { job_id, job_type } = req.query;
   let connection;

@@ -53,7 +53,7 @@ function requireOwnsRecord({ table, ownerCol, idFrom = "params", idKey = "id", i
  * Require the caller's account to own a job/lead supplied in the request.
  * owner_type=lead → leads.user_id, else job.created_by.
  */
-function requireOwnsJob({ idFrom = "params", idKey = "job_id", typeFrom = "query", typeKey = "owner_type", optional = false } = {}) {
+function requireOwnsJob({ idFrom = "params", idKey = "job_id", typeFrom = "query", typeKey = "owner_type", fixedType = null, optional = false } = {}) {
   return async (req, res, next) => {
     try {
       const id = pick(req, idFrom, idKey);
@@ -61,7 +61,9 @@ function requireOwnsJob({ idFrom = "params", idKey = "job_id", typeFrom = "query
         if (optional) return next();
         return res.status(400).json({ code: "400", message: `${idKey} is required` });
       }
-      const isLead = String(pick(req, typeFrom, typeKey) || "job").toLowerCase() === "lead";
+      const isLead = fixedType
+        ? String(fixedType).toLowerCase() === "lead"
+        : String(pick(req, typeFrom, typeKey) || "job").toLowerCase() === "lead";
       const [[row]] = await pool.query(
         isLead
           ? "SELECT user_id AS owner FROM leads WHERE id = ? LIMIT 1"
@@ -75,6 +77,30 @@ function requireOwnsJob({ idFrom = "params", idKey = "job_id", typeFrom = "query
       return next();
     } catch (e) {
       logger.error(`requireOwnsJob: ${e.message}`);
+      return res.status(403).json({ code: "403", message: "Forbidden" });
+    }
+  };
+}
+
+/**
+ * Require a user-id in the request to be in the CALLER's account. For endpoints
+ * that trust a `:userId`/`:user_id` path param as a data filter (e.g. time logs by
+ * user, "jobs created by user_id") — a caller must not be able to read another
+ * account's data by swapping the id. Passes for self or any same-account user.
+ */
+function requireSameAccountAsParam({ idFrom = "params", idKey = "user_id", optional = false } = {}) {
+  return async (req, res, next) => {
+    try {
+      const target = pick(req, idFrom, idKey);
+      if (target == null || target === "") {
+        if (optional) return next();
+        return res.status(400).json({ code: "400", message: `${idKey} is required` });
+      }
+      if (Number(target) === Number(req.user.id)) return next();
+      if (await isSameAccount(req.user.id, target)) return next();
+      return res.status(403).json({ code: "403", message: "This does not belong to your account." });
+    } catch (e) {
+      logger.error(`requireSameAccountAsParam(${idKey}): ${e.message}`);
       return res.status(403).json({ code: "403", message: "Forbidden" });
     }
   };
@@ -98,4 +124,4 @@ async function ownsJob(userId, jobId, connection) {
   }
 }
 
-module.exports = { requireOwnsRecord, requireOwnsJob, ownsJob };
+module.exports = { requireOwnsRecord, requireOwnsJob, requireSameAccountAsParam, ownsJob };
