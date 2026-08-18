@@ -1483,6 +1483,11 @@ router.delete("/delete/:id", auth.authenticateToken, requireOwnsRecord({ table: 
 // Single-photo upload (legacy — also inserts into task_images)
 router.post('/upload-photo/:taskId', auth.authenticateToken, upload.single('photo'), async (req, res) => {
   try {
+    // SECURITY: only the assignee or owning account may attach a photo (matches
+    // the /upload-photos sibling). Was unguarded — cross-account photo injection.
+    if (!(await loadAccessibleTask(req.user.id, req.params.taskId))) {
+      return res.status(403).json({ message: 'This task does not belong to your account.' });
+    }
     if (req.fileValidationError) {
       return res.status(400).json({ message: req.fileValidationError });
     }

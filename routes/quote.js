@@ -6,7 +6,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites, OWNER_EXEMPT_EMAILS, resolveOwnerId, denyRestrictedJobData } = require("../utils/access");
-const { ownsJob, requireOwnsJob, requireSameAccountAsParam } = require("../utils/ownership");
+const { ownsJob, requireOwnsJob, requireSameAccountAsParam, requireOwnsRecordViaJob, requireOwnsViaParentJob, requireOwnsJobOrLead } = require("../utils/ownership");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
@@ -1090,7 +1090,7 @@ router.delete('/quotes/:id', auth.authenticateToken, requireQuoteAccess, async (
   }
 });
 
-router.post("/create", auth.authenticateToken, requireQuoteAccess, denyExpiredFreeWrites, async (req, res) => {
+router.post("/create", auth.authenticateToken, requireQuoteAccess, denyExpiredFreeWrites, requireOwnsJobOrLead({ idFrom: "body", idKey: "job_id" }), async (req, res) => {
   let connection;
   try {
     const { job_id, items, change_quote_type } = req.body;
@@ -1248,7 +1248,7 @@ WHERE col.created_by=  ? and
 );
 
 // DELETE change order item
-router.delete("/delete/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.delete("/delete/:id", auth.authenticateToken, requireQuoteAccess, requireOwnsViaParentJob({ table: "quote_list", parentCol: "quote_id", parentTable: "quote" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -1273,7 +1273,7 @@ router.delete("/delete/:id", auth.authenticateToken, requireQuoteAccess, async (
 
 // PUT update change order
 // PUT update change order item
-router.put("/edit/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.put("/edit/:id", auth.authenticateToken, requireQuoteAccess, requireOwnsViaParentJob({ table: "quote_list", parentCol: "quote_id", parentTable: "quote" }), async (req, res) => {
   const { id } = req.params;
   const { description, amount, job_id } = req.body;
 
@@ -1306,7 +1306,7 @@ router.put("/edit/:id", auth.authenticateToken, requireQuoteAccess, async (req, 
 });
 
 // update change order relations
-router.put("/changewith/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.put("/changewith/:id", auth.authenticateToken, requireQuoteAccess, requireOwnsJobOrLead({ idFrom: "params", idKey: "id" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params; // change order table id
@@ -1384,7 +1384,7 @@ router.get("/get_all_users", auth.authenticateToken, requireQuoteAccess, async (
   }
 });
 
-router.post("/add_contact", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.post("/add_contact", auth.authenticateToken, requireQuoteAccess, requireOwnsJobOrLead({ idFrom: "body", idKey: "job_id" }), async (req, res) => {
   let connection;
   try {
     const { job_id, emp_id, change_quote_type } = req.body;
@@ -1663,7 +1663,7 @@ router.get("/lead_details/:job_id/:change_quote_type", auth.authenticateToken, r
 });
 
 // Update Change Order Status (Approve/Reject)
-router.put("/status/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.put("/status/:id", auth.authenticateToken, requireQuoteAccess, requireOwnsRecordViaJob({ table: "quote", idKey: "id" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -2617,7 +2617,7 @@ GROUP BY co.id;`,
   }
 );
 
-router.delete("/job-contact/:id/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.delete("/job-contact/:id/:job_id/:change_quote_type", auth.authenticateToken, requireQuoteAccess, requireOwnsJobOrLead({ idFrom: "params", idKey: "job_id" }), async (req, res) => {
   const contactId = req.params.id;
   const change_quote_with = req.params.change_quote_type
   const job_id = req.params.job_id
@@ -2636,7 +2636,7 @@ router.delete("/job-contact/:id/:job_id/:change_quote_type", auth.authenticateTo
   }
 
 });
-router.delete("/job-contact/:id", auth.authenticateToken, requireQuoteAccess, async (req, res) => {
+router.delete("/job-contact/:id", auth.authenticateToken, requireQuoteAccess, requireOwnsViaParentJob({ table: "quote_emp", parentCol: "quote_id", parentTable: "quote" }), async (req, res) => {
   const contactId = req.params.id;
   try {
     const [result] = await pool.execute(

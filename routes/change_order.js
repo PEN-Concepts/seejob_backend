@@ -4,7 +4,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { blockExpiredOwnJob, denyExpiredFreeWrites, denyRestrictedJobData } = require("../utils/access");
-const { ownsJob, requireOwnsJob, requireSameAccountAsParam } = require("../utils/ownership");
+const { ownsJob, requireOwnsJob, requireSameAccountAsParam, requireOwnsRecordViaJob, requireOwnsViaParentJob, requireOwnsJobOrLead } = require("../utils/ownership");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -978,7 +978,7 @@ router.delete('/change-orders/:id', auth.authenticateToken, async (req, res) => 
   }
 });
 
-router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, requireOwnsJobOrLead({ idFrom: "body", idKey: "job_id" }), async (req, res) => {
   let connection;
   try {
     const { job_id, items } = req.body;
@@ -1090,7 +1090,7 @@ router.get(
 );
 
 // DELETE change order item
-router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/delete/:id", auth.authenticateToken, requireOwnsViaParentJob({ table: "change_order_list", parentCol: "change_order_id", parentTable: "change_order" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -1115,7 +1115,7 @@ router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
 
 // PUT update change order
 // PUT update change order item
-router.put("/edit/:id", auth.authenticateToken, async (req, res) => {
+router.put("/edit/:id", auth.authenticateToken, requireOwnsViaParentJob({ table: "change_order_list", parentCol: "change_order_id", parentTable: "change_order" }), async (req, res) => {
   const { id } = req.params;
   const { description, amount, job_id } = req.body;
 
@@ -1148,7 +1148,7 @@ router.put("/edit/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // update change order relations
-router.put("/changewith/:id", auth.authenticateToken, async (req, res) => {
+router.put("/changewith/:id", auth.authenticateToken, requireOwnsJobOrLead({ idFrom: "params", idKey: "id" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params; // change order table id
@@ -1195,7 +1195,7 @@ router.get("/get_employees/:id", auth.authenticateToken, requireSameAccountAsPar
     if (connection) connection.release();
   }
 });
-router.post("/add_contact", auth.authenticateToken, async (req, res) => {
+router.post("/add_contact", auth.authenticateToken, requireOwnsJobOrLead({ idFrom: "body", idKey: "job_id" }), async (req, res) => {
   let connection;
   try {
     const { job_id, emp_id } = req.body;
@@ -1729,7 +1729,7 @@ router.get("/user-details", auth.authenticateToken, async (req, res) => {
 });
 
 // Update Change Order Status (Approve/Reject)
-router.put("/status/:id", auth.authenticateToken, async (req, res) => {
+router.put("/status/:id", auth.authenticateToken, requireOwnsRecordViaJob({ table: "change_order", idKey: "id" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
@@ -2738,7 +2738,7 @@ router.get(
   },
 );
 
-router.delete("/job-contact/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/job-contact/:id", auth.authenticateToken, requireOwnsViaParentJob({ table: "change_order_emp", parentCol: "change_order_id", parentTable: "change_order" }), async (req, res) => {
   const contactId = req.params.id;
   try {
     const [result] = await pool.execute(

@@ -213,7 +213,8 @@ router.get("/:id", auth.authenticateToken, async (req, res) => {
     // SECURITY: only the GC who owns this bid request (their account) or an invited
     // contractor may read it — it exposes every invitee's bid_total/scope_notes.
     // (Was unguarded: any account could read competitors' bids by id.)
-    let allowed = await isSameAccount(req.user.id, reqRows[0].gc_user_id);
+    const isGcOwner = await isSameAccount(req.user.id, reqRows[0].gc_user_id);
+    let allowed = isGcOwner;
     if (!allowed) {
       const [inv] = await conn.query(
         "SELECT 1 FROM bid_invites WHERE bid_request_id = ? AND contractor_user_id = ? LIMIT 1",
@@ -239,7 +240,13 @@ router.get("/:id", auth.authenticateToken, async (req, res) => {
         WHERE bi.bid_request_id = ?`,
       [bidId]
     );
-    res.json({ success: true, data: { request: reqRows[0], shared_docs: docs, invites } });
+    // SECURITY (data minimization): the GC owner sees all invitees' bids; an
+    // invited contractor sees only THEIR OWN submission, never competitors'
+    // bid_total/scope_notes.
+    const visibleInvites = isGcOwner
+      ? invites
+      : invites.filter((i) => Number(i.contractor_user_id) === Number(req.user.id));
+    res.json({ success: true, data: { request: reqRows[0], shared_docs: docs, invites: visibleInvites } });
   } catch (err) {
     logger.error("bids/:id: " + err.message);
     res.status(500).json({ message: "Server error", error: err.message });

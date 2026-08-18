@@ -25,7 +25,7 @@ function ownerTypeOf(v) {
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
 const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData } = require("../utils/access");
-const { requireOwnsJob } = require("../utils/ownership");
+const { requireOwnsJob, ownsJob } = require("../utils/ownership");
 // Cross-account guard: the job/lead the request targets must belong to the
 // caller's account. getJobId(req) locates the id (param/query/body); optional
 // getOwnerType(req) yields 'job'|'lead'. 404 if missing, 403 if another account's.
@@ -566,6 +566,14 @@ router.put("/update-job-order", auth.authenticateToken, async (req, res) => {
     }
     caseSql += `WHEN ${jobId} THEN ${sortOrder} `;
     ids.push(jobId);
+  }
+
+  // SECURITY: every job in the reorder must belong to the caller's account —
+  // was: UPDATE job SET sort_order WHERE id IN (any ids) with no ownership check.
+  for (const jobId of ids) {
+    if (!(await ownsJob(req.user.id, jobId))) {
+      return res.status(403).json({ success: false, message: "One or more jobs do not belong to your account." });
+    }
   }
 
   caseSql += "END";
@@ -1358,7 +1366,7 @@ router.get("/get_inspector/:id", auth.authenticateToken, async (req, res) => {
 router.post(
   "/add_job_stage",
   auth.authenticateToken,
-  auth.authenticateToken,
+  requireOwnsJob({ idFrom: "body", idKey: "job_id" }),
   async (req, res) => {
     const { name, job_id, csi_code, template_id } = req.body;
     const user_id = req.user.id; // this comes from the JWT middleware
@@ -1708,6 +1716,16 @@ router.put("/gantt-stage-progress/:item_id", auth.authenticateToken, denyExpired
   try {
     connection = await pool.getConnection();
     await ensureGanttStageProgressTable(connection);
+    // SECURITY: requireJobOwnership above only validated body.job_id — also ensure
+    // the schedule item belongs to that job, so a caller can't upsert progress for
+    // a FOREIGN item by pairing it with a job they own.
+    const [[siRow]] = await connection.query(
+      "SELECT s.job_id FROM job_schedule_items i JOIN job_schedules s ON s.id = i.schedule_id WHERE i.id = ? LIMIT 1",
+      [itemId]
+    );
+    if (!siRow || Number(siRow.job_id) !== jobId) {
+      return res.status(403).json({ message: "This schedule item does not belong to the job." });
+    }
     await connection.execute(
       `INSERT INTO gantt_stage_progress (schedule_item_id, job_id, owner_type, percent, updated_by)
        VALUES (?, ?, ?, ?, ?)
