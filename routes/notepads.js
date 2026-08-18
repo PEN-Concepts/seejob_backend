@@ -27,6 +27,22 @@ async function notepadGroupOwnedByCaller(callerId, groupId) {
   if (!row) return false;
   return isSameAccount(callerId, row.created_by);
 }
+// Is `fileName` an image/audio attached to a notepad in the caller's account?
+// Files live in notepad.image / notepad.audio_note (single or CSV) and in
+// notepad_gallery.image. Used to gate the /view* file endpoints.
+async function notepadFileOwnedByCaller(callerId, fileName) {
+  if (!fileName) return false;
+  const [rows] = await pool.query(
+    `SELECT n.user_id FROM notepad n
+       WHERE n.image = ? OR FIND_IN_SET(?, n.image) OR n.audio_note = ?
+     UNION
+     SELECT n2.user_id FROM notepad_gallery g JOIN notepad n2 ON n2.id = g.notepad_id
+       WHERE g.image = ? OR FIND_IN_SET(?, g.image)`,
+    [fileName, fileName, fileName, fileName, fileName]
+  );
+  for (const r of rows) { if (await isSameAccount(callerId, r.user_id)) return true; }
+  return false;
+}
 
 
 const mime = require('mime-types');
@@ -337,10 +353,15 @@ router.get('/all/:id', auth.authenticateToken, async (req, res) => {
 });
 
 
-  router.get('/view/:filename', (req, res) => {
+  // SECURITY: was UNAUTHENTICATED (anyone could fetch any notepad image by name).
+  // Now requires login + the file must belong to a notepad in the caller's account.
+  router.get('/view/:filename', auth.authenticateToken, async (req, res) => {
   const fileName = req.params.filename;
   if (!fileName || fileName.includes('/') || fileName.includes('\\')) {
     return res.status(400).json({ message: 'Invalid filename' });
+  }
+  if (!(await notepadFileOwnedByCaller(req.user.id, fileName))) {
+    return res.status(403).json({ message: 'This file does not belong to your account.' });
   }
 
   const fullPath = path.join(__dirname, '../uploads', fileName);
@@ -351,11 +372,15 @@ router.get('/all/:id', auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get('/view_audio/:filename', (req, res) => {
+// SECURITY: was UNAUTHENTICATED — same fix as /view.
+router.get('/view_audio/:filename', auth.authenticateToken, async (req, res) => {
   const fileName = req.params.filename;
 
   if (!fileName || fileName.includes('/') || fileName.includes('\\')) {
     return res.status(400).json({ message: 'Invalid filename' });
+  }
+  if (!(await notepadFileOwnedByCaller(req.user.id, fileName))) {
+    return res.status(403).json({ message: 'This file does not belong to your account.' });
   }
 
   const fullPath = path.join(__dirname, '../uploads', fileName);
@@ -471,10 +496,17 @@ router.post('/updatestatus', auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
-    const placeholders = ids.map(() => '?').join(',');
+    // SECURITY: only update notes in the caller's account (was: any id).
+    const ownedIds = [];
+    for (const id of ids) { if (await notepadOwnedByCaller(req.user.id, id)) ownedIds.push(id); }
+    if (!ownedIds.length) {
+      return res.status(403).json({ message: 'None of these notes belong to your account.' });
+    }
+
+    const placeholders = ownedIds.map(() => '?').join(',');
     const query = `UPDATE notepad SET status = ? WHERE id IN (${placeholders})`;
 
-    await connection.execute(query, [status, ...ids]);
+    await connection.execute(query, [status, ...ownedIds]);
 
     res.json({ message: 'Statuses updated successfully' });
   } catch (err) {
@@ -700,20 +732,25 @@ router.post('/notepad/mark-removed', auth.authenticateToken, async (req, res) =>
     return res.status(400).json({ message: 'Invalid request data' });
   }
 
-  const placeholders = ids.map(() => '?').join(',');
-  const values = [...ids, user_id];
-
   let connection;
   try {
     connection = await pool.getConnection();
 
+    // SECURITY: only mark notes in the caller's account removed (was: any id).
+    const ownedIds = [];
+    for (const id of ids) { if (await notepadOwnedByCaller(req.user.id, id)) ownedIds.push(id); }
+    if (!ownedIds.length) {
+      return res.status(403).json({ message: 'None of these notes belong to your account.' });
+    }
+
+    const placeholders = ownedIds.map(() => '?').join(',');
     const query = `
       UPDATE notepad
       SET remove_by = ?
       WHERE id IN (${placeholders})
     `;
 
-    await connection.execute(query, [user_id, ...ids]);
+    await connection.execute(query, [user_id, ...ownedIds]);
     res.json({ message: 'Records marked as removed' });
   } catch (err) {
     console.error('Error updating notepad:', err);

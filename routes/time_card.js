@@ -1591,17 +1591,19 @@ router.put('/approve-leave/:leaveId', auth.authenticateToken, async (req, res) =
     const { leaveId } = req.params;
     const approverId = req.user.id;
 
+    // SECURITY: only the manager of this leave request (their account) may approve
+    // it — matches /leave_request/:id. Was: UPDATE by id with no scoping.
     const [result] = await pool.query(
       `UPDATE leave_request
-       SET status = 'approved', approver = ? 
-       WHERE id = ?`,
-      [approverId, leaveId]
+       SET status = 'approved', approver = ?
+       WHERE id = ? AND manager_id = ?`,
+      [approverId, leaveId, approverId]
     );
 
     if (result.affectedRows === 0) {
       return res
         .status(404)
-        .json({ success: false, message: 'Leave not found' });
+        .json({ success: false, message: 'Leave not found for your account' });
     }
 
     res.status(200).json({
@@ -1624,17 +1626,18 @@ router.put('/reject-leave/:leaveId', auth.authenticateToken, async (req, res) =>
     const { leaveId } = req.params;
     const approverId = req.user.id;
 
+    // SECURITY: manager-of-account only (matches /leave_request/:id).
     const [result] = await pool.query(
       `UPDATE leave_request
-       SET status = 'rejected', approver = ? 
-       WHERE id = ?`,
-      [approverId, leaveId]
+       SET status = 'rejected', approver = ?
+       WHERE id = ? AND manager_id = ?`,
+      [approverId, leaveId, approverId]
     );
 
     if (result.affectedRows === 0) {
       return res
         .status(404)
-        .json({ success: false, message: 'Leave not found' });
+        .json({ success: false, message: 'Leave not found for your account' });
     }
 
     res.status(200).json({

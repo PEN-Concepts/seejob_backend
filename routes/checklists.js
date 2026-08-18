@@ -1157,6 +1157,13 @@ router.post('/:id/keep', auth.authenticateToken, async (req, res) => {
       const access = await getChecklistAccess(connection, res.locals.id);
       if (!access.allowed) return res.status(403).json({ success: false, message: 'Clipboard requires an active plan.' });
       if (!access.canWrite) return res.status(403).json({ success: false, message: 'Your plan does not allow modifying Clipboard.' });
+      // SECURITY: the plan gate above is NOT an ownership check — verify the caller
+      // can actually access THIS item before toggling its kept/filed_at state
+      // (was: UPDATE by id with no ownership → cross-account write).
+      const keepItem = await getAccessibleChecklistItem(connection, id, res.locals.id);
+      if (!keepItem) {
+        return res.status(404).json({ success: false, message: 'Checklist item not found' });
+      }
       await ensureNotepadFlowColumns(connection);
       const keepTz = await getUserTz(connection, res.locals.id);
       await connection.query(
