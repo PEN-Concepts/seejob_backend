@@ -25,6 +25,7 @@ function ownerTypeOf(v) {
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
 const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData } = require("../utils/access");
+const { requireOwnsJob } = require("../utils/ownership");
 // Cross-account guard: the job/lead the request targets must belong to the
 // caller's account. getJobId(req) locates the id (param/query/body); optional
 // getOwnerType(req) yields 'job'|'lead'. 404 if missing, 403 if another account's.
@@ -2362,6 +2363,8 @@ router.post(
   auth.authenticateToken,
   enforcePlanFeatureForJobFileType,
   upload.array("files", 10),
+  // job_id lives in the multipart body, so this must run AFTER upload.array().
+  requireOwnsJob({ idFrom: "body", idKey: "job_id" }),
   async (req, res) => {
     const { job_id, file_name, type } = req.body;
     const userId = req.user.id;

@@ -8,6 +8,7 @@ const multer = require("multer");
 const fs = require("fs");
 const auth = require("../services/authentication");
 const { denyExpiredFreeWrites } = require("../utils/access");
+const { requireOwnsRecord } = require("../utils/ownership");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
 const storage = multer.diskStorage({
@@ -143,6 +144,7 @@ router.put(
   "/update/:id",
   auth.authenticateToken,
   denyExpiredFreeWrites,
+  requireOwnsRecord({ table: "equipments", ownerCol: "created_by" }),
   upload.single('image'),
   async (req, res) => {
 

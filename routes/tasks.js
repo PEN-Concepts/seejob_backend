@@ -7,6 +7,7 @@ const fs = require('fs');
 const multer = require('multer');
 const auth = require("../services/authentication");
 const { denyExpiredFreeWrites, isSameAccount, getAccessMode, resolveOwnerId, denyRestrictedJobData } = require("../utils/access");
+const { requireOwnsRecord } = require("../utils/ownership");
 const { attachAssignees } = require("../services/taskAssignees");
 
 // For an expired_free user, keep ONLY tasks on FOREIGN (other-account) jobs/leads
@@ -1403,7 +1404,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
 
 
 // DELETE task
-router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/delete/:id", auth.authenticateToken, requireOwnsRecord({ table: "tasks", ownerCol: "created_by" }), async (req, res) => {
   let connection;
   try {
     const taskId = Number(req.params.id);

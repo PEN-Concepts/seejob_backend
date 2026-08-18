@@ -4,6 +4,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { blockExpiredOwnJob, denyExpiredFreeWrites, denyRestrictedJobData } = require("../utils/access");
+const { ownsJob } = require("../utils/ownership");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -1831,6 +1832,11 @@ router.post(
         return res.status(404).json({ message: "No change order found" });
       }
 
+      // SECURITY: only the account that owns this change order's job may email it.
+      if (!(await ownsJob(req.user.id, rows[0].job_id, connection))) {
+        return res.status(403).json({ code: "403", message: "This change order does not belong to your account." });
+      }
+
       const data = rows[0];
       const employees = data.employees || [];
       const items = data.items || [];
@@ -2275,6 +2281,11 @@ router.get(
 
       if (!rows.length) {
         return res.status(404).json({ message: "No change order found" });
+      }
+
+      // SECURITY: only the account that owns this change order's job may download it.
+      if (!(await ownsJob(req.user.id, rows[0].job_id, connection))) {
+        return res.status(403).json({ code: "403", message: "This change order does not belong to your account." });
       }
 
       const data = rows[0];

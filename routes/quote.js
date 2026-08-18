@@ -6,6 +6,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { blockExpiredOwnJob, blockExpiredOwnRecord, denyExpiredFreeWrites, OWNER_EXEMPT_EMAILS, resolveOwnerId, denyRestrictedJobData } = require("../utils/access");
+const { ownsJob } = require("../utils/ownership");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
@@ -1764,6 +1765,11 @@ router.post(
         return res.status(404).json({ message: "No change order found" });
       }
 
+      // SECURITY: only the account that owns this quote's job may email it.
+      if (!(await ownsJob(req.user.id, rows[0].job_id, connection))) {
+        return res.status(403).json({ code: "403", message: "This quote does not belong to your account." });
+      }
+
       const data = rows[0];
       const employees = data.employees || [];
       const items = data.items || [];
@@ -2211,6 +2217,11 @@ GROUP BY co.id;`,
 
       if (!rows.length) {
         return res.status(404).json({ message: "No change order found" });
+      }
+
+      // SECURITY: only the account that owns this quote's job may download it.
+      if (!(await ownsJob(req.user.id, rows[0].job_id, connection))) {
+        return res.status(403).json({ code: "403", message: "This quote does not belong to your account." });
       }
 
       const data = rows[0];

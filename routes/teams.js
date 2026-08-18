@@ -9,6 +9,7 @@ const multer = require("multer");
 const fs = require("fs");
 const auth = require("../services/authentication");
 const { denyExpiredFreeWrites } = require("../utils/access");
+const { requireOwnsRecord } = require("../utils/ownership");
 const { getContactScope } = require("../utils/contactVisibility");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 
@@ -113,7 +114,7 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, async (req
 });
 
 
-router.put("/update/:id", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.put("/update/:id", auth.authenticateToken, denyExpiredFreeWrites, requireOwnsRecord({ table: "teams", ownerCol: "created_by" }), async (req, res) => {
   let connection;
   const teamId = req.params.id;
 
@@ -289,7 +290,7 @@ router.get("/all", auth.authenticateToken, async (req, res) => {
 });
 
 
-router.delete('/teams/:id', auth.authenticateToken, async (req, res) => {
+router.delete('/teams/:id', auth.authenticateToken, requireOwnsRecord({ table: "teams", ownerCol: "created_by" }), async (req, res) => {
   let connection;
   try {
     const { id } = req.params;
