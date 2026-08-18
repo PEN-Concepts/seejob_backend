@@ -9,6 +9,7 @@ const auth = require("../services/authentication");
 const { denyExpiredFreeWrites, isSameAccount, getAccessMode, resolveOwnerId, denyRestrictedJobData } = require("../utils/access");
 const { requireOwnsRecord } = require("../utils/ownership");
 const { attachAssignees } = require("../services/taskAssignees");
+const { attachTaskImages } = require("../services/taskImages");
 
 // For an expired_free user, keep ONLY tasks on FOREIGN (other-account) jobs/leads
 // they collaborate on — hide everything on their own account's jobs/leads and
@@ -145,45 +146,8 @@ async function maybeCreateSeedJob(connection, sourceJobId, subUserId, gcUserId) 
   );
 }
 
-async function attachTaskImages(connectionOrPool, tasks) {
-  if (!tasks || tasks.length === 0) return tasks;
-
-  const ids = tasks
-    .map((t) => t && t.id)
-    .filter((id) => Number.isFinite(Number(id)));
-
-  if (ids.length === 0) {
-    tasks.forEach((t) => {
-      if (t) t.images = [];
-    });
-    return tasks;
-  }
-
-  const [rows] = await connectionOrPool.query(
-    `SELECT ti.id, ti.task_id, CONCAT(ti.file_path, ti.file_name) AS filename, ti.created_at,
-            COALESCE(ti.kind, 'request') AS kind, ti.uploaded_by, u.name AS uploaded_by_name
-     FROM tasks_images ti
-     LEFT JOIN user u ON u.id = ti.uploaded_by
-     WHERE ti.task_id IN (?)
-     ORDER BY ti.created_at ASC`,
-    [ids]
-  );
-
-  const byTaskId = new Map();
-  for (const r of rows || []) {
-    const key = Number(r.task_id);
-    if (!byTaskId.has(key)) byTaskId.set(key, []);
-    byTaskId.get(key).push({ id: r.id, filename: r.filename, created_at: r.created_at, kind: r.kind, uploaded_by: r.uploaded_by, uploaded_by_name: r.uploaded_by_name });
-  }
-
-  tasks.forEach((t) => {
-    if (!t) return;
-    const key = Number(t.id);
-    t.images = byTaskId.get(key) || [];
-  });
-
-  return tasks;
-}
+// attachTaskImages moved to services/taskImages.js so routes/jobs.js (/all-tasks,
+// the mobile task list) can attach photos too. Imported at the top of this file.
 // ----------job's task assignment----------------
 const taskSchema = Joi.object({
   task_name: Joi.string().allow('', null).max(255).optional(),

@@ -6,6 +6,7 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { attachAssignees } = require("../services/taskAssignees");
+const { attachTaskImages } = require("../services/taskImages");
 const { addUserSchema } = require("../models/user");
 const path = require("path");
 
@@ -2239,6 +2240,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
       );
 
       await attachAssignees(connection, jobTasks);
+      await attachTaskImages(connection, jobTasks); // photos for the mobile task list
       for (const t of jobTasks) {
         const key = String(t.job_id);
         if (!jobTasksByJobId[key]) jobTasksByJobId[key] = [];
@@ -2261,6 +2263,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
       );
 
       await attachAssignees(connection, leadTasks);
+      await attachTaskImages(connection, leadTasks);
       for (const t of leadTasks) {
         const key = String(t.job_id);
         if (!leadTasksByLeadId[key]) leadTasksByLeadId[key] = [];
@@ -2285,6 +2288,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
       [...taskAssigneeParams]
     );
     await attachAssignees(connection, noJobTasks);
+    await attachTaskImages(connection, noJobTasks);
 
     if (jobIds.length) {
       const [checklistTasks] = await connection.query(
