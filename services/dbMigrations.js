@@ -434,6 +434,10 @@ async function ensureTaskAssigneesTable(connection) {
   // completion flag stays on tasks.status). Added via ensureScheduleColumn too so
   // a DB whose table predates this column gets it. Idempotent.
   await ensureScheduleColumn(connection, 'task_assignees', 'seen_at', 'DATETIME NULL');
+  // PER-PERSON one-time written response: each assignee may submit exactly once;
+  // responded_at != null locks it (no further edits, by them or anyone).
+  await ensureScheduleColumn(connection, 'task_assignees', 'response', 'TEXT NULL');
+  await ensureScheduleColumn(connection, 'task_assignees', 'responded_at', 'DATETIME NULL');
   // Backfill once (guarded by emptiness) from the legacy single-assignee column,
   // carrying the existing per-task seen stamp onto that primary assignee's row.
   const [[{ n }]] = await connection.query('SELECT COUNT(*) AS n FROM task_assignees');

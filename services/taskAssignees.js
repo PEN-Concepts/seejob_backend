@@ -3,15 +3,16 @@
 // tasks.user_id stays the primary, so single-assignee clients are unaffected;
 // this just adds the full list. One query for the whole page of tasks (no N+1).
 //
-// Each entry: { user_id, name, business_name, seen_at }  (seen_at = that person's
-// own "opened it" stamp; null until they open the task).
+// Each entry: { user_id, name, business_name, seen_at, response, responded_at }
+// (seen_at = that person's own "opened it" stamp; response/responded_at = their
+// one-time written reply, responded_at != null once locked).
 async function attachAssignees(db, tasks) {
   if (!Array.isArray(tasks) || !tasks.length) return tasks;
   const ids = [...new Set(tasks.map((t) => Number(t && t.id)).filter((n) => Number.isInteger(n) && n > 0))];
   if (!ids.length) return tasks;
   const ph = ids.map(() => '?').join(',');
   const [rows] = await db.query(
-    `SELECT ta.task_id, ta.user_id, ta.seen_at, u.name, u.business AS business_name
+    `SELECT ta.task_id, ta.user_id, ta.seen_at, ta.response, ta.responded_at, u.name, u.business AS business_name
        FROM task_assignees ta
        JOIN \`user\` u ON u.id = ta.user_id
       WHERE ta.task_id IN (${ph})
@@ -26,6 +27,8 @@ async function attachAssignees(db, tasks) {
       name: r.name,
       business_name: r.business_name || null,
       seen_at: r.seen_at,
+      response: r.response || null,
+      responded_at: r.responded_at || null,
     });
   }
   for (const t of tasks) {

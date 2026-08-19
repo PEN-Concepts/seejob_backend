@@ -1636,6 +1636,48 @@ router.post('/:id/seen', auth.authenticateToken, async (req, res) => {
   }
 });
 
+// Submit THIS assignee's one-time written response to a task. Own row ONLY,
+// write-once: responded_at locks it (no further edits, by them or anyone). A
+// boss/non-assignee cannot respond, and no one can respond on another's behalf.
+router.post('/:id/assignee-response', auth.authenticateToken, async (req, res) => {
+  const taskId = Number(req.params.id);
+  const uid = Number(req.user && req.user.id);
+  const text = req.body && typeof req.body.response === 'string' ? req.body.response.trim() : '';
+  if (!taskId || !uid) return res.status(400).json({ message: 'Invalid request' });
+  if (!text) return res.status(400).json({ message: 'Response text is required' });
+  try {
+    const [[t]] = await pool.query('SELECT id, user_id FROM tasks WHERE id = ? LIMIT 1', [taskId]);
+    if (!t) return res.status(404).json({ message: 'Task not found' });
+    // Caller must be an assignee (primary tasks.user_id or a task_assignees member).
+    const isPrimary = Number(t.user_id) === uid;
+    let isMember = isPrimary;
+    if (!isMember) {
+      const [m] = await pool.query('SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ? LIMIT 1', [taskId, uid]);
+      isMember = m.length > 0;
+    }
+    if (!isMember) return res.status(403).json({ message: 'Only an assignee can respond to this task.' });
+    // Ensure the caller's own row exists (legacy primary may lack one), then write
+    // ONLY if not already responded — the responded_at IS NULL guard is the lock.
+    await pool.query('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)', [taskId, uid]);
+    const [upd] = await pool.query(
+      'UPDATE task_assignees SET response = ?, responded_at = NOW() WHERE task_id = ? AND user_id = ? AND responded_at IS NULL',
+      [text, taskId, uid]
+    );
+    const [[cur]] = await pool.query(
+      'SELECT response, responded_at FROM task_assignees WHERE task_id = ? AND user_id = ? LIMIT 1',
+      [taskId, uid]
+    );
+    if (upd.affectedRows === 0) {
+      // Already locked — return the existing response unchanged (409, not overwritten).
+      return res.status(409).json({ message: 'Response already submitted', response: cur ? cur.response : null, responded_at: cur ? cur.responded_at : null, locked: true });
+    }
+    return res.json({ response: cur.response, responded_at: cur.responded_at, locked: true });
+  } catch (err) {
+    logger.error('assignee-response error: ' + err.message);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // Delete a specific task image
 router.delete('/delete-image/:imageId', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
   try {
