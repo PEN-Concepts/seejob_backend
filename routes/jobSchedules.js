@@ -626,8 +626,11 @@ router.post('/:sid/deps', async (req, res) => {
     );
     // An item that now depends on something is no longer the schedule's "Start"
     // item — clear its start flag so the two states stay mutually exclusive.
+    // Also clear any pinned_start_date: editing an item's dependencies makes it
+    // dependency-DRIVEN, so a stale pin (e.g. from an earlier calendar drag) must
+    // not linger and fight the deps (which would wrongly flag a plain cascade).
     await connection.query(
-      'UPDATE job_schedule_items SET is_start = 0 WHERE schedule_id = ? AND id = ?',
+      'UPDATE job_schedule_items SET is_start = 0, pinned_start_date = NULL WHERE schedule_id = ? AND id = ?',
       [sid, itemId]
     );
     const payloads = await cascade.recomputeSchedule(connection, sid, { changedItemId: itemId });
@@ -652,7 +655,14 @@ router.delete('/:sid/deps/:depId', async (req, res) => {
   try {
     connection = await pool.getConnection();
     await connection.beginTransaction();
+    // Which item's deps are changing — clear its pin so it becomes dependency-driven
+    // (editing an item's dependencies drops any stale pin, e.g. from a calendar drag,
+    // so a plain cascade isn't wrongly flagged as a conflict).
+    const [[depRow]] = await connection.query('SELECT item_id FROM job_schedule_deps WHERE id = ? AND schedule_id = ? LIMIT 1', [depId, sid]);
     await connection.query('DELETE FROM job_schedule_deps WHERE id = ? AND schedule_id = ?', [depId, sid]);
+    if (depRow && depRow.item_id) {
+      await connection.query('UPDATE job_schedule_items SET pinned_start_date = NULL WHERE schedule_id = ? AND id = ?', [sid, depRow.item_id]);
+    }
     const payloads = await cascade.recomputeSchedule(connection, sid, {});
     await connection.commit();
     dispatchAll(payloads);
