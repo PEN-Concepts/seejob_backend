@@ -361,7 +361,7 @@ async function holdSchedule(conn, scheduleId) {
  * cycle it flags the offending items and changes no dates. DB writes on `conn`;
  * caller dispatches the returned payloads after commit.
  */
-async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
+async function recomputeSchedule(conn, scheduleId, { changedItemId, rejectBustFor } = {}) {
   const { schedule, items, deps } = await loadScheduleGraph(conn, scheduleId);
   if (!schedule) return [];
 
@@ -385,16 +385,24 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
     err.cycle = comp.cycle;
     throw err;
   }
-  // FLAG-AND-KEEP for date "busts" (an item starting before a dependency finishes):
-  // a valid edit must PERSIST even when a conflict exists elsewhere in the schedule,
-  // otherwise one unrelated bust makes the whole schedule un-editable (you often edit
-  // precisely to resolve a conflict). We write the recomputed dates and flag only the
-  // busted rows via has_conflict / conflict_reason for the UI to surface. (This restores
-  // the pre-4be8596 behavior; cycles above are the only remaining hard reject.)
+  // DRAG-ONLY BLOCK: a calendar drag must not move an item to a date that busts its
+  // OWN dependencies (starts before a dependency finishes). The drag path passes
+  // rejectBustFor = that item's id; if the recompute shows it busted, we throw so the
+  // task edit is rejected and the calendar snaps back. Gantt edits (deps/duration/
+  // reorder) pass no rejectBustFor, so they NEVER block — they just compute + cascade.
+  if (rejectBustFor != null) {
+    const bust = comp.conflicts.find((c) => Number(c.itemId) === Number(rejectBustFor));
+    if (bust) {
+      const err = new Error(bust.reason);
+      err.code = 'SCHEDULE_CONFLICT';
+      err.bust = true;
+      err.conflicts = [bust];
+      throw err;
+    }
+  }
   // No conflict flags: per product decision the schedule is always dependency/pin-
-  // driven and just computes + cascades — there is no "conflict" state to surface.
-  // (A cycle is still the only hard reject, handled above.) has_conflict is always
-  // cleared so the Gantt Dates column never shows a red conflict.
+  // driven and just computes + cascades — there is no persistent "conflict" state to
+  // surface. has_conflict is always cleared so the Gantt Dates column never shows red.
   const jobName = await getJobName(conn, schedule.job_id, schedule.owner_type);
   const moved = [];
 

@@ -1225,8 +1225,11 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
               itemVals
             );
           }
+          // A calendar drag pins this item — block the move (calendar snaps back) if
+          // it would start before its own dependencies finish. rejectBustFor scopes the
+          // reject to THIS dragged item; Gantt edits never pass it, so they never block.
           scheduleNotifPayloads =
-            (await recomputeSchedule(connection, schedItem.schedule_id, { changedItemId: schedItem.id })) || [];
+            (await recomputeSchedule(connection, schedItem.schedule_id, { changedItemId: schedItem.id, rejectBustFor: schedItem.id })) || [];
         } catch (cascadeErr) {
           if (cascadeErr.bust || cascadeErr.code === "SCHEDULE_CONFLICT" || cascadeErr.cycle || cascadeErr.code === "CYCLE") {
             scheduleReject = cascadeErr; // reject the whole task edit (calendar snaps back)
