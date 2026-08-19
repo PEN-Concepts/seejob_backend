@@ -391,8 +391,10 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
   // precisely to resolve a conflict). We write the recomputed dates and flag only the
   // busted rows via has_conflict / conflict_reason for the UI to surface. (This restores
   // the pre-4be8596 behavior; cycles above are the only remaining hard reject.)
-  const conflictByItem = new Map(comp.conflicts.map((c) => [c.itemId, c.reason]));
-
+  // No conflict flags: per product decision the schedule is always dependency/pin-
+  // driven and just computes + cascades — there is no "conflict" state to surface.
+  // (A cycle is still the only hard reject, handled above.) has_conflict is always
+  // cleared so the Gantt Dates column never shows a red conflict.
   const jobName = await getJobName(conn, schedule.job_id, schedule.owner_type);
   const moved = [];
 
@@ -403,19 +405,17 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
     const oldEnd = toDateOnly(it.computed_end_date);
     const dateChanged = oldStart !== r.start || oldEnd !== r.end;
 
-    // Persist recomputed dates; flag this row iff it is itself busted (else clear it).
-    const reason = conflictByItem.get(it.id) || null;
     await conn.query(
       `UPDATE job_schedule_items
-          SET computed_start_date = ?, computed_end_date = ?, has_conflict = ?, conflict_reason = ?
+          SET computed_start_date = ?, computed_end_date = ?, has_conflict = 0, conflict_reason = NULL
         WHERE id = ?`,
-      [r.start, r.end, reason ? 1 : 0, reason, it.id]
+      [r.start, r.end, it.id]
     );
 
-    if (dateChanged && it.task_id) {
-      // Push new dates onto the linked task. end_date is the working-day-aware
-      // computed end (kept in sync with the schedule so the calendar bar matches),
-      // set directly rather than via the tasks route's calendar-day formula.
+    // ALWAYS sync the linked calendar task to the computed date — a Gantt edit must
+    // always be reflected on the Master Calendar (not only when the date happens to
+    // differ from what was stored), so the two never drift.
+    if (it.task_id) {
       await conn.query(
         'UPDATE tasks SET start_date = ?, end_date = ?, duration_days = ? WHERE id = ?',
         [tsStart(r.start), tsStart(r.end), r.duration, it.task_id]
