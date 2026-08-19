@@ -376,24 +376,22 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
     skipSunday: !!schedule.skip_sunday,
   });
 
-  // REJECT-AT-WRITE-TIME: a cycle or a dependency "bust" (an item starting before
-  // a dependency finishes — anywhere in the resulting graph, including downstream)
-  // aborts the whole edit. We throw BEFORE writing anything, so the caller rolls
-  // back the transaction and nothing is partially applied — the same treatment
-  // cycles already got at the door. No has_conflict flag is ever persisted now.
+  // A CYCLE (an item ending up depending on itself) is structurally invalid and can't
+  // be scheduled at all, so it's still a hard reject — throw before writing anything,
+  // caller rolls back.
   if (!comp.ok) {
     const err = new Error('This change would create a scheduling loop (an item would end up depending on itself).');
     err.code = 'CYCLE';
     err.cycle = comp.cycle;
     throw err;
   }
-  if (comp.conflicts.length) {
-    const err = new Error(comp.conflicts[0].reason);
-    err.code = 'SCHEDULE_CONFLICT';
-    err.bust = true;
-    err.conflicts = comp.conflicts;
-    throw err;
-  }
+  // FLAG-AND-KEEP for date "busts" (an item starting before a dependency finishes):
+  // a valid edit must PERSIST even when a conflict exists elsewhere in the schedule,
+  // otherwise one unrelated bust makes the whole schedule un-editable (you often edit
+  // precisely to resolve a conflict). We write the recomputed dates and flag only the
+  // busted rows via has_conflict / conflict_reason for the UI to surface. (This restores
+  // the pre-4be8596 behavior; cycles above are the only remaining hard reject.)
+  const conflictByItem = new Map(comp.conflicts.map((c) => [c.itemId, c.reason]));
 
   const jobName = await getJobName(conn, schedule.job_id, schedule.owner_type);
   const moved = [];
@@ -405,12 +403,13 @@ async function recomputeSchedule(conn, scheduleId, { changedItemId } = {}) {
     const oldEnd = toDateOnly(it.computed_end_date);
     const dateChanged = oldStart !== r.start || oldEnd !== r.end;
 
-    // Conflict-free by the time we reach here, so has_conflict is always cleared.
+    // Persist recomputed dates; flag this row iff it is itself busted (else clear it).
+    const reason = conflictByItem.get(it.id) || null;
     await conn.query(
       `UPDATE job_schedule_items
-          SET computed_start_date = ?, computed_end_date = ?, has_conflict = 0, conflict_reason = NULL
+          SET computed_start_date = ?, computed_end_date = ?, has_conflict = ?, conflict_reason = ?
         WHERE id = ?`,
-      [r.start, r.end, it.id]
+      [r.start, r.end, reason ? 1 : 0, reason, it.id]
     );
 
     if (dateChanged && it.task_id) {
