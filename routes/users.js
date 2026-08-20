@@ -8,7 +8,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS, getAccessMode } = require("../utils/access");
+const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS, getAccessMode, hasLevelAtLeast } = require("../utils/access");
 const { ensureOwnerTypeColumns, ensureContactAuthorityColumn } = require("../services/dbMigrations");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const path = require("path");
@@ -425,18 +425,61 @@ router.post("/register", async (req, res) => {
   const r = req.body;
   let connection;
 
-  // SECURITY: public sign-up may ONLY create these account types. Never Employee
-  // (1) or Admin (5) — those are provisioned internally, not by an anonymous
-  // person filling out the public form. Defence-in-depth behind the dropdown
-  // filter (publics.js /getcategory), so a hand-crafted request can't self-grant
-  // Admin even if the UI is bypassed.
-  const PUBLIC_SIGNUP_CATEGORIES = new Set([2, 3, 4]);
-  if (!PUBLIC_SIGNUP_CATEGORIES.has(Number(r.category))) {
+  // OPTIONAL AUTH: /register serves TWO callers on one route:
+  //   1. the PUBLIC, unauthenticated Create-Account page (no token), and
+  //   2. an authenticated account OWNER adding an EMPLOYEE from the web/mobile
+  //      "Add Employee" form (Bearer token present).
+  // Decode the token best-effort so we can tell them apart. A missing/invalid
+  // token is NOT an error here — it just means "public caller".
+  let actingUser = null;
+  const _authHeader = req.headers["authorization"];
+  const _token = _authHeader && _authHeader.split(" ")[1];
+  if (_token) {
+    try { actingUser = jwt.verify(_token, process.env.ACCESS_TOKEN); } catch (e) { actingUser = null; }
+  }
+  const category = Number(r.category);
+
+  // Admin (5) is NEVER creatable through this endpoint — not by the public and
+  // not by an owner. Admin is provisioned internally only (Backend Admin stays
+  // out of every UI/API path). This closes the self-signup Admin hole.
+  if (category === 5) {
     return res.status(403).json({
       code: "403",
-      message: "This account type cannot be created from public sign-up.",
+      message: "This account type cannot be created here.",
       data: {},
     });
+  }
+
+  // Employee (1) may ONLY be created by an authenticated account OWNER (role 14
+  // or level 5) adding a person under their own account. An anonymous public
+  // caller can never self-register as an employee.
+  if (category === 1) {
+    const isOwner = actingUser && actingUser.id
+      ? await hasLevelAtLeast(actingUser.id, 5, null)
+      : false;
+    if (!isOwner) {
+      return res.status(403).json({
+        code: "403",
+        message: "This account type cannot be created from public sign-up.",
+        data: {},
+      });
+    }
+  } else {
+    // Public sign-up account types (2 = subcontractor, 3 = client, 4 = other).
+    const PUBLIC_SIGNUP_CATEGORIES = new Set([2, 3, 4]);
+    if (!PUBLIC_SIGNUP_CATEGORIES.has(category)) {
+      return res.status(403).json({
+        code: "403",
+        message: "This account type cannot be created from public sign-up.",
+        data: {},
+      });
+    }
+  }
+
+  // When an owner is adding the account, force the OWNER as created_by (account
+  // scoping) rather than trusting a client-supplied value.
+  if (actingUser && actingUser.id) {
+    r.created_by = actingUser.id;
   }
 
   try {
