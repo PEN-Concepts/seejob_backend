@@ -383,14 +383,19 @@ router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (
 
     const url = '/task';
     // Send the message as typed (from the Nudge composer); fall back to the default.
+    // The ORIGINAL TASK is always shown so the recipient knows what's being nudged
+    // (seen != done — a nudge can follow a "seen"): task name in the push title, and
+    // appended to the in-app record when a custom message would otherwise omit it.
     const customText = (message == null ? '' : String(message)).trim();
-    const notifyMessage = customText || `${actorName} nudged you on task: "${task.task_name}".`;
+    const bodyText = customText || `${actorName} nudged you on task: "${task.task_name}".`;
+    const pushTitle = `Nudge: ${task.task_name}`;
+    const contentText = customText ? `${customText} — "${task.task_name}"` : bodyText;
 
     // Insert notification record
     await pool.query(
       `INSERT INTO notifications (sender_id, receiver_id, content, status, url, created_by)
        VALUES (?, ?, ?, 1, ?, ?)`,
-      [actorId, recipientId, notifyMessage, url, actorId]
+      [actorId, recipientId, contentText, url, actorId]
     );
 
     // Send an FCM push to EVERY device the recipient has registered.
@@ -403,7 +408,7 @@ router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (
       try {
         await admin.messaging().send({
           token: row.fcm_token,
-          notification: { title: `Nudge from ${actorName}`, body: notifyMessage },
+          notification: { title: pushTitle, body: bodyText },
           data: { type: 'task_nudge', task_id: String(taskId), url },
         });
       } catch (err) {
