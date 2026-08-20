@@ -84,7 +84,7 @@ router.get("/my-rights", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
     const [userRows] = await connection.query(
-      "SELECT id, role FROM user WHERE id = ? LIMIT 1",
+      "SELECT id, role, `level` FROM user WHERE id = ? LIMIT 1",
       [userId]
     );
 
@@ -178,6 +178,10 @@ router.get("/my-rights", auth.authenticateToken, async (req, res) => {
       isTrialActive: mode === "trial_active",
       hasActiveSubscription,
       planLevel,
+      // Permission LEVEL (1–5) on the access ladder, or null = off-ladder
+      // (owner/subcontractor/client/unassigned). Client uses it to hide L4-only
+      // controls; the server gates stay the real enforcement (fail closed).
+      level: userRows[0].level != null ? Number(userRows[0].level) : null,
     });
   } catch (error) {
     logger.error("Error fetching user rights: ", error);
@@ -2675,6 +2679,10 @@ router.get("/employee/:id", auth.authenticateToken, async (req, res) => {
           u.exit_type,
           u.can_view_all_contacts,
           u.level,
+          (SELECT COUNT(*) FROM role_right_permission rp JOIN \`right\` r2 ON r2.id = rp.right_id
+             WHERE rp.user_id = u.id AND r2.name = 'project_manager' AND rp.\`read\` = 'yes') AS has_project_manager,
+          (SELECT COUNT(*) FROM role_right_permission rp JOIN \`right\` r3 ON r3.id = rp.right_id
+             WHERE rp.user_id = u.id AND r3.name = 'checklist' AND rp.\`create\` = 'yes') AS has_notepad_create,
           sub.name AS subcategory_name,
           sub.id AS subcategory_id,
           cat.name AS position,

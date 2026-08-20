@@ -8,7 +8,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const { getAccessMode, resolveOwnerId, isSameAccount, denyExpiredFreeWrites } = require("../utils/access");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
-const { applyLevelRights } = require("../services/permissionLevels");
+const { applyLevelRights, applyToggles } = require("../services/permissionLevels");
 
 // For an expired_free user, keep ONLY appointments created by ANOTHER account
 // (i.e. ones they were invited to). Their OWN account's appointments are locked
@@ -898,6 +898,11 @@ router.post('/set-level', auth.authenticateToken, denyExpiredFreeWrites, async (
       await connection.rollback();
       return res.status(400).json({ message: 'Could not apply that level.', detail: result.reason });
     }
+    // Overlay standalone toggles (independent of level) AFTER the preset.
+    await applyToggles(connection, user_id, result.roleId, {
+      project_manager: !!(req.body && req.body.project_manager),
+      notepad_create: !!(req.body && req.body.notepad_create),
+    });
     await connection.commit();
     return res.status(200).json({ message: `Level ${n} applied.`, rightsWritten: result.count });
   } catch (err) {

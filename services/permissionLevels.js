@@ -172,8 +172,35 @@ async function applyLevelRights(conn, userId, level) {
   return { applied: true, count, roleId };
 }
 
+/**
+ * Overlay STANDALONE TOGGLES on top of the level preset (call AFTER applyLevelRights,
+ * same transaction). Toggles are per-person and independent of level:
+ *   - project_manager : delegation — lets a non-owner act GC-like on tasks. Presence
+ *     of the `project_manager` right = the capability.
+ *   - notepad_create  : may create their OWN Notepads (the `checklist` right's create).
+ *     Auto for paid-sub users is handled at login elsewhere; this is the owner grant.
+ * Only ADDS when a toggle is ON — applyLevelRights already reset to the preset, so an
+ * OFF toggle correctly falls back to the preset (full-reset semantics).
+ */
+async function applyToggles(conn, userId, roleId, toggles) {
+  const t = toggles || {};
+  const [rows] = await conn.query("SELECT id, name FROM `right` WHERE name IN ('project_manager','checklist')");
+  const idByName = new Map(rows.map((r) => [String(r.name).toLowerCase(), r.id]));
+  const upsertFull = async (name) => {
+    const rid = idByName.get(name);
+    if (!rid) return;
+    await conn.query("DELETE FROM role_right_permission WHERE user_id = ? AND right_id = ?", [userId, rid]);
+    await conn.query(
+      "INSERT INTO role_right_permission (role_id, user_id, right_id, `read`, `create`, `update`, `delete`) VALUES (?,?,?,'yes','yes','yes','yes')",
+      [roleId, userId, rid]
+    );
+  };
+  if (t.project_manager) await upsertFull('project_manager');
+  if (t.notepad_create) await upsertFull('checklist');
+}
+
 module.exports = {
   UNIVERSAL, ADDS, LEVEL_MIN, SUBCONTRACTOR_RIGHTS,
-  rightsForLevel, levelAllows, applyLevelRights,
+  rightsForLevel, levelAllows, applyLevelRights, applyToggles,
   VIEW, FULL, R,
 };
