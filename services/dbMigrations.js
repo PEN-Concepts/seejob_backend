@@ -992,6 +992,25 @@ async function ensureUserFirstLoginColumn(connection) {
   firstLoginEnsured = true;
 }
 
+// `user.level` — the permission LEVEL (1–5) on the access ladder, assigned
+// INDEPENDENTLY of the Role/subcategory label (a "Family/Friend" can be any
+// level). NULL = off the ladder: account owners, subcontractors (category 2),
+// clients (category 3), and not-yet-assigned users. The Subcontractor class is
+// its own fixed, non-escalating scope (identified by category=2) and is NOT part
+// of the 1–5 scale. Additive + idempotent; no backfill — assignment happens in
+// the Employees UI (a later stage). Backend Admin is NEVER derived from level.
+let userLevelEnsured = false;
+async function ensureUserLevelColumn(connection) {
+  if (userLevelEnsured) return;
+  const [cols] = await connection.query("SHOW COLUMNS FROM `user` LIKE 'level'");
+  if (!cols.length) {
+    await connection.query(
+      "ALTER TABLE `user` ADD COLUMN `level` TINYINT NULL DEFAULT NULL"
+    );
+  }
+  userLevelEnsured = true;
+}
+
 // `subscriptions` payment-tracking columns the webhook writes (paid_count,
 // last_payment_at, past_due_since) but that no migration created on main. Add
 // them so the authcapture branch can't hit ER_BAD_FIELD_ERROR once the payment
@@ -1143,6 +1162,7 @@ module.exports = {
   ensureUserAccountSourceColumn,
   ensureContactAuthorityColumn,
   ensureUserFirstLoginColumn,
+  ensureUserLevelColumn,
   ensureSubscriptionPaymentColumns,
   ensurePaymentReceiptsTable,
   ensureJobColorColumn,

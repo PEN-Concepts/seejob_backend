@@ -723,7 +723,7 @@ router.get("/getuserbysubcategory/:id", auth.authenticateToken, async (req, res)
 });
 // routes/right.js or your main routes file
 
-router.get('/rights', async (req, res) => {
+router.get('/rights', auth.authenticateToken, async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
