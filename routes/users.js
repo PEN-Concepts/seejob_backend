@@ -476,10 +476,15 @@ router.post("/register", async (req, res) => {
     }
   }
 
-  // When an owner is adding the account, force the OWNER as created_by (account
-  // scoping) rather than trusting a client-supplied value.
+  // When an owner is adding the account, force the OWNER ACCOUNT as created_by
+  // (account scoping) rather than trusting a client-supplied value. Use the
+  // app-wide `working_id` convention: a linked owner login (e.g. an admin login
+  // whose role is 2-5) carries working_id = the real owner account id. Keying
+  // created_by to the login id instead would make the new employee resolve to a
+  // DIFFERENT account than the actor, so every downstream same-account check
+  // (e.g. set-level's isSameAccount) would 403.
   if (actingUser && actingUser.id) {
-    r.created_by = actingUser.id;
+    r.created_by = Number(actingUser.working_id) || Number(actingUser.id);
   }
 
   try {
@@ -574,6 +579,7 @@ router.post("/register", async (req, res) => {
     });
 
   } catch (error) {
+    if (process.env.SJR_DEBUG_REGISTER) console.error('REGISTER ERR:', error && error.stack ? error.stack : error);
     if (error.code === "ER_DUP_ENTRY") {
       return res.status(409).json({
         code: "409",
