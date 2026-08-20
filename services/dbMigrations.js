@@ -992,6 +992,29 @@ async function ensureUserFirstLoginColumn(connection) {
   firstLoginEnsured = true;
 }
 
+// "Family/Friend" role/subcategory (category 1 = employee-class roles). SHARED
+// list: getsubcategory/:categoryId serves both web + mobile, so adding it here
+// surfaces it on both. Idempotent + defensive (a schema surprise on the
+// subcategory table must never break boot).
+let familyFriendEnsured = false;
+async function ensureFamilyFriendSubcategory(connection) {
+  if (familyFriendEnsured) return;
+  try {
+    const [rows] = await connection.query(
+      "SELECT id FROM subcategory WHERE category_id = 1 AND name = 'Family/Friend' LIMIT 1"
+    );
+    if (!rows.length) {
+      await connection.query(
+        "INSERT INTO subcategory (name, category_id) VALUES ('Family/Friend', 1)"
+      );
+    }
+  } catch (e) {
+    // Non-fatal: never let a subcategory-schema surprise break boot.
+    console.error('ensureFamilyFriendSubcategory:', e && e.message);
+  }
+  familyFriendEnsured = true;
+}
+
 // `user.level` — the permission LEVEL (1–5) on the access ladder, assigned
 // INDEPENDENTLY of the Role/subcategory label (a "Family/Friend" can be any
 // level). NULL = off the ladder: account owners, subcontractors (category 2),
@@ -1163,6 +1186,7 @@ module.exports = {
   ensureContactAuthorityColumn,
   ensureUserFirstLoginColumn,
   ensureUserLevelColumn,
+  ensureFamilyFriendSubcategory,
   ensureSubscriptionPaymentColumns,
   ensurePaymentReceiptsTable,
   ensureJobColorColumn,
