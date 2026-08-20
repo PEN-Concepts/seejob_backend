@@ -2674,6 +2674,7 @@ router.get("/employee/:id", auth.authenticateToken, async (req, res) => {
           u.resignation_reason,
           u.exit_type,
           u.can_view_all_contacts,
+          u.level,
           sub.name AS subcategory_name,
           sub.id AS subcategory_id,
           cat.name AS position,
@@ -2689,7 +2690,7 @@ router.get("/employee/:id", auth.authenticateToken, async (req, res) => {
       GROUP BY
           u.id, u.name, u.email, u.mobile, u.employment_type,
           u.rate, u.resignation_date, u.resignation_reason, u.exit_type,
-          u.can_view_all_contacts, sub.name, cat.name, u.created_at, sub.id
+          u.can_view_all_contacts, u.level, sub.name, cat.name, u.created_at, sub.id
       ORDER BY u.created_at DESC
     `,
       [id]
