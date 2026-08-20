@@ -547,10 +547,50 @@ function denyRestrictedJobData(req, res, next) {
   return next();
 }
 
+// ── Permission LEVEL checks (1–5 ladder) ──────────────────────────────────────
+// Used to gate the handful of actions a coarse module-right can't isolate
+// (create-new-job/lead, edit-Gantt-schedule = L4). Fails CLOSED per the CCP: any
+// error, missing user, or unknown state denies. The account OWNER (role 14, GC) is
+// the top authority and bypasses the ladder; subcontractors (role 12) and clients
+// (role 3) are off-ladder and are DENIED (they have no level).
+const OWNER_ROLE = 14;
+async function hasLevelAtLeast(userId, min, connection) {
+  return withConnection(connection, async (conn) => {
+    try {
+      if (!userId) return false;
+      const [[u]] = await conn.query("SELECT `role`, `level` FROM `user` WHERE id = ? LIMIT 1", [userId]);
+      if (!u) return false;
+      if (Number(u.role) === OWNER_ROLE) return true; // account owner — above the ladder
+      const lvl = Number(u.level);
+      return Number.isInteger(lvl) && lvl >= Number(min);
+    } catch (err) {
+      logger.error("hasLevelAtLeast error: " + err.message);
+      return false; // fail closed
+    }
+  });
+}
+
+// Express middleware form. Requires authenticateToken to have run first.
+function requireLevel(min) {
+  return async (req, res, next) => {
+    try {
+      const uid = req.user && req.user.id;
+      if (!uid) return res.status(401).json({ message: "Unauthorized" });
+      if (await hasLevelAtLeast(uid, min, null)) return next();
+      return res.status(403).json({ message: "PERMISSION_LEVEL_REQUIRED", minLevel: Number(min) });
+    } catch (err) {
+      logger.error("requireLevel error: " + err.message);
+      return res.status(403).json({ message: "PERMISSION_LEVEL_REQUIRED" }); // fail closed
+    }
+  };
+}
+
 module.exports = {
   TRIAL_DAYS,
   OWNER_EXEMPT_EMAILS,
   resolveOwnerId,
+  hasLevelAtLeast,
+  requireLevel,
   getAccessInfo,
   getAccessMode,
   isExpiredFree,
