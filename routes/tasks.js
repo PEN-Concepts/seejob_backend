@@ -359,7 +359,21 @@ router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (
       return res.status(400).json({ message: 'Task has no assigned user' });
     }
 
-    const assignedUser = task.user_id;
+    // Target a SPECIFIC assignee (multi-assignee Nudge from Viewing Task) or the
+    // primary assignee (legacy empty-body nudge). A named target must actually be
+    // assigned to this task.
+    const { target_user_id, message } = req.body || {};
+    let recipientId = task.user_id;
+    if (target_user_id != null && Number(target_user_id) !== Number(task.user_id)) {
+      const [[isAssignee]] = await pool.query(
+        'SELECT 1 AS ok FROM task_assignees WHERE task_id=? AND user_id=? LIMIT 1',
+        [taskId, target_user_id]
+      );
+      if (!isAssignee) {
+        return res.status(400).json({ message: 'That person is not assigned to this task.' });
+      }
+      recipientId = Number(target_user_id);
+    }
 
     const [[actorRow]] = await pool.query(
       'SELECT name FROM user WHERE id=?',
@@ -368,29 +382,30 @@ router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (
     const actorName = actorRow ? actorRow.name : 'Someone';
 
     const url = '/task';
-    const notifyMessage = `${actorName} nudged you on task: "${task.task_name}".`;
+    // Send the message as typed (from the Nudge composer); fall back to the default.
+    const customText = (message == null ? '' : String(message)).trim();
+    const notifyMessage = customText || `${actorName} nudged you on task: "${task.task_name}".`;
 
     // Insert notification record
     await pool.query(
       `INSERT INTO notifications (sender_id, receiver_id, content, status, url, created_by)
        VALUES (?, ?, ?, 1, ?, ?)`,
-      [actorId, assignedUser, notifyMessage, url, actorId]
+      [actorId, recipientId, notifyMessage, url, actorId]
     );
 
-    // Send FCM notification if token exists
-    const [[recipient]] = await pool.query(
+    // Send an FCM push to EVERY device the recipient has registered.
+    const [tokens] = await pool.query(
       'SELECT fcm_token FROM user_device_tokens WHERE user_id=?',
-      [assignedUser]
+      [recipientId]
     );
-
-    if (recipient && recipient.fcm_token) {
-      const message = {
-        token: recipient.fcm_token,
-        notification: { title: 'Task Nudge', body: notifyMessage },
-        data: { type: 'task_nudge', task_id: String(taskId), url },
-      };
+    for (const row of tokens) {
+      if (!row || !row.fcm_token) continue;
       try {
-        await admin.messaging().send(message);
+        await admin.messaging().send({
+          token: row.fcm_token,
+          notification: { title: `Nudge from ${actorName}`, body: notifyMessage },
+          data: { type: 'task_nudge', task_id: String(taskId), url },
+        });
       } catch (err) {
         logger.error('FCM Error:', err);
       }
