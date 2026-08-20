@@ -25,7 +25,7 @@ function ownerTypeOf(v) {
 }
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
-const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData } = require("../utils/access");
+const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, requireLevel } = require("../utils/access");
 const { requireOwnsJob, ownsJob } = require("../utils/ownership");
 // Cross-account guard: the job/lead the request targets must belong to the
 // caller's account. getJobId(req) locates the id (param/query/body); optional
@@ -738,7 +738,7 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.post("/jobs", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+router.post("/jobs", auth.authenticateToken, denyExpiredFreeWrites, requireLevel(4), async (req, res) => {
  
   const { error, value } = jobSchema.validate(req.body);
   if (error) {

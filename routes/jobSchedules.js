@@ -13,7 +13,7 @@ const logger = require('../common/logger');
 const engine = require('../services/scheduleEngine');
 const cascade = require('../services/scheduleCascade');
 const notify = require('../services/notify');
-const { requirePlan, denyRestrictedJobData, isSameAccount } = require('../utils/access');
+const { requirePlan, denyRestrictedJobData, isSameAccount, requireLevel } = require('../utils/access');
 const { ensureScheduleTemplateTables } = require('../services/dbMigrations');
 const { getTimeStamp } = require('../common/timdate');
 
@@ -35,6 +35,15 @@ router.use(async (req, res, next) => {
 // 403). authenticateToken runs first so requirePlan can read req.user.
 // Gantt Scheduler data is off-limits to Subcontractors/Clients on ANY job.
 router.use(auth.authenticateToken, denyRestrictedJobData, requirePlan('platinum'));
+
+// Gantt/schedule EDITING is a Level-4 action (decision #2). Foreman (L3) keeps
+// view-only via the single GET route; every mutation (blank/validate/reorder/
+// items/start/hold/delete/deps) requires L4+. Owner (role 14) bypasses; off-ladder
+// subs/clients and anyone below L4 are denied. Fail closed.
+router.use((req, res, next) => {
+  if (req.method === 'GET') return next();
+  return requireLevel(4)(req, res, next);
+});
 
 // ── Cross-account isolation for ALL Gantt/schedule data ────────────────────────
 // A schedule hangs off a job (or lead). Previously any Platinum account could

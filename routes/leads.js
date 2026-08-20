@@ -4,7 +4,7 @@ const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
 const auth = require("../services/authentication");
-const { isSameAccount } = require("../utils/access");
+const { isSameAccount, requireLevel } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { ensureJobColorColumn } = require("../services/dbMigrations");
 const { pickJobColor } = require("../services/jobColorPalette");
@@ -85,7 +85,7 @@ function requireChildLeadOwnership(table, idParam) {
   };
 }
 
-router.post("/leads/create", auth.authenticateToken, async (req, res) => {
+router.post("/leads/create", auth.authenticateToken, requireLevel(4), async (req, res) => {
   try {
     const { error } = leadsSchema.validate(req.body);
     if (error) return res.status(400).json({ message: error.details[0].message });
@@ -666,7 +666,7 @@ router.put('/update-budget', auth.authenticateToken, requireLeadOwnership((r) =>
   }
 });
 
-router.post("/convert-to-job/:leadId", auth.authenticateToken, requireLeadOwnership((r) => r.params.leadId), async (req, res) => {
+router.post("/convert-to-job/:leadId", auth.authenticateToken, requireLevel(4), requireLeadOwnership((r) => r.params.leadId), async (req, res) => {
   const leadId = req.params.leadId;
   const userId = req.user.id; // assuming JWT contains user id
 
