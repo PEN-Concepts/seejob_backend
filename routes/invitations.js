@@ -8,6 +8,7 @@ const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
 const { getAccessMode, resolveOwnerId, isSameAccount, denyExpiredFreeWrites } = require("../utils/access");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
+const { applyLevelRights } = require("../services/permissionLevels");
 
 // For an expired_free user, keep ONLY appointments created by ANOTHER account
 // (i.e. ones they were invited to). Their OWN account's appointments are locked
@@ -853,6 +854,56 @@ router.post('/assign-rights', auth.authenticateToken, async (req, res) => {
     if (connection) await connection.rollback();
     console.error('Error assigning rights:', err);
     res.status(500).json({ message: 'Internal server error' });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Assign a permission LEVEL (1–5) to an employee/family-friend, which materializes
+// their rights from the preset. Authorization (fail closed): caller must be the
+// account OWNER or a Level-5, the target must be in the caller's account and not the
+// caller, and off-ladder targets (owners / subcontractors / clients) are rejected.
+// Backend Admin is never reachable here — it is not a level.
+router.post('/set-level', auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+  const { user_id, level } = req.body || {};
+  const n = Number(level);
+  if (!user_id || !Number.isInteger(n) || n < 1 || n > 5) {
+    return res.status(400).json({ message: 'Provide user_id and a level from 1 to 5.' });
+  }
+  if (Number(user_id) === Number(req.user.id)) {
+    return res.status(403).json({ message: 'You cannot set your own level.' });
+  }
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    if (!(await isSameAccount(req.user.id, user_id, connection))) {
+      return res.status(403).json({ message: 'That user is not in your account.' });
+    }
+    // Only the account owner (resolves to self) or a Level-5 may assign levels.
+    const ownerId = await resolveOwnerId(req.user.id, connection);
+    const callerIsOwner = Number(ownerId) === Number(req.user.id);
+    const [[me]] = await connection.query("SELECT `level` FROM `user` WHERE id = ? LIMIT 1", [req.user.id]);
+    if (!callerIsOwner && Number(me && me.level) !== 5) {
+      return res.status(403).json({ message: 'Only the account owner or a Level 5 can assign levels.' });
+    }
+    // Off-ladder targets (owners, subcontractors, clients) resolve to themselves.
+    const targetOwner = await resolveOwnerId(user_id, connection);
+    if (Number(targetOwner) === Number(user_id)) {
+      return res.status(400).json({ message: 'That account is off the level ladder (owner/subcontractor/client).' });
+    }
+    await connection.beginTransaction();
+    await connection.query("UPDATE `user` SET `level` = ? WHERE id = ?", [n, user_id]);
+    const result = await applyLevelRights(connection, user_id, n);
+    if (!result.applied) {
+      await connection.rollback();
+      return res.status(400).json({ message: 'Could not apply that level.', detail: result.reason });
+    }
+    await connection.commit();
+    return res.status(200).json({ message: `Level ${n} applied.`, rightsWritten: result.count });
+  } catch (err) {
+    if (connection) { try { await connection.rollback(); } catch (e) {} }
+    logger.error('set-level error: ' + err.message);
+    return res.status(500).json({ message: 'Internal server error' });
   } finally {
     if (connection) connection.release();
   }

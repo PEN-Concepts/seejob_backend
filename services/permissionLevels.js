@@ -138,8 +138,42 @@ function levelAllows(level, actionKey) {
   return Number.isInteger(n) && n >= need;
 }
 
+/**
+ * Materialize a user's rights from their LEVEL by writing per-user
+ * role_right_permission rows — reusing the existing model so /my-rights and every
+ * existing guard enforce it unchanged (decision #1). Rows are keyed by the user's
+ * `role` (what /my-rights queries with) so they load at login. Full reset each time
+ * (delete then insert) so a level change can't leave stale grants.
+ *
+ * Only on-ladder users (level 1–5, category-1 employees/family-friend) get this;
+ * subcontractors (role 12, off-ladder) keep their own plan-driven rights. Must run
+ * inside the caller's transaction. Returns {applied, count, roleId} or {applied:false}.
+ */
+async function applyLevelRights(conn, userId, level) {
+  const preset = rightsForLevel(level);
+  if (!preset) return { applied: false, reason: 'off-ladder' }; // fail closed
+  const [[u]] = await conn.query("SELECT `role` FROM `user` WHERE id = ? LIMIT 1", [userId]);
+  if (!u) return { applied: false, reason: 'no-user' };
+  const roleId = u.role;
+  const [rrows] = await conn.query("SELECT id, name FROM `right` WHERE sub_heading = 0");
+  const idByName = new Map(rrows.map((r) => [String(r.name).toLowerCase(), r.id]));
+  await conn.query("DELETE FROM role_right_permission WHERE user_id = ?", [userId]);
+  const yn = (b) => (b ? 'yes' : 'no');
+  let count = 0;
+  for (const [name, crud] of Object.entries(preset)) {
+    const rid = idByName.get(String(name).toLowerCase());
+    if (!rid) continue; // name not in the rights catalog → skip
+    await conn.query(
+      "INSERT INTO role_right_permission (role_id, user_id, right_id, `read`, `create`, `update`, `delete`) VALUES (?,?,?,?,?,?,?)",
+      [roleId, userId, rid, yn(crud.read), yn(crud.create), yn(crud.update), yn(crud.delete)]
+    );
+    count++;
+  }
+  return { applied: true, count, roleId };
+}
+
 module.exports = {
   UNIVERSAL, ADDS, LEVEL_MIN, SUBCONTRACTOR_RIGHTS,
-  rightsForLevel, levelAllows,
+  rightsForLevel, levelAllows, applyLevelRights,
   VIEW, FULL, R,
 };
