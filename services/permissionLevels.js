@@ -199,8 +199,36 @@ async function applyToggles(conn, userId, roleId, toggles) {
   if (t.notepad_create) await upsertFull('checklist');
 }
 
+/**
+ * Grant Notepad-creation (the `checklist` right, full CRUD) to a PAID
+ * subscriber's account. The rule: Notepad-creation is for employees with the
+ * permission OR paid subscribers — so activating a paid subscription auto-grants
+ * it, no manual toggle needed. Additive upsert (does NOT reset other rights).
+ * Skips role 12 (subcontractors), whose rights are governed entirely by their
+ * plan-feature sync (see routes/payments.js syncSubcontractorRole12Rights).
+ * Fail-safe no-op if the user or `checklist` right is missing. Runs inside the
+ * caller's transaction. Returns {granted, reason?}.
+ */
+async function grantNotepadCreate(conn, userId) {
+  try {
+    const [[u]] = await conn.query("SELECT `role` FROM `user` WHERE id = ? LIMIT 1", [userId]);
+    if (!u) return { granted: false, reason: 'no-user' };
+    if (Number(u.role) === 12) return { granted: false, reason: 'role-12' };
+    const [[r]] = await conn.query("SELECT id FROM `right` WHERE name = 'checklist' LIMIT 1");
+    if (!r) return { granted: false, reason: 'no-checklist-right' };
+    await conn.query("DELETE FROM role_right_permission WHERE user_id = ? AND right_id = ?", [userId, r.id]);
+    await conn.query(
+      "INSERT INTO role_right_permission (role_id, user_id, right_id, `read`, `create`, `update`, `delete`) VALUES (?,?,?,'yes','yes','yes','yes')",
+      [u.role, userId, r.id]
+    );
+    return { granted: true };
+  } catch (e) {
+    return { granted: false, reason: (e && e.message) || 'error' };
+  }
+}
+
 module.exports = {
   UNIVERSAL, ADDS, LEVEL_MIN, SUBCONTRACTOR_RIGHTS,
-  rightsForLevel, levelAllows, applyLevelRights, applyToggles,
+  rightsForLevel, levelAllows, applyLevelRights, applyToggles, grantNotepadCreate,
   VIEW, FULL, R,
 };

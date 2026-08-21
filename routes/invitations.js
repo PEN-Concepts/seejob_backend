@@ -6,7 +6,7 @@ const pool = require('../config/connection');
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
-const { getAccessMode, resolveOwnerId, isSameAccount, denyExpiredFreeWrites } = require("../utils/access");
+const { getAccessMode, resolveOwnerId, isSameAccount, denyExpiredFreeWrites, requireLevel } = require("../utils/access");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { applyLevelRights, applyToggles } = require("../services/permissionLevels");
 
@@ -2498,7 +2498,10 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
 // status) and create a "Saved" subcontractor contact. No email exists on CSLB,
 // so a placeholder lic-<num>@no-email.invalid is used. Backward-safe: dupes by
 // that email are reused, not duplicated.
-router.post('/bulk-create-from-licenses', auth.authenticateToken, async (req, res) => {
+// Manual CSLB importer = company-wide contact creation → Level 4+ (fail-closed
+// via requireLevel: owner/role-14 bypasses, L4/L5 pass, everyone else denied).
+// Matches LEVEL_MIN.manualLicenseImport = 4 from the permission-levels audit.
+router.post('/bulk-create-from-licenses', auth.authenticateToken, requireLevel(4), async (req, res) => {
   const userId = req.user.id;
   const role = Number(req.user && req.user.role);
   if (role === 12) {

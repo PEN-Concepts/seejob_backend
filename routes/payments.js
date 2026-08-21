@@ -7,6 +7,7 @@ const pool = require("../config/connection");
 const logger = require("../common/logger");
 const { getAccessMode, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { requireAdmin } = require("../utils/adminGate");
+const { grantNotepadCreate } = require("../services/permissionLevels");
 const { sendEmail, isRealEmail } = require("../services/notify");
 const { previewAccountDeletion, cascadeDeleteAccount } = require("../services/accountDelete");
 const { ensureWebhookEventsTable, ensurePaymentReceiptsTable } = require("../services/dbMigrations");
@@ -1495,6 +1496,10 @@ router.post("/subscriptions", authenticateToken, async (req, res) => {
       planId: plan.id,
     });
 
+    // Paid subscribers auto-get Notepad-creation (the `checklist` right) — no
+    // manual toggle needed. (No-op / role-12-skipped internally.)
+    await grantNotepadCreate(connection, userId);
+
     await connection.commit();
     return res.json({
       success: true,
@@ -1947,6 +1952,10 @@ router.post("/webhook", async (req, res) => {
         userId: sub.user_id,
         planId: keepRights ? sub.plan_id : null,
       });
+
+      // Auto-grant Notepad-creation to the paid subscriber while entitled
+      // (active / grace); role-12 is skipped inside the helper.
+      if (keepRights) await grantNotepadCreate(connection, sub.user_id);
 
       await connection.commit();
       logger.info(
