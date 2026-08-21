@@ -2482,25 +2482,20 @@ router.post("/verify-otp", async (req, res) => {
       return res.status(200).json({ code: "400", message: "Invalid OTP or already verified." });
     }
 
-    const user = users[0];   // user record
-    const userId = user.id;
-
     // 2) Update otp_status = 0
     await connection.query(
       "UPDATE `user` SET `otp_status` = 0 WHERE `email` = ?",
       [email]
     );
 
-    // 3) INSERT DEFAULT JOB (only required fields)
-    await connection.query(
-      `INSERT INTO job (type, name, created_by)
-       VALUES (?, ?, ?)`,
-      ["Residential", "office/shop", userId]
-    );
+    // NOTE: previously this inserted a default "office/shop" job on EVERY
+    // verify-otp. Because the LOGIN page's Verify hits this same route, that
+    // created a stray job on every OTP login (pure clutter, not an intended
+    // onboarding step). Removed entirely per owner — no default job is created.
 
     return res.status(200).json({
       code: "200",
-      message: "OTP verified successfully and default job created."
+      message: "OTP verified successfully."
     });
 
   } catch (error) {
