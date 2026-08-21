@@ -31,6 +31,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       business VARCHAR(190), trade VARCHAR(190), social_security VARCHAR(60) NOT NULL DEFAULT '',
       street VARCHAR(190) NOT NULL, city VARCHAR(120) NOT NULL, state VARCHAR(120) NOT NULL,
       zipcode VARCHAR(20) NOT NULL, contact_note VARCHAR(255) NOT NULL,
+      employment_type VARCHAR(40) NULL, rate DECIMAL(10,2) NULL,
       otp VARCHAR(10), otp_status TINYINT, created_at VARCHAR(40), created_by INT NULL,
       must_change_password TINYINT, status TINYINT NOT NULL DEFAULT 1, level TINYINT NULL)`);
     await conn.query(`CREATE TABLE category (id INT PRIMARY KEY, name VARCHAR(60))`);
@@ -109,6 +110,9 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       ok(!!row && Number(row.category) === 1, `${ec.label}: category-1 row created`, JSON.stringify(res.body));
       // created_by is forced to the token owner, not the spoofed 999999.
       if (row) ok(Number(row.created_by) === Number(ownerId), `${ec.label}: created_by forced to owner (${ownerId})`, String(row.created_by));
+      // employment_type + rate now PERSIST at creation (so a later edit isn't
+      // blocked by empty required fields).
+      if (row) ok(row.employment_type === 'permanent' && Number(row.rate) === 100, `${ec.label}: employment_type + rate persisted`, JSON.stringify({ et: row.employment_type, rate: row.rate }));
     }
 
     // Even an authenticated owner may NOT create an Admin(5) here.

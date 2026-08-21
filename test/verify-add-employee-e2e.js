@@ -34,6 +34,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       street VARCHAR(190) NOT NULL DEFAULT '', city VARCHAR(120) NOT NULL DEFAULT '',
       state VARCHAR(120) NOT NULL DEFAULT '', zipcode VARCHAR(20) NOT NULL DEFAULT '',
       contact_note VARCHAR(255) NOT NULL DEFAULT '', otp VARCHAR(10), otp_status TINYINT,
+      employment_type VARCHAR(40) NULL, rate DECIMAL(10,2) NULL,
       created_at VARCHAR(40), created_by INT NULL, level TINYINT NULL, must_change_password TINYINT DEFAULT 0, status TINYINT NOT NULL DEFAULT 1)`);
     await conn.query("CREATE TABLE `right` (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(40), sub_heading INT DEFAULT 0)");
     await conn.query("CREATE TABLE role_right_permission (id INT PRIMARY KEY AUTO_INCREMENT, role_id INT, user_id INT NULL, right_id INT, `read` VARCHAR(4), `create` VARCHAR(4), `update` VARCHAR(4), `delete` VARCHAR(4))");

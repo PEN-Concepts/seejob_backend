@@ -508,10 +508,17 @@ router.post("/register", async (req, res) => {
     // OMITTED street/city/state/zipcode/contact_note (all present & NOT NULL in
     // prod) and bound employment_type/rate, which is what broke sign-up. Public
     // callers don't supply address fields, so they default to empty strings.
+    // employment_type/rate are NULLABLE (existing employee rows carry NULL, and
+    // PUT /employee/:id sets them directly). Persisting them here so an employee
+    // created with these fields (web + mobile Add Employee both send them) keeps
+    // them — previously they were dropped at creation, so editing the employee
+    // later showed them empty and the required-field validation blocked Update.
+    // Bound null-safe so public sign-up (category 2/3/4, which omits them) is
+    // unaffected — verified by registerE2E.
     const query = `
       INSERT INTO user
-      (name, email, password, role, mobile, category, subcategory, business, trade, social_security, street, city, state, zipcode, contact_note, otp, otp_status, created_at, created_by, must_change_password)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (name, email, password, role, mobile, category, subcategory, business, trade, social_security, street, city, state, zipcode, contact_note, employment_type, rate, otp, otp_status, created_at, created_by, must_change_password)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const [resultInsert] = await connection.query(query, [
@@ -530,6 +537,8 @@ router.post("/register", async (req, res) => {
       r.state || "",
       r.zipcode || "",
       r.contact_notes || "",
+      r.employment_type || null,
+      (r.rate === 0 || r.rate) ? r.rate : null,
       otp,
       1,
       currentTimestamp,
