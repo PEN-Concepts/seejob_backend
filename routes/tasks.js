@@ -714,6 +714,75 @@ router.get("/all_job_task/:id", auth.authenticateToken, denyRestrictedJobData, a
   }
 });
 
+// COMPANY-WIDE SCHEDULE feed: EVERY task that has a date, across the whole
+// account — job tasks AND jobless personal tasks, assigned or unassigned, with
+// a job or without, regardless of whether it was ever added to the Master
+// Calendar. Excludes: lead tasks (they point at `leads`, not `job`), archived
+// tasks, and — the PRIVACY RULE — another account member's JOBLESS task that
+// they assigned ONLY to themselves (a personal My-Daily-Tasks-style list).
+// A real JOB task stays company-visible even when self-assigned. Notepad
+// (check_list), Spartan goals, and appointments live in other tables, so this
+// tasks query excludes them by construction.
+//
+// PRIVACY IS ENFORCED HERE (server-side): identity (:me = req.user.id) and the
+// account root (:owner) are only trustworthy on the server, so a private
+// jobless task is never shipped to another member's client at all.
+router.get("/company_calendar", auth.authenticateToken, denyRestrictedJobData, async (req, res) => {
+  const loggedInUserId = req.user && req.user.id;                 // :me — authoritative identity
+  const ownerId =
+    req.user && [2, 3, 4, 5].includes(Number(req.user.role)) && req.user.working_id
+      ? Number(req.user.working_id)                               // delegated login → account root
+      : Number(loggedInUserId);                                   // owner logs in directly
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const sql = `SELECT jt.*,
+              u.name as assignto,
+              jt.task_type,
+              COALESCE(j.name, 'No Job') as job_name,
+              t.team_name,
+              t.team_color,
+              t.team_leader,
+              tl.name AS team_leader_name,
+              uc.name as created_by_name,
+              (SELECT jsi.id FROM job_schedule_items jsi WHERE jsi.task_id = jt.id LIMIT 1) AS schedule_item_id,
+              (SELECT jsi.has_conflict FROM job_schedule_items jsi WHERE jsi.task_id = jt.id LIMIT 1) AS schedule_has_conflict
+       FROM tasks jt
+       LEFT JOIN user u ON u.id = jt.user_id
+       LEFT JOIN job j ON j.id = jt.job_id
+       LEFT JOIN teams t ON t.id = jt.team_id
+       LEFT JOIN user tl ON tl.id = t.team_leader
+       LEFT JOIN user uc ON uc.id = jt.created_by
+       WHERE jt.start_date IS NOT NULL
+         AND jt.task_type IN ('job', 'task')
+         AND jt.archived_at IS NULL
+         -- company-wide: every task authored within this account (owner + their members)
+         AND jt.created_by IN (SELECT id FROM \`user\` WHERE id = ? OR created_by = ?)
+         AND (
+              (jt.job_id IS NOT NULL AND jt.job_id <> 0)   -- has a real job → company-visible
+              OR jt.created_by = ?                          -- my OWN jobless task → visible to me
+              OR NOT (                                       -- else: another member's PRIVATE jobless task → hide
+                   jt.team_id IS NULL
+                   AND jt.user_id IS NOT NULL
+                   AND jt.user_id = jt.created_by
+                   AND NOT EXISTS (SELECT 1 FROM task_assignees ta
+                                    WHERE ta.task_id = jt.id AND ta.user_id <> jt.created_by)
+              )
+         )
+       ORDER BY jt.start_date ASC;`;
+    const [rows] = await connection.query(sql, [ownerId, ownerId, loggedInUserId]);
+    await attachTaskImages(connection, rows);
+    await attachAssignees(connection, rows);
+    const visible = await filterTasksForExpired(connection, loggedInUserId, rows);
+    res.status(200).json(visible);
+  } catch (err) {
+    logger.error("Error fetching company calendar tasks", err);
+    res.status(500).json({ message: "Server error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // READ all lead tasks
 router.get("/all_lead_task/:id", auth.authenticateToken, denyRestrictedJobData, async (req, res) => {
   const idsParam = req.params.id;
