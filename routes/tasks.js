@@ -1276,12 +1276,26 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     //  • otherwise             → leave the existing set untouched
     const hasAssigneesField = Object.prototype.hasOwnProperty.call(req.body, 'assignees');
     const hasUserIdField = Object.prototype.hasOwnProperty.call(req.body, 'user_id');
+    // Capture the assignee set BEFORE the sync so the notify step below can tell
+    // who is NEWLY added / removed (and not re-notify people already on the task).
+    const [oldAsgRows] = await connection.query(
+      "SELECT user_id FROM task_assignees WHERE task_id=?",
+      [req.params.id]
+    );
+    const oldAssigneeSet = new Set((oldAsgRows || []).map((r) => Number(r.user_id)).filter(Boolean));
+    if (!oldAssigneeSet.size && oldUser) oldAssigneeSet.add(Number(oldUser)); // legacy single-assignee task
+    // Only diff/notify when an assignee change was actually requested — a partial
+    // edit (status/date/percent) leaves the set untouched and must NOT notify.
+    let assigneeSyncRan = false;
     if (incomingTeamId) {
       await syncTaskAssignees(connection, req.params.id, []);
+      assigneeSyncRan = true;
     } else if (hasAssigneesField) {
       await syncTaskAssignees(connection, req.params.id, assigneeList);
+      assigneeSyncRan = true;
     } else if (hasUserIdField && Number(newUser || 0) !== Number(oldUser || 0)) {
       await syncTaskAssignees(connection, req.params.id, newUser ? [newUser] : []);
+      assigneeSyncRan = true;
     }
 
     // -------------------------------------------------
@@ -1354,112 +1368,92 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     }
 
     // -------------------------------------------------
-    // 🚨 NOTIFICATION LOGIC (ONLY ADD OR REMOVE)
+    // 🚨 NOTIFICATION LOGIC — set-diff (add / remove), skipping the actor
     // -------------------------------------------------
-    // Get actor name
+    // Notify EVERY person newly added to the assignee set (covers reassignment
+    // A→B and adding a 2nd assignee to an already-assigned task — not just the old
+    // unassigned→assigned case), and everyone removed. People already on the task
+    // are NOT re-notified, and the actor is never notified about their own change.
+    if (assigneeSyncRan) {
     const [[actorRow]] = await pool.query(
       "SELECT name FROM user WHERE id=?", [actorId]
     );
     const actorName = actorRow ? actorRow.name : "Someone";
+    const url = "/task";
 
-    //console.log(actorName);
+    // New assignee set after the sync (task_assignees is now authoritative).
+    const [newAsgRows] = await connection.query(
+      "SELECT user_id FROM task_assignees WHERE task_id=?",
+      [req.params.id]
+    );
+    const newAssigneeSet = new Set((newAsgRows || []).map((r) => Number(r.user_id)).filter(Boolean));
+    if (!newAssigneeSet.size && newUser) newAssigneeSet.add(Number(newUser));
 
-    // Determine notification type
-    let notifyUser = null;
-    let notifyMessage = "";
+    const addedUsers = [...newAssigneeSet].filter((id) => !oldAssigneeSet.has(id) && Number(id) !== Number(actorId));
+    const removedUsers = [...oldAssigneeSet].filter((id) => !newAssigneeSet.has(id) && Number(id) !== Number(actorId));
 
-    if (!oldUser && newUser) {
-      // CASE 1 — user assigned
-      notifyUser = newUser;
-      notifyMessage = `${actorName} assigned you a new task: "${task_name}".`;
-
-    } else if (oldUser && !newUser) {
-      // CASE 2 — user removed
-      notifyUser = oldUser;
-      notifyMessage = `${actorName} removed you from task: "${task_name}".`;
-    }
-
-    if (notifyUser) {
-      // Insert notification record
-      const url = "/task";
-
-      // DEDUPE: the assign picker can fire this update more than once in quick
-      // succession (per-pick save + Done/onHide commit + client-side races), which
-      // was double-sending the "assigned you a new task" push. Skip if an identical
-      // notification to this receiver was recorded in the last 15s → exactly one push.
+    // Notify one affected person: in-app record + job-contact link + FCM push to
+    // every device. 15s dedupe per (receiver, content) so a racing double-save
+    // from the assign picker can't double-send.
+    const notifyAssigneeChange = async (receiverId, notifyMessage, isAdd) => {
       const [[recentDup]] = await connection.query(
         `SELECT id FROM notifications
            WHERE receiver_id = ? AND sender_id = ? AND content = ? AND url = ?
              AND created_at > (NOW() - INTERVAL 15 SECOND)
            LIMIT 1`,
-        [notifyUser, actorId, notifyMessage, url]
+        [receiverId, actorId, notifyMessage, url]
+      );
+      if (recentDup) return;
+
+      await connection.query(
+        `INSERT INTO notifications (sender_id, receiver_id, content, status, url, created_by)
+         VALUES (?, ?, ?, 1, ?, ?)`,
+        [actorId, receiverId, notifyMessage, url, actorId]
       );
 
-      if (!recentDup) {
-        await connection.query(
-          `INSERT INTO notifications (sender_id, receiver_id, content, status, url, created_by)
-           VALUES (?, ?, ?, 1, ?, ?)`,
-          [actorId, notifyUser, notifyMessage, url, actorId]
-        );
-      }
-      // -------------------------------------------------
-        // 📇 JOB CONTACTS LOGIC (ADD / REMOVE)
-        // -------------------------------------------------
-
-        if (!oldUser && newUser && job_id) {
-          // ✅ CASE: User Assigned → ADD contact
+      // Job-contact link follows the assignment (add → link, remove → unlink).
+      if (job_id) {
+        if (isAdd) {
           await connection.query(
-            `INSERT IGNORE INTO job_contacts (user_id, job_id, contact_id)
-            VALUES (?, ?, ?)`,
-            [actorId, job_id, newUser]
+            `INSERT IGNORE INTO job_contacts (user_id, job_id, contact_id) VALUES (?, ?, ?)`,
+            [actorId, job_id, receiverId]
           );
-
-        }  else if (oldUser && !newUser && job_id) {
-          //  CASE: User Removed → DELETE contact
+        } else {
           await connection.query(
-            `DELETE FROM job_contacts
-            WHERE user_id = ? AND job_id = ? AND contact_id = ?`,
-            [actorId, job_id, oldUser]
+            `DELETE FROM job_contacts WHERE user_id = ? AND job_id = ? AND contact_id = ?`,
+            [actorId, job_id, receiverId]
           );
         }
+      }
 
-
-      // Send FCM push (skipped when we just deduped the notification above, so the
-      // racing duplicate save doesn't fire a second push).
-      const [[recipient]] = recentDup
-        ? [[null]]
-        : await connection.query(
-            "SELECT fcm_token FROM user_device_tokens WHERE user_id=?",
-            [notifyUser]
-          );
-
-      if (!recentDup && recipient && recipient.fcm_token) {
-        const fcmMessage = {
-          token: recipient.fcm_token,
-          // Keep a `notification` block so the OS DISPLAYS the push reliably,
-          // including on iOS/Safari PWAs. (A data-only message needs the service
-          // worker's onBackgroundMessage JS to run showNotification, which iOS PWAs
-          // do not do reliably — that regressed display to nothing.) Wording per the
-          // CCP: title = the app name; body = the task's own text (no framing).
-          notification: {
-            title: "See Job Run",
-            body: String(task_name || ""),
-          },
-          data: {
-            type: "task_assignment",
-            task_id: String(req.params.id),
-            url,
-          },
-        };
-
+      // FCM push to every device on file. `notification` block so iOS/Safari PWAs
+      // display it. Title = app name; body = the task's own text (no framing).
+      const [tokRows] = await connection.query(
+        "SELECT fcm_token FROM user_device_tokens WHERE user_id=?",
+        [receiverId]
+      );
+      for (const row of tokRows) {
+        if (!row || !row.fcm_token) continue;
         try {
-          await admin.messaging().send(fcmMessage);
-          logger.info("Notification sent to user: " + notifyUser);
+          await admin.messaging().send({
+            token: row.fcm_token,
+            notification: { title: "See Job Run", body: String(task_name || "") },
+            data: { type: "task_assignment", task_id: String(req.params.id), url },
+          });
+          logger.info("Notification sent to user: " + receiverId);
         } catch (err) {
           logger.error("FCM Error:", err);
         }
       }
+    };
+
+    for (const uid of addedUsers) {
+      await notifyAssigneeChange(uid, `${actorName} assigned you a new task: "${task_name}".`, true);
     }
+    for (const uid of removedUsers) {
+      await notifyAssigneeChange(uid, `${actorName} removed you from task: "${task_name}".`, false);
+    }
+    } // end if (assigneeSyncRan)
 
     // -------------------------------------------------
 
