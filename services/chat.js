@@ -115,7 +115,8 @@ async function migrateLeadChatToJob(conn, leadId, jobId) {
 async function listMyConversations(userId) {
   const [rows] = await pool.query(
     `SELECT c.id, c.type, c.job_id, c.lead_id, c.title, c.last_message_at, c.last_message_preview,
-            j.name AS job_name, j.color AS job_color, l.lead_name AS lead_name,
+            j.name AS job_name, j.color AS job_color, j.status AS job_status,
+            l.lead_name AS lead_name, l.bid_status AS lead_bid_status,
             (SELECT COUNT(*) FROM chat_messages msg
                WHERE msg.conversation_id = c.id
                  AND msg.id > COALESCE(m.last_read_message_id, 0)
@@ -132,9 +133,15 @@ async function listMyConversations(userId) {
   for (const r of rows) {
     let name = r.title || "";
     let accent = null;
-    if (r.type === "job") { name = r.job_name || "Job"; accent = r.job_color || null; }
-    else if (r.type === "lead") { name = r.lead_name || "Lead"; accent = LEAD_GREY; }
-    else {
+    // Normalized status (matches the Jobs page rowStatus rule) for the list filter.
+    let status = "direct";
+    if (r.type === "job") {
+      name = r.job_name || "Job"; accent = r.job_color || null;
+      status = Number(r.job_status) === 1 ? "active" : "completed";
+    } else if (r.type === "lead") {
+      name = r.lead_name || "Lead"; accent = LEAD_GREY;
+      status = String(r.lead_bid_status || "").toLowerCase() === "archived" ? "archived" : "lead";
+    } else {
       // direct → the OTHER member's name
       const [[other]] = await pool.query(
         `SELECT u.name, u.business AS business_name FROM chat_members m JOIN \`user\` u ON u.id = m.user_id
@@ -144,7 +151,7 @@ async function listMyConversations(userId) {
       name = (other && (other.business_name || other.name)) || "Direct message";
     }
     out.push({
-      id: r.id, type: r.type, job_id: r.job_id, lead_id: r.lead_id,
+      id: r.id, type: r.type, job_id: r.job_id, lead_id: r.lead_id, status,
       name, accent, last_message_at: r.last_message_at,
       last_message_preview: r.last_message_preview, unread: Number(r.unread) || 0,
     });
