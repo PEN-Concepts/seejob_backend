@@ -83,12 +83,28 @@ async function getOrCreateDirect(conn, aId, bId) {
   const [[existing]] = await c.query("SELECT id FROM chat_conversations WHERE dm_key = ? LIMIT 1", [dmKey]);
   if (existing) return existing.id;
   const [res] = await c.query(
-    "INSERT INTO chat_conversations (type, dm_key, created_by, created_at) VALUES ('direct', ?, ?, NOW())",
+    "INSERT INTO chat_conversations (type, dm_key, created_by, last_message_at, created_at) VALUES ('direct', ?, ?, NOW(), NOW())",
     [dmKey, aId]
   );
   await addMember(c, res.insertId, aId, "member");
   await addMember(c, res.insertId, bId, "member");
   return res.insertId;
+}
+
+/** Create a custom group chat (2+ people) with a name. Creator = owner. Sorts to
+ *  the top of the list (last_message_at = now). */
+async function createGroup(conn, creatorId, name, userIds) {
+  const c = conn || pool;
+  const [res] = await c.query(
+    "INSERT INTO chat_conversations (type, title, created_by, owner_id, last_message_at, created_at) VALUES ('group', ?, ?, ?, NOW(), NOW())",
+    [String(name).slice(0, 160), creatorId, creatorId]
+  );
+  const convId = res.insertId;
+  await addMember(c, convId, creatorId, "owner");
+  for (const uid of Array.isArray(userIds) ? userIds : []) {
+    if (Number(uid) && Number(uid) !== Number(creatorId)) await addMember(c, convId, uid, "member");
+  }
+  return convId;
 }
 
 /** Lead→job conversion: hand the lead's existing chat to the new job so there's
@@ -141,6 +157,8 @@ async function listMyConversations(userId) {
     } else if (r.type === "lead") {
       name = r.lead_name || "Lead"; accent = LEAD_GREY;
       status = String(r.lead_bid_status || "").toLowerCase() === "archived" ? "archived" : "lead";
+    } else if (r.type === "group") {
+      name = r.title || "Group"; accent = "#5c6570"; status = "group";
     } else {
       // direct → the OTHER member's name
       const [[other]] = await pool.query(
@@ -154,7 +172,28 @@ async function listMyConversations(userId) {
       id: r.id, type: r.type, job_id: r.job_id, lead_id: r.lead_id, status,
       name, accent, last_message_at: r.last_message_at,
       last_message_preview: r.last_message_preview, unread: Number(r.unread) || 0,
+      members: [], member_count: 0,
     });
+  }
+  // Attach member avatars (id + name for initials) — up to 3 shown + a total count.
+  const ids = out.map((o) => o.id);
+  if (ids.length) {
+    const [mem] = await pool.query(
+      `SELECT m.conversation_id, m.user_id, u.name, u.business AS business_name
+         FROM chat_members m JOIN \`user\` u ON u.id = m.user_id
+        WHERE m.conversation_id IN (${ids.map(() => "?").join(",")})
+        ORDER BY m.conversation_id, (m.role='owner') DESC, m.id`,
+      ids
+    );
+    const byConv = {};
+    for (const r of mem) {
+      (byConv[r.conversation_id] = byConv[r.conversation_id] || []).push({ user_id: r.user_id, name: r.business_name || r.name });
+    }
+    for (const o of out) {
+      const list = byConv[o.id] || [];
+      o.member_count = list.length;
+      o.members = list.slice(0, 3);
+    }
   }
   return out;
 }
@@ -205,7 +244,7 @@ async function getMessages(conversationId, { before, limit } = {}) {
 
 async function conversationDisplayName(conversationId, forUserId) {
   const [[c]] = await pool.query(
-    `SELECT c.type, j.name AS job_name, l.lead_name FROM chat_conversations c
+    `SELECT c.type, c.title, j.name AS job_name, l.lead_name FROM chat_conversations c
        LEFT JOIN job j ON c.type='job' AND j.id=c.job_id
        LEFT JOIN leads l ON c.type='lead' AND l.id=c.lead_id WHERE c.id=? LIMIT 1`,
     [conversationId]
@@ -213,6 +252,7 @@ async function conversationDisplayName(conversationId, forUserId) {
   if (!c) return "Chat";
   if (c.type === "job") return c.job_name || "Job";
   if (c.type === "lead") return c.lead_name || "Lead";
+  if (c.type === "group") return c.title || "Group";
   const [[other]] = await pool.query(
     `SELECT u.name, u.business AS business_name FROM chat_members m JOIN \`user\` u ON u.id=m.user_id
       WHERE m.conversation_id=? AND m.user_id<>? LIMIT 1`,
@@ -277,6 +317,6 @@ async function markRead(conversationId, userId, lastMessageId) {
 
 module.exports = {
   db, isMember, addMember, removeMember,
-  getOrCreateJobConversation, getOrCreateLeadConversation, getOrCreateDirect, migrateLeadChatToJob,
+  getOrCreateJobConversation, getOrCreateLeadConversation, getOrCreateDirect, createGroup, migrateLeadChatToJob,
   listMyConversations, totalUnread, getMessages, postMessage, markRead,
 };

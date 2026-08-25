@@ -1221,7 +1221,7 @@ async function ensureChatTables(connection) {
   if (chatTablesEnsured) return;
   await connection.query(`CREATE TABLE IF NOT EXISTS chat_conversations (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    type ENUM('job','lead','direct') NOT NULL,
+    type ENUM('job','lead','direct','group') NOT NULL,
     job_id INT NULL,
     lead_id INT NULL,
     dm_key VARCHAR(40) NULL,
@@ -1311,6 +1311,22 @@ async function ensureChatBackfill(connection) {
   chatBackfillDone = true;
 }
 
+// Add 'group' to the chat type enum on an EXISTING table (custom group chats).
+let chatGroupTypeEnsured = false;
+async function ensureChatGroupType(connection) {
+  if (chatGroupTypeEnsured) return;
+  try {
+    const [[col]] = await connection.query(
+      `SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_conversations' AND COLUMN_NAME='type'`
+    );
+    if (col && !/'group'/.test(String(col.COLUMN_TYPE))) {
+      await connection.query("ALTER TABLE chat_conversations MODIFY COLUMN type ENUM('job','lead','direct','group') NOT NULL");
+    }
+  } catch (e) { /* non-fatal */ }
+  chatGroupTypeEnsured = true;
+}
+
 // One-time cleanup: a lead converted to a job (job.lead_id set, lead.status=3) left
 // BOTH a lead chat and a job chat → the same project showed twice. Merge the lead
 // chat INTO the job chat (moving any messages/attachments/members, so nothing is
@@ -1346,6 +1362,7 @@ async function ensureChatMergeConvertedLeadChats(connection) {
 
 module.exports = {
   ensureChatTables,
+  ensureChatGroupType,
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,

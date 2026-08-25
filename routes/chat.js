@@ -50,6 +50,19 @@ router.post("/direct", async (req, res) => {
   } catch (e) { res.status(500).json({ message: "Could not open the conversation." }); }
 });
 
+// Create a custom GROUP chat (2+ people, named). Creator is the owner.
+router.post("/group", async (req, res) => {
+  try {
+    const name = String((req.body && req.body.name) || "").trim();
+    const userIds = Array.isArray(req.body && req.body.user_ids)
+      ? req.body.user_ids.map(Number).filter(Boolean)
+      : [];
+    if (!name) return res.status(400).json({ message: "Group name is required." });
+    const convId = await chat.createGroup(pool, req.user.id, name, userIds);
+    res.json({ conversation_id: convId });
+  } catch (e) { res.status(500).json({ message: "Could not create the group." }); }
+});
+
 // --- everything below operates on a conversation the caller must be a member of ---
 async function requireMember(req, res, next) {
   try {

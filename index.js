@@ -8,7 +8,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
-const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatBackfill, ensureChatMergeConvertedLeadChats } = require("./services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatBackfill, ensureChatMergeConvertedLeadChats } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
 const userRoute = require("./routes/users");
 const contactRoute = require("./routes/contacts");
@@ -202,6 +202,7 @@ const startServer = async (retries = 5, delay = 5000) => {
                 await ensureUserTokenVersionColumn(migrationConn);
                 await ensureDeviceTokenUnique(migrationConn);
                 await ensureChatTables(migrationConn);
+                await ensureChatGroupType(migrationConn);
                 await ensureChatBackfill(migrationConn);
                 await ensureChatMergeConvertedLeadChats(migrationConn);
             } catch (err) {
