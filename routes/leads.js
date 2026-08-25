@@ -8,6 +8,7 @@ const { isSameAccount, requireLevel } = require("../utils/access");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { ensureJobColorColumn } = require("../services/dbMigrations");
 const { pickJobColor } = require("../services/jobColorPalette");
+const chat = require("../services/chat");
 const { upload } = require("../services/fileUpload");
 const path = require("path");
 const fs = require("fs");
@@ -746,6 +747,10 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, requireLevel(4), 
       `UPDATE leads SET status = '3', user_id = ? WHERE id = ?`,
       [userId, leadId]
     );
+
+    // Hand the lead's chat to the new job so there's ONE chat per project (the
+    // converted lead no longer gets its own — see the chat dedupe migration).
+    try { await chat.migrateLeadChatToJob(connection, leadId, newJobId); } catch (e) { logger.error('convert-to-job chat migrate failed: ' + e.message); }
 
     await connection.commit();
     res.json({ message: "Lead converted to Job successfully", jobId: newJobId });

@@ -26,7 +26,7 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     // Minimal real-ish schema the chat code touches.
     await conn.query('CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(80), business VARCHAR(120) NULL, image VARCHAR(255) NULL, status TINYINT DEFAULT 1, created_by INT NULL, token_version INT DEFAULT 0)');
     await conn.query('CREATE TABLE job (id INT PRIMARY KEY, name VARCHAR(120), created_by INT, status TINYINT DEFAULT 1, color VARCHAR(9) NULL)');
-    await conn.query('CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(120), user_id INT)');
+    await conn.query('CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(120), user_id INT, status VARCHAR(4) NULL)');
     await conn.query('CREATE TABLE job_contacts (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, job_id INT, contact_id INT)');
     await conn.query('CREATE TABLE user_device_tokens (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, fcm_token VARCHAR(255) NULL)');
     await conn.query(`INSERT INTO \`user\`(id,name,business,created_by) VALUES

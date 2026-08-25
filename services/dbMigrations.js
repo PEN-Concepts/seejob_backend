@@ -1294,7 +1294,7 @@ async function ensureChatBackfill(connection) {
     FROM leads l
     LEFT JOIN chat_conversations c ON c.type='lead' AND c.lead_id = l.id
     LEFT JOIN user u ON u.id = l.user_id
-    WHERE c.id IS NULL`);
+    WHERE c.id IS NULL AND (l.status IS NULL OR l.status <> 3)`); /* skip CONVERTED leads (status 3 → became a job) */
   await connection.query(`
     INSERT IGNORE INTO chat_members (conversation_id, user_id, role, joined_at)
     SELECT c.id, c.created_by, 'owner', NOW()
@@ -1311,9 +1311,43 @@ async function ensureChatBackfill(connection) {
   chatBackfillDone = true;
 }
 
+// One-time cleanup: a lead converted to a job (job.lead_id set, lead.status=3) left
+// BOTH a lead chat and a job chat → the same project showed twice. Merge the lead
+// chat INTO the job chat (moving any messages/attachments/members, so nothing is
+// lost), then delete the redundant lead chat. Idempotent (finds no pairs once done).
+let chatMergeDone = false;
+async function ensureChatMergeConvertedLeadChats(connection) {
+  if (chatMergeDone) return;
+  const [pairs] = await connection.query(`
+    SELECT jc.id AS job_conv, lc.id AS lead_conv
+      FROM job j
+      JOIN chat_conversations jc ON jc.type='job'  AND jc.job_id  = j.id
+      JOIN chat_conversations lc ON lc.type='lead' AND lc.lead_id = j.lead_id
+     WHERE j.lead_id IS NOT NULL`);
+  for (const p of pairs) {
+    await connection.query('UPDATE chat_messages SET conversation_id=? WHERE conversation_id=?', [p.job_conv, p.lead_conv]);
+    await connection.query('UPDATE chat_message_attachments SET conversation_id=? WHERE conversation_id=?', [p.job_conv, p.lead_conv]);
+    await connection.query(
+      "INSERT IGNORE INTO chat_members (conversation_id, user_id, role, joined_at) SELECT ?, user_id, 'member', NOW() FROM chat_members WHERE conversation_id=?",
+      [p.job_conv, p.lead_conv]
+    );
+    await connection.query('DELETE FROM chat_members WHERE conversation_id=?', [p.lead_conv]);
+    await connection.query('DELETE FROM chat_conversations WHERE id=?', [p.lead_conv]);
+    await connection.query(
+      `UPDATE chat_conversations c
+          SET last_message_at = (SELECT MAX(created_at) FROM chat_messages WHERE conversation_id=c.id),
+              last_message_preview = (SELECT body FROM chat_messages WHERE conversation_id=c.id ORDER BY id DESC LIMIT 1)
+        WHERE c.id=?`,
+      [p.job_conv]
+    );
+  }
+  chatMergeDone = true;
+}
+
 module.exports = {
   ensureChatTables,
   ensureChatBackfill,
+  ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,
   ensureDeviceTokenUnique,
   dropUserMobileUniqueIndex,

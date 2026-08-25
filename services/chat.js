@@ -91,6 +91,25 @@ async function getOrCreateDirect(conn, aId, bId) {
   return res.insertId;
 }
 
+/** Lead→job conversion: hand the lead's existing chat to the new job so there's
+ *  ONE chat per project (no lead+job duplicate). Re-points the lead conversation
+ *  to the job, or merges into the job's chat if one already exists. */
+async function migrateLeadChatToJob(conn, leadId, jobId) {
+  const c = conn || pool;
+  const [[leadConv]] = await c.query("SELECT id FROM chat_conversations WHERE type='lead' AND lead_id=? LIMIT 1", [leadId]);
+  if (!leadConv) return;
+  const [[jobConv]] = await c.query("SELECT id FROM chat_conversations WHERE type='job' AND job_id=? LIMIT 1", [jobId]);
+  if (!jobConv) {
+    await c.query("UPDATE chat_conversations SET type='job', job_id=?, lead_id=NULL WHERE id=?", [jobId, leadConv.id]);
+    return;
+  }
+  await c.query('UPDATE chat_messages SET conversation_id=? WHERE conversation_id=?', [jobConv.id, leadConv.id]);
+  await c.query('UPDATE chat_message_attachments SET conversation_id=? WHERE conversation_id=?', [jobConv.id, leadConv.id]);
+  await c.query("INSERT IGNORE INTO chat_members (conversation_id, user_id, role, joined_at) SELECT ?, user_id, 'member', NOW() FROM chat_members WHERE conversation_id=?", [jobConv.id, leadConv.id]);
+  await c.query('DELETE FROM chat_members WHERE conversation_id=?', [leadConv.id]);
+  await c.query('DELETE FROM chat_conversations WHERE id=?', [leadConv.id]);
+}
+
 // ---- reads ----
 /** My conversations, newest activity first, with unread count + display + accent. */
 async function listMyConversations(userId) {
@@ -251,6 +270,6 @@ async function markRead(conversationId, userId, lastMessageId) {
 
 module.exports = {
   db, isMember, addMember, removeMember,
-  getOrCreateJobConversation, getOrCreateLeadConversation, getOrCreateDirect,
+  getOrCreateJobConversation, getOrCreateLeadConversation, getOrCreateDirect, migrateLeadChatToJob,
   listMyConversations, totalUnread, getMessages, postMessage, markRead,
 };
