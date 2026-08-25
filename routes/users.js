@@ -660,9 +660,9 @@ router.post("/login-pin", async (req, res) => {
       must_change_password: user.must_change_password,
     };
 
-    const token = jwt.sign(payload, process.env.ACCESS_TOKEN, {
-      expiresIn: "7d",
-    });
+    const platform = req.body && req.body.platform === "mobile" ? "mobile" : "web";
+    const tokenVersion = await auth.getTokenVersion(user.id);
+    const token = auth.signSession(payload, { platform, tokenVersion });
 
     res.status(200).json({
       code: "200",
@@ -877,11 +877,10 @@ const rights = userRightsRows || [];
       must_change_password,
     };
 
-    const accessToken = jwt.sign(
-      response,
-      process.env.ACCESS_TOKEN,
-      { expiresIn: "7d" }
-    );
+    // Embed token_version for the server-side revoke check; honor a mobile login.
+    const platform = req.body && req.body.platform === "mobile" ? "mobile" : "web";
+    const tokenVersion = await auth.getTokenVersion(id);
+    const accessToken = auth.signSession(response, { platform, tokenVersion });
 
     logger.info(`Login successful: User ID ${id}`);
 
@@ -1109,11 +1108,12 @@ router.post("/login-otp-verify", async (req, res) => {
       must_change_password,
     };
 
-    const accessToken = jwt.sign(
-      response,
-      process.env.ACCESS_TOKEN,
-      { expiresIn: "7d" }
-    );
+    // Platform-aware session: a phone (/m) gets a long-lived, self-renewing token
+    // so it never re-prompts for OTP; web keeps 7 days. token_version is embedded
+    // so a remote revoke invalidates it instantly. (See services/authentication.js.)
+    const platform = req.body && req.body.platform === "mobile" ? "mobile" : "web";
+    const tokenVersion = await auth.getTokenVersion(id);
+    const accessToken = auth.signSession(response, { platform, tokenVersion });
 
     const photoName = image || "user.png";
 
@@ -1272,6 +1272,51 @@ router.post("/saveDeviceToken", auth.authenticateToken, async (req, res) => {
   } catch (error) {
     logger.error("Error saving FCM token:", error);
     res.status(500).json({ code: "500", message: "Internal Server Error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+// Remotely revoke a person's access (lost phone / departed employee). Owner-only,
+// own-account-only. Bumps token_version so EVERY live token that person holds fails
+// its next request (401 → the client clears it + returns to /login), and deletes
+// their push tokens so notifications stop immediately. This does NOT deactivate the
+// account — they can log in again with a fresh OTP; to also block re-login, use
+// Employee → Resign (status=0), which the same server-side check now enforces live.
+router.post("/revoke-access/:id", auth.authenticateToken, async (req, res) => {
+  const targetId = Number(req.params.id);
+  if (!targetId) return res.status(400).json({ message: "Missing user id." });
+  // Only the owning account may revoke, and only its own people.
+  if (Number(targetId) !== Number(req.user.id) && !(await isSameAccount(req.user.id, targetId))) {
+    return res.status(403).json({ message: "You can only revoke access for people in your account." });
+  }
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    // Kill push immediately (works regardless of the token_version migration).
+    await connection.query("DELETE FROM user_device_tokens WHERE user_id = ?", [targetId]);
+    // Invalidate every live session token. Requires the token_version column;
+    // tolerate its absence so this never 500s before the migration is run.
+    let sessionRevoked = false;
+    try {
+      await connection.query(
+        "UPDATE `user` SET token_version = COALESCE(token_version, 0) + 1 WHERE id = ?",
+        [targetId]
+      );
+      sessionRevoked = true;
+    } catch (colErr) {
+      logger.warn("revoke-access: token_version column missing — run the migration to enable live-session revoke (user " + targetId + ")");
+    }
+    return res.status(200).json({
+      code: "200",
+      message: sessionRevoked
+        ? "Access revoked — the device will be signed out on its next action."
+        : "Push tokens cleared. Run the token_version migration to fully revoke live sessions.",
+      sessionRevoked,
+    });
+  } catch (e) {
+    logger.error("revoke-access error: " + e.message);
+    return res.status(500).json({ message: "Internal Server Error" });
   } finally {
     if (connection) connection.release();
   }

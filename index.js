@@ -64,6 +64,9 @@ const corsOptions = {
     return cb(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true,
+  // Expose the sliding-session renewal header so the browser lets the client read
+  // it (authenticateToken sets X-Renewed-Token on a renewed mobile token).
+  exposedHeaders: ["X-Renewed-Token"],
 };
 
 app.use(cors(corsOptions));
