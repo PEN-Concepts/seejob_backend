@@ -1177,7 +1177,46 @@ async function ensureSuggestedItemsTable(connection) {
   suggestedItemsEnsured = true;
 }
 
+// Persistent-mobile-login revoke: a bumpable version stamp embedded in each JWT.
+// authenticateToken rejects a token whose tv != the user's current token_version,
+// giving a real remote "sign out this person everywhere" without waiting for expiry.
+let tokenVersionEnsured = false;
+async function ensureUserTokenVersionColumn(connection) {
+  if (tokenVersionEnsured) return;
+  const [[row]] = await connection.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = 'token_version'`
+  );
+  if (!row) {
+    await connection.query('ALTER TABLE `user` ADD COLUMN token_version INT NOT NULL DEFAULT 0');
+  }
+  tokenVersionEnsured = true;
+}
+
+// One FCM token = one device install → make it globally UNIQUE so a registration
+// race can never leave duplicate rows (the duplicate-push cause). Dedupe first
+// (keep the newest row per token), then add the index. Idempotent.
+let deviceTokenUniqueEnsured = false;
+async function ensureDeviceTokenUnique(connection) {
+  if (deviceTokenUniqueEnsured) return;
+  const [existing] = await connection.query(
+    "SHOW INDEX FROM user_device_tokens WHERE Column_name = 'fcm_token' AND Non_unique = 0"
+  );
+  if (existing && existing.length) { deviceTokenUniqueEnsured = true; return; }
+  // Collapse duplicate rows of the same token down to the newest id (a token
+  // belongs to whichever device/user registered it last), so the UNIQUE can apply.
+  await connection.query(
+    `DELETE t1 FROM user_device_tokens t1
+       JOIN user_device_tokens t2
+         ON t1.fcm_token = t2.fcm_token AND t1.fcm_token IS NOT NULL AND t1.id < t2.id`
+  );
+  await connection.query('ALTER TABLE user_device_tokens ADD UNIQUE KEY uniq_fcm_token (fcm_token)');
+  deviceTokenUniqueEnsured = true;
+}
+
 module.exports = {
+  ensureUserTokenVersionColumn,
+  ensureDeviceTokenUnique,
   dropUserMobileUniqueIndex,
   ensureSuggestedItemsTable,
   seedSuggestedItems,
