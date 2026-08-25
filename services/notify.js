@@ -50,7 +50,9 @@ async function sendPushToUser(conn, userId, { title, body, url, type, urgent, as
   const db = conn || pool;
   try {
     const [rows] = await db.query(
-      'SELECT fcm_token FROM user_device_tokens WHERE user_id = ?',
+      // DISTINCT: a registration race can leave two rows with the SAME token for a
+      // user → without this the recipient gets duplicate pushes for one event.
+      'SELECT DISTINCT fcm_token FROM user_device_tokens WHERE user_id = ?',
       [userId]
     );
     const tokens = rows.map((r) => r.fcm_token).filter(Boolean);

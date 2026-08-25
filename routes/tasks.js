@@ -397,9 +397,10 @@ router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (
       [actorId, recipientId, contentText, url, actorId]
     );
 
-    // Send an FCM push to EVERY device the recipient has registered.
+    // Send an FCM push to EVERY device the recipient has registered (DISTINCT so a
+    // duplicated token row can't double-send).
     const [tokens] = await pool.query(
-      'SELECT fcm_token FROM user_device_tokens WHERE user_id=?',
+      'SELECT DISTINCT fcm_token FROM user_device_tokens WHERE user_id=?',
       [recipientId]
     );
     for (const row of tokens) {
@@ -1429,7 +1430,8 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       // FCM push to every device on file. `notification` block so iOS/Safari PWAs
       // display it. Title = app name; body = the task's own text (no framing).
       const [tokRows] = await connection.query(
-        "SELECT fcm_token FROM user_device_tokens WHERE user_id=?",
+        // DISTINCT so a duplicated token row can't double-send one push.
+        "SELECT DISTINCT fcm_token FROM user_device_tokens WHERE user_id=?",
         [receiverId]
       );
       for (const row of tokRows) {

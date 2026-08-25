@@ -1231,34 +1231,43 @@ router.post("/saveDeviceToken", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
-    // Check if user already has a token
-    const [existing] = await connection.query(
-      "SELECT id, fcm_token FROM user_device_tokens WHERE user_id = ?",
-      [user_id]
+    // An FCM token identifies exactly ONE device install. Idempotent registration
+    // that (a) can't create duplicate rows for the same token, and (b) supports a
+    // user having MULTIPLE real devices (one row per distinct token):
+    //   1) This token belongs to whoever is registering it now — detach it from any
+    //      other user (device handed over / account switch on the same phone).
+    await connection.query(
+      "DELETE FROM user_device_tokens WHERE fcm_token = ? AND user_id <> ?",
+      [fcm_token, user_id]
     );
-
-    if (existing.length === 0) {
-      // Insert if no token found for this user
+    //   2) Collapse any duplicate rows of THIS token for THIS user down to one, then
+    //      bump its timestamp. If none exist, insert a single row. (The old logic
+    //      looked only at existing[0], so a race-created 2nd row was never cleaned —
+    //      that is the duplicate-push cause. A UNIQUE(fcm_token) index is the durable
+    //      fix; see the migration handed to Poul.)
+    const [mine] = await connection.query(
+      "SELECT id FROM user_device_tokens WHERE user_id = ? AND fcm_token = ? ORDER BY id",
+      [user_id, fcm_token]
+    );
+    if (mine.length === 0) {
       await connection.query(
         "INSERT INTO user_device_tokens (user_id, fcm_token, created_at) VALUES (?, ?, NOW())",
         [user_id, fcm_token]
       );
-
       return res.status(200).json({ code: "200", message: "Token inserted" });
     }
-
-    // Token exists â†’ check if it is different
-    if (existing[0].fcm_token !== fcm_token) {
+    if (mine.length > 1) {
+      const keep = mine[0].id;
       await connection.query(
-        "UPDATE user_device_tokens SET fcm_token = ?, updated_at = NOW() WHERE id = ?",
-        [fcm_token, existing[0].id]
+        "DELETE FROM user_device_tokens WHERE user_id = ? AND fcm_token = ? AND id <> ?",
+        [user_id, fcm_token, keep]
       );
-
-      return res.status(200).json({ code: "200", message: "Token updated" });
     }
-
-    // Token is same â†’ no action
-    res.status(200).json({ code: "200", message: "Token already up to date" });
+    await connection.query(
+      "UPDATE user_device_tokens SET updated_at = NOW() WHERE user_id = ? AND fcm_token = ?",
+      [user_id, fcm_token]
+    );
+    res.status(200).json({ code: "200", message: "Token up to date" });
 
   } catch (error) {
     logger.error("Error saving FCM token:", error);
