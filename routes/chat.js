@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const chat = require("../services/chat");
+const { upload } = require("../services/fileUpload");
 
 // Every route requires a valid session.
 router.use(auth.authenticateToken);
@@ -77,6 +78,31 @@ router.post("/conversations/:id/messages", requireMember, async (req, res) => {
     if (!message) return res.status(400).json({ message: "Empty message." });
     res.json({ message });
   } catch (e) { res.status(500).json({ message: "Could not send the message." }); }
+});
+
+// Post 1–10 photos to a conversation (Part E "save & share to chat"): saves the
+// files, creates a chat message with image attachments, and for a JOB chat ALSO
+// files them into that job's photo library (job_documents type='photo') — one
+// copy, appears in both the chat and Files.
+router.post("/conversations/:id/photos", requireMember, upload.array("photos", 10), async (req, res) => {
+  try {
+    const convId = Number(req.params.id);
+    if (!req.files || !req.files.length) return res.status(400).json({ message: "No photos." });
+    const attachments = req.files.map((f) => ({
+      type: "image", file_path: `/uploads/${f.filename}`, file_name: f.originalname, mime_type: f.mimetype,
+    }));
+    const [[conv]] = await pool.query("SELECT type, job_id FROM chat_conversations WHERE id=? LIMIT 1", [convId]);
+    if (conv && conv.type === "job" && conv.job_id) {
+      for (const f of req.files) {
+        await pool.query(
+          "INSERT INTO job_documents (path, name, job_id, mime_type, created_by, created_at, type) VALUES (?, ?, ?, ?, ?, NOW(), 'photo')",
+          [`/uploads/${f.filename}`, f.originalname, conv.job_id, f.mimetype, req.user.id]
+        ).catch(() => {});
+      }
+    }
+    const message = await chat.postMessage({ conversationId: convId, senderId: req.user.id, body: (req.body && req.body.body) || "", attachments });
+    res.json({ message });
+  } catch (e) { res.status(500).json({ message: "Could not post photos." }); }
 });
 
 router.post("/conversations/:id/read", requireMember, async (req, res) => {
