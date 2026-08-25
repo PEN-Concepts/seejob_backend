@@ -8,7 +8,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
-const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique } = require("./services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatBackfill } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
 const userRoute = require("./routes/users");
 const contactRoute = require("./routes/contacts");
@@ -42,6 +42,9 @@ const bids = require("./routes/bids");
 const reminders = require("./routes/reminders");
 const scheduleTemplates = require("./routes/scheduleTemplates");
 const jobSchedules = require("./routes/jobSchedules");
+const chatRoute = require("./routes/chat");
+const http = require("http");
+const realtime = require("./services/realtime");
 const app = express();
 const api = process.env.API_URL;
 
@@ -108,6 +111,7 @@ app.use(`${api}/quote`, quote);
 app.use(`${api}/safety_course`, safety);
 app.use(`${api}/tasks`, tasks);
 app.use(`${api}/leads`, leads);
+app.use(`${api}/chat`, chatRoute);
 app.use(`${api}/support_ticket`, supportTicket);
 app.use(`${api}/pins`, pins);
 app.use(`${api}/notifications`, notify);
@@ -197,13 +201,21 @@ const startServer = async (retries = 5, delay = 5000) => {
                 await ensureTaskAssigneesTable(migrationConn);
                 await ensureUserTokenVersionColumn(migrationConn);
                 await ensureDeviceTokenUnique(migrationConn);
+                await ensureChatTables(migrationConn);
+                await ensureChatBackfill(migrationConn);
             } catch (err) {
                 logger.error('boot migrations failed:', err);
             } finally {
                 if (migrationConn) migrationConn.release();
             }
             const port = process.env.PORT || 3000;
-            app.listen(port, () => logger.info(`Listening on port ${port}`));
+            // Own the http.Server (was a discarded app.listen) so Socket.IO can
+            // attach to it for real-time chat. In-process, single PM2 fork → no
+            // Redis adapter. Best-effort: if socket.io isn't installed the app
+            // still serves REST + offline chat via FCM.
+            const server = http.createServer(app);
+            realtime.init(server, logger);
+            server.listen(port, () => logger.info(`Listening on port ${port}`));
             return;
         } else {
             logger.warn(`Retrying to connect to the database... (${retries - 1} retries left)`);

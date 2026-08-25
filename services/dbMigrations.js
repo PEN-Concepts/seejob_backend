@@ -1214,7 +1214,106 @@ async function ensureDeviceTokenUnique(connection) {
   deviceTokenUniqueEnsured = true;
 }
 
+// ── Chat system (group chat per Job/Lead + 1:1 DMs) ──────────────────────────
+// Four tables modeled on the existing task_assignees/tasks_images patterns.
+let chatTablesEnsured = false;
+async function ensureChatTables(connection) {
+  if (chatTablesEnsured) return;
+  await connection.query(`CREATE TABLE IF NOT EXISTS chat_conversations (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    type ENUM('job','lead','direct') NOT NULL,
+    job_id INT NULL,
+    lead_id INT NULL,
+    dm_key VARCHAR(40) NULL,
+    title VARCHAR(160) NULL,
+    owner_id INT NULL,
+    created_by INT NULL,
+    last_message_at DATETIME NULL,
+    last_message_preview VARCHAR(200) NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_dm (dm_key),
+    UNIQUE KEY uniq_job (job_id),
+    UNIQUE KEY uniq_lead (lead_id),
+    INDEX idx_conv_owner (owner_id),
+    INDEX idx_conv_lastmsg (last_message_at)
+  ) ENGINE=InnoDB`);
+  await connection.query(`CREATE TABLE IF NOT EXISTS chat_members (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT NOT NULL,
+    user_id INT NOT NULL,
+    role ENUM('owner','member') NOT NULL DEFAULT 'member',
+    last_read_message_id INT NULL,
+    muted TINYINT NOT NULL DEFAULT 0,
+    joined_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_conv_user (conversation_id, user_id),
+    INDEX idx_cm_user (user_id),
+    INDEX idx_cm_conv (conversation_id)
+  ) ENGINE=InnoDB`);
+  await connection.query(`CREATE TABLE IF NOT EXISTS chat_messages (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    conversation_id INT NOT NULL,
+    sender_id INT NOT NULL,
+    body TEXT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_msg_conv (conversation_id, id)
+  ) ENGINE=InnoDB`);
+  await connection.query(`CREATE TABLE IF NOT EXISTS chat_message_attachments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    message_id INT NOT NULL,
+    conversation_id INT NOT NULL,
+    type ENUM('image','file','link') NOT NULL DEFAULT 'file',
+    file_path VARCHAR(255) NULL,
+    file_name VARCHAR(255) NULL,
+    mime_type VARCHAR(120) NULL,
+    url VARCHAR(500) NULL,
+    uploaded_by INT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_att_msg (message_id),
+    INDEX idx_att_conv (conversation_id)
+  ) ENGINE=InnoDB`);
+  chatTablesEnsured = true;
+}
+
+// One-time (idempotent) backfill: a group conversation for every EXISTING job and
+// lead, with the owner seeded as 'owner' and the job's existing job_contacts as
+// members. Cheap after the first run (the LEFT JOIN … IS NULL sets go empty).
+// Going forward, job/lead CREATE routes create the conversation directly.
+let chatBackfillDone = false;
+async function ensureChatBackfill(connection) {
+  if (chatBackfillDone) return;
+  await connection.query(`
+    INSERT IGNORE INTO chat_conversations (type, job_id, owner_id, created_by, created_at)
+    SELECT 'job', j.id, COALESCE(u.created_by, j.created_by), j.created_by, NOW()
+    FROM job j
+    LEFT JOIN chat_conversations c ON c.type='job' AND c.job_id = j.id
+    LEFT JOIN user u ON u.id = j.created_by
+    WHERE c.id IS NULL`);
+  await connection.query(`
+    INSERT IGNORE INTO chat_conversations (type, lead_id, owner_id, created_by, created_at)
+    SELECT 'lead', l.id, COALESCE(u.created_by, l.user_id), l.user_id, NOW()
+    FROM leads l
+    LEFT JOIN chat_conversations c ON c.type='lead' AND c.lead_id = l.id
+    LEFT JOIN user u ON u.id = l.user_id
+    WHERE c.id IS NULL`);
+  await connection.query(`
+    INSERT IGNORE INTO chat_members (conversation_id, user_id, role, joined_at)
+    SELECT c.id, c.created_by, 'owner', NOW()
+    FROM chat_conversations c
+    LEFT JOIN chat_members m ON m.conversation_id=c.id AND m.user_id=c.created_by
+    WHERE c.type IN ('job','lead') AND c.created_by IS NOT NULL AND m.id IS NULL`);
+  await connection.query(`
+    INSERT IGNORE INTO chat_members (conversation_id, user_id, role, joined_at)
+    SELECT DISTINCT c.id, jc.contact_id, 'member', NOW()
+    FROM chat_conversations c
+    JOIN job_contacts jc ON jc.job_id = c.job_id
+    LEFT JOIN chat_members m ON m.conversation_id=c.id AND m.user_id=jc.contact_id
+    WHERE c.type='job' AND jc.contact_id IS NOT NULL AND m.id IS NULL`);
+  chatBackfillDone = true;
+}
+
 module.exports = {
+  ensureChatTables,
+  ensureChatBackfill,
   ensureUserTokenVersionColumn,
   ensureDeviceTokenUnique,
   dropUserMobileUniqueIndex,
