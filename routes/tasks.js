@@ -388,7 +388,6 @@ router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (
     // appended to the in-app record when a custom message would otherwise omit it.
     const customText = (message == null ? '' : String(message)).trim();
     const bodyText = customText || `${actorName} nudged you on task: "${task.task_name}".`;
-    const pushTitle = `Nudge: ${task.task_name}`;
     const contentText = customText ? `${customText} — "${task.task_name}"` : bodyText;
 
     // Insert notification record
@@ -408,8 +407,10 @@ router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (
       try {
         await admin.messaging().send({
           token: row.fcm_token,
-          notification: { title: pushTitle, body: bodyText },
-          data: { type: 'task_nudge', task_id: String(taskId), url },
+          // DATA-ONLY so our service worker renders it (persistent + our title).
+          // Title = app name; body = the sender's typed nudge (unchanged), falling
+          // back to the default framing when no custom message was typed.
+          data: { type: 'task_nudge', title: 'See Job Run', body: bodyText, task_id: String(taskId), url },
         });
       } catch (err) {
         logger.error('FCM Error:', err);
@@ -1430,12 +1431,16 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       if (!recentDup && recipient && recipient.fcm_token) {
         const fcmMessage = {
           token: recipient.fcm_token,
-          notification: {
-            title: "Task Update",
-            body: notifyMessage,
-          },
+          // DATA-ONLY (no `notification` block): this routes through our service
+          // worker (firebase-messaging-sw onBackgroundMessage), which controls the
+          // title and sets requireInteraction so the notification persists like the
+          // rest of the app's pushes. A `notification` block instead gets auto-shown
+          // by FCM transiently and with an OS-formatted title ("… from SeeJobRun").
+          // Title = the app name; body = the task's own text (no framing sentence).
           data: {
             type: "task_assignment",
+            title: "See Job Run",
+            body: String(task_name || ""),
             task_id: String(req.params.id),
             url,
           },
