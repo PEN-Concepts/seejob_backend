@@ -41,7 +41,12 @@ async function sendEmail(to, subject, text, html) {
 // Data-only FCM push to every device token a user has; prune tokens FCM reports as
 // dead. Adapted from cron/sendReminders.js sendToUser. `conn` may be a pool or a
 // transaction connection; defaults to the shared pool.
-async function sendPushToUser(conn, userId, { title, body, url, type, urgent }) {
+// `asNotification` adds an FCM `notification` block so the OS DISPLAYS the push
+// reliably (including on iOS/Safari PWAs). Without it the message is data-only and
+// depends on the service worker's onBackgroundMessage running showNotification,
+// which iOS PWAs do not do reliably. Default false keeps existing callers
+// (schedule/reminder) unchanged.
+async function sendPushToUser(conn, userId, { title, body, url, type, urgent, asNotification }) {
   const db = conn || pool;
   try {
     const [rows] = await db.query(
@@ -51,7 +56,7 @@ async function sendPushToUser(conn, userId, { title, body, url, type, urgent }) 
     const tokens = rows.map((r) => r.fcm_token).filter(Boolean);
     for (const tok of tokens) {
       try {
-        await admin.messaging().send({
+        const msg = {
           token: tok,
           data: {
             type: String(type || 'schedule'),
@@ -64,7 +69,16 @@ async function sendPushToUser(conn, userId, { title, body, url, type, urgent }) 
             urgent: urgent ? '1' : '0',
           },
           webpush: { headers: { Urgency: 'high' } },
-        });
+        };
+        if (asNotification) {
+          // The SW doesn't run for a `notification`-block message, so fold the
+          // urgent cue into the title (mirrors the SW's red prefix for data-only).
+          msg.notification = {
+            title: urgent ? '🔴 ' + String(title || '') : String(title || ''),
+            body: String(body || ''),
+          };
+        }
+        await admin.messaging().send(msg);
       } catch (e) {
         const code = e && e.code;
         if (

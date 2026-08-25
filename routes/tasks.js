@@ -407,10 +407,11 @@ router.post('/nudge/:id', auth.authenticateToken, denyExpiredFreeWrites, async (
       try {
         await admin.messaging().send({
           token: row.fcm_token,
-          // DATA-ONLY so our service worker renders it (persistent + our title).
-          // Title = app name; body = the sender's typed nudge (unchanged), falling
-          // back to the default framing when no custom message was typed.
-          data: { type: 'task_nudge', title: 'See Job Run', body: bodyText, task_id: String(taskId), url },
+          // `notification` block so iOS/Safari PWAs display it reliably. Title = the
+          // app name; body = the sender's typed nudge (unchanged), falling back to
+          // the default framing when no custom message was typed.
+          notification: { title: 'See Job Run', body: bodyText },
+          data: { type: 'task_nudge', task_id: String(taskId), url },
         });
       } catch (err) {
         logger.error('FCM Error:', err);
@@ -597,11 +598,15 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
         const content = names.length === 1
           ? `${actorName} assigned you a task: "${names[0]}".`
           : `${actorName} assigned you ${names.length} tasks.`;
+        // Push body is the task's own text (no framing sentence), per the CCP; the
+        // in-app notification row keeps the descriptive `content`.
+        const pushBody = names.length === 1 ? names[0] : names.join(', ');
         try {
           await notify.insertNotification(connection, { senderId: signedin_user, receiverId: uid, content, url: '/task' });
           await notify.sendPushToUser(connection, uid, {
-            title: g.urgent ? 'Urgent Task' : 'New Task Assigned',
-            body: content, url: 'task', type: 'task', urgent: g.urgent,
+            title: 'See Job Run',
+            body: pushBody, url: 'task', type: 'task', urgent: g.urgent,
+            asNotification: true, // reliable OS display (incl. iOS PWA)
           });
         } catch (e) { logger.error('task-assign notify (user ' + uid + '): ' + e.message); }
       }
@@ -1431,16 +1436,17 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       if (!recentDup && recipient && recipient.fcm_token) {
         const fcmMessage = {
           token: recipient.fcm_token,
-          // DATA-ONLY (no `notification` block): this routes through our service
-          // worker (firebase-messaging-sw onBackgroundMessage), which controls the
-          // title and sets requireInteraction so the notification persists like the
-          // rest of the app's pushes. A `notification` block instead gets auto-shown
-          // by FCM transiently and with an OS-formatted title ("… from SeeJobRun").
-          // Title = the app name; body = the task's own text (no framing sentence).
-          data: {
-            type: "task_assignment",
+          // Keep a `notification` block so the OS DISPLAYS the push reliably,
+          // including on iOS/Safari PWAs. (A data-only message needs the service
+          // worker's onBackgroundMessage JS to run showNotification, which iOS PWAs
+          // do not do reliably — that regressed display to nothing.) Wording per the
+          // CCP: title = the app name; body = the task's own text (no framing).
+          notification: {
             title: "See Job Run",
             body: String(task_name || ""),
+          },
+          data: {
+            type: "task_assignment",
             task_id: String(req.params.id),
             url,
           },
