@@ -131,7 +131,8 @@ async function migrateLeadChatToJob(conn, leadId, jobId) {
 async function listMyConversations(userId) {
   const [rows] = await pool.query(
     `SELECT c.id, c.type, c.job_id, c.lead_id, c.title, c.last_message_at, c.last_message_preview,
-            c.owner_id, m.role AS my_role,
+            c.owner_id,
+            (CASE WHEN ow.category = 1 AND ow.created_by IS NOT NULL THEN ow.created_by ELSE c.owner_id END) AS acct_owner,
             j.name AS job_name, j.color AS job_color, j.status AS job_status,
             l.lead_name AS lead_name, l.bid_status AS lead_bid_status,
             (SELECT COUNT(*) FROM chat_messages msg
@@ -142,6 +143,7 @@ async function listMyConversations(userId) {
        JOIN chat_conversations c ON c.id = m.conversation_id
        LEFT JOIN job j   ON c.type='job'  AND j.id = c.job_id
        LEFT JOIN leads l ON c.type='lead' AND l.id = c.lead_id
+       LEFT JOIN \`user\` ow ON ow.id = c.owner_id
       WHERE m.user_id = ?
       ORDER BY c.last_message_at IS NULL, c.last_message_at DESC, c.id DESC`,
     [userId, userId]
@@ -173,8 +175,9 @@ async function listMyConversations(userId) {
       id: r.id, type: r.type, job_id: r.job_id, lead_id: r.lead_id, status,
       name, accent, last_message_at: r.last_message_at,
       last_message_preview: r.last_message_preview, unread: Number(r.unread) || 0,
-      // is_owner reuses the Members-panel "Owner" role → gates chat deletion.
-      is_owner: r.my_role === "owner" || Number(r.owner_id) === Number(userId),
+      // is_owner = the ACCOUNT owner (the boss) of this chat's account → gates
+      // deletion for ALL chat types (an employee who starts a group is NOT the boss).
+      is_owner: Number(r.acct_owner) === Number(userId),
       members: [], member_count: 0,
     });
   }
@@ -380,6 +383,36 @@ async function editMessage({ conversationId, messageId, userId, body }) {
   return payload;
 }
 
+// Delete a single message — its OWN sender only. Removes the message + its
+// attachments (unlinking upload files not shared with the job library or another
+// chat) + reactions. Emits `chat:message-deleted` to members.
+async function deleteMessage({ conversationId, messageId, userId }) {
+  const [[msg]] = await pool.query(
+    "SELECT sender_id FROM chat_messages WHERE id = ? AND conversation_id = ? LIMIT 1",
+    [messageId, conversationId]
+  );
+  if (!msg) return { error: "notfound" };
+  if (Number(msg.sender_id) !== Number(userId)) return { error: "forbidden" };
+  const [atts] = await pool.query("SELECT file_path FROM chat_message_attachments WHERE message_id = ?", [messageId]);
+  await pool.query("DELETE FROM chat_message_reactions WHERE message_id = ?", [messageId]).catch(() => {});
+  await pool.query("DELETE FROM chat_message_attachments WHERE message_id = ?", [messageId]);
+  await pool.query("DELETE FROM chat_messages WHERE id = ?", [messageId]);
+  const fs = require("fs");
+  const path = require("path");
+  for (const a of atts) {
+    const fp = String(a.file_path || "");
+    if (!/\/?uploads\//i.test(fp)) continue;
+    const [[jd]] = await pool.query("SELECT id FROM job_documents WHERE path = ? LIMIT 1", [fp]).catch(() => [[null]]);
+    const [[oc]] = await pool.query("SELECT id FROM chat_message_attachments WHERE file_path = ? LIMIT 1", [fp]);
+    if (jd || oc) continue;
+    fs.unlink(path.join(__dirname, "..", "uploads", path.basename(fp)), () => {});
+  }
+  const [members] = await pool.query("SELECT user_id FROM chat_members WHERE conversation_id = ?", [conversationId]);
+  const payload = { conversation_id: Number(conversationId), message_id: Number(messageId) };
+  for (const m of members) realtime.emitToUser(Number(m.user_id), "chat:message-deleted", payload);
+  return { ok: true };
+}
+
 // PERMANENT owner-only deletion of a whole conversation: removes reactions,
 // attachments, messages, members and the conversation itself for everyone, and
 // unlinks orphaned upload files. Files still referenced by the job's photo
@@ -387,12 +420,12 @@ async function editMessage({ conversationId, messageId, userId, body }) {
 async function deleteConversation({ conversationId, userId }) {
   const [[conv]] = await pool.query("SELECT id, owner_id FROM chat_conversations WHERE id = ? LIMIT 1", [conversationId]);
   if (!conv) return { error: "notfound" };
-  const [[ownerMember]] = await pool.query(
-    "SELECT id FROM chat_members WHERE conversation_id = ? AND user_id = ? AND role = 'owner' LIMIT 1",
-    [conversationId, userId]
-  );
-  const isOwner = Number(conv.owner_id) === Number(userId) || !!ownerMember;
-  if (!isOwner) return { error: "forbidden" };
+  // ACCOUNT-owner only ("only the boss") — for ALL chat types incl. custom groups.
+  // resolveOwnerId maps an employee creator up to their account owner, so a group
+  // an employee started can still only be deleted by the boss, never the employee.
+  const access = require("../utils/access");
+  const acctOwner = await access.resolveOwnerId(Number(conv.owner_id));
+  if (Number(userId) !== Number(acctOwner)) return { error: "forbidden" };
 
   const [atts] = await pool.query("SELECT file_path FROM chat_message_attachments WHERE conversation_id = ?", [conversationId]);
   const [members] = await pool.query("SELECT user_id FROM chat_members WHERE conversation_id = ?", [conversationId]);
@@ -429,5 +462,5 @@ module.exports = {
   db, isMember, addMember, removeMember,
   getOrCreateJobConversation, getOrCreateLeadConversation, getOrCreateDirect, createGroup, migrateLeadChatToJob,
   listMyConversations, totalUnread, getMessages, postMessage, markRead, reactToMessage,
-  editMessage, deleteConversation,
+  editMessage, deleteMessage, deleteConversation,
 };

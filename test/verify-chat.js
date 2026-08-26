@@ -24,14 +24,14 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     conn = await pool.getConnection();
 
     // Minimal real-ish schema the chat code touches.
-    await conn.query('CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(80), business VARCHAR(120) NULL, image VARCHAR(255) NULL, status TINYINT DEFAULT 1, created_by INT NULL, token_version INT DEFAULT 0)');
+    await conn.query('CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(80), business VARCHAR(120) NULL, image VARCHAR(255) NULL, status TINYINT DEFAULT 1, created_by INT NULL, category INT NULL, token_version INT DEFAULT 0)');
     await conn.query('CREATE TABLE job (id INT PRIMARY KEY, name VARCHAR(120), created_by INT, status TINYINT DEFAULT 1, color VARCHAR(9) NULL)');
     await conn.query('CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(120), user_id INT, status VARCHAR(4) NULL, bid_status VARCHAR(20) NULL)');
     await conn.query('CREATE TABLE job_contacts (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, job_id INT, contact_id INT)');
     await conn.query('CREATE TABLE user_device_tokens (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, fcm_token VARCHAR(255) NULL)');
     await conn.query('CREATE TABLE job_documents (id INT AUTO_INCREMENT PRIMARY KEY, path VARCHAR(255), name VARCHAR(255), job_id INT, type VARCHAR(20))');
-    await conn.query(`INSERT INTO \`user\`(id,name,business,created_by) VALUES
-      (74,'Owner Poul',NULL,NULL),(372,'Rolando','C & R TILE',74),(360,'John','John Painting',74)`);
+    await conn.query(`INSERT INTO \`user\`(id,name,business,created_by,category) VALUES
+      (74,'Owner Poul',NULL,NULL,NULL),(372,'Rolando','C & R TILE',74,1),(360,'John','John Painting',74,1)`);
     await conn.query("INSERT INTO job (id,name,created_by,status,color) VALUES (100,'Lynes ADU',74,1,'#3b82f6')");
     await conn.query("INSERT INTO leads (id,lead_name,user_id) VALUES (200,'Mann ADU',74)");
     await conn.query('INSERT INTO job_contacts (user_id,job_id,contact_id) VALUES (74,100,372)');
@@ -182,6 +182,29 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     ok(r.status === 403, "edit: another member can't edit someone else's message (403)");
     r = await as(74).patch(`/chat/conversations/${grpConv}/messages/${editId}`).send({ body: '   ' });
     ok(r.status === 400, 'edit: empty body rejected (400)');
+
+    // 10a) single-message delete — own sender only
+    r = await as(372).post(`/chat/conversations/${grpConv}/messages`).send({ body: 'oops typo' });
+    const delMsgId = r.body.message.id;
+    r = await as(74).delete(`/chat/conversations/${grpConv}/messages/${delMsgId}`);
+    ok(r.status === 403, "msg-delete: can't delete someone else's message (403)");
+    r = await as(372).delete(`/chat/conversations/${grpConv}/messages/${delMsgId}`);
+    ok(r.status === 200, 'msg-delete: sender deletes their own message (200)');
+    r = await as(372).get(`/chat/conversations/${grpConv}/messages`);
+    ok(!r.body.messages.some((m) => m.id === delMsgId), 'msg-delete: the message is gone on read-back');
+
+    // 10b) an EMPLOYEE who starts a group is NOT the boss → cannot delete it; only
+    //      the account owner (74) can (even though the employee is the chat 'owner').
+    r = await as(372).post('/chat/group').send({ name: 'Ad-hoc Crew', user_ids: [74, 360] });
+    const empGrp = r.body.conversation_id;
+    r = await as(372).get('/chat/conversations');
+    ok(r.body.conversations.find((c) => c.id === empGrp).is_owner === false, 'delete: employee CREATOR of a group is NOT is_owner (not the boss)');
+    r = await as(74).get('/chat/conversations');
+    ok(r.body.conversations.find((c) => c.id === empGrp).is_owner === true, 'delete: the account owner IS is_owner on an employee-made group');
+    r = await as(372).delete(`/chat/conversations/${empGrp}`);
+    ok(r.status === 403, 'delete: the employee creator cannot delete their own group (403)');
+    r = await as(74).delete(`/chat/conversations/${empGrp}`);
+    ok(r.status === 200, 'delete: the account owner CAN delete the employee-made group (200)');
 
     // 11) owner-only permanent chat deletion (+ list is_owner flag)
     r = await as(74).get('/chat/conversations');

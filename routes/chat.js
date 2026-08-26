@@ -134,6 +134,16 @@ router.patch("/conversations/:id/messages/:msgId", requireMember, async (req, re
   } catch (e) { res.status(500).json({ message: "Could not edit the message." }); }
 });
 
+// Delete a single message (its own sender only).
+router.delete("/conversations/:id/messages/:msgId", requireMember, async (req, res) => {
+  try {
+    const r = await chat.deleteMessage({ conversationId: Number(req.params.id), messageId: Number(req.params.msgId), userId: req.user.id });
+    if (r && r.error === "forbidden") return res.status(403).json({ message: "You can only delete your own message." });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "Message not found." });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: "Could not delete the message." }); }
+});
+
 // PERMANENT owner-only deletion of a whole conversation (chat + messages + files).
 router.delete("/conversations/:id", requireMember, async (req, res) => {
   try {
