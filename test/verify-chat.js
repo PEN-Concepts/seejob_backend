@@ -102,6 +102,47 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     r = await as(74).get(`/chat/conversations/${jobConv}/members`);
     ok(r.body.members.some(m => m.user_id === 74 && m.role === 'owner'), 'owner cannot be removed');
 
+    // 7) custom GROUP chat (Pass 3 / Part 2): create, membership, accent, messaging
+    await mig.ensureChatGroupType(conn); // enum must include 'group'
+    r = await as(74).post('/chat/group').send({ name: 'Weekend Crew', user_ids: [372, 360] });
+    ok(r.status === 200 && r.body.conversation_id, 'POST /group: creates a custom group');
+    const grpConv = r.body.conversation_id;
+    r = await as(74).get(`/chat/conversations/${grpConv}/members`);
+    ok(r.body.members.length === 3 && r.body.members.some(m => m.user_id === 74 && m.role === 'owner')
+       && r.body.members.some(m => m.user_id === 372) && r.body.members.some(m => m.user_id === 360),
+       'group: creator is owner + both invitees are members');
+    r = await as(74).get('/chat/conversations');
+    const grpRow = r.body.conversations.find(c => c.id === grpConv);
+    ok(grpRow && grpRow.name === 'Weekend Crew' && grpRow.accent === '#5c6570' && grpRow.type === 'group',
+       'group: lists with title, neutral accent, type=group');
+    // messaging in the group actually works (post + a different member reads it)
+    r = await as(360).post(`/chat/conversations/${grpConv}/messages`).send({ body: 'On my way' });
+    ok(r.status === 200 && r.body.message.body === 'On my way', 'group: member can post a message');
+    r = await as(372).get(`/chat/conversations/${grpConv}/messages`);
+    ok(r.status === 200 && r.body.messages.some(m => m.body === 'On my way'), 'group: another member reads it');
+    r = await as(372).get('/chat/conversations');
+    ok(r.body.conversations.find(c => c.id === grpConv).unread === 1, 'group: unread counts for the other member');
+    // a non-member cannot post/read the group
+    r = await as(999).get(`/chat/conversations/${grpConv}/messages`);
+    ok(r.status === 403, 'group: non-member is refused (403)');
+
+    // 8) message with image ATTACHMENTS (E.5 "share to chat" path): sendMessage with
+    //    attachments referencing existing files → read back with file_path + preview.
+    r = await as(74).post(`/chat/conversations/${jobConv}/messages`).send({
+      body: '', attachments: [
+        { type: 'image', file_path: '/uploads/site-a.jpg', file_name: 'site-a.jpg' },
+        { type: 'image', file_path: '/uploads/site-b.jpg', file_name: 'site-b.jpg' },
+      ],
+    });
+    ok(r.status === 200 && r.body.message.id, 'attachments: photo-only message accepted (no body)');
+    r = await as(372).get(`/chat/conversations/${jobConv}/messages`);
+    const withAtt = r.body.messages.find(m => (m.attachments || []).length === 2);
+    ok(withAtt && withAtt.attachments.every(a => a.type === 'image' && a.file_path && /uploads/.test(a.file_path)),
+       'attachments: read back with type=image + file_path');
+    r = await as(74).get('/chat/conversations');
+    ok(r.body.conversations.find(c => c.id === jobConv).last_message_preview === '📷 Photo',
+       'attachments: list preview shows "📷 Photo" for a photo-only message');
+
     console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'}: ${pass} passed, ${fail} failed`);
     process.exitCode = fail === 0 ? 0 : 1;
   } catch (e) { console.error('ERROR:', e && e.stack ? e.stack : e); process.exitCode = 2; }
