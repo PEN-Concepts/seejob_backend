@@ -353,8 +353,13 @@ async function postMessage({ conversationId, senderId, body, attachments }) {
     realtime.emitToUser(uid, "chat:message", message);
     if (!realtime.isUserOnline(uid)) {
       const pushBody = text ? `${senderName}: ${preview}` : `${senderName} sent a photo`;
+      // DATA-ONLY (no asNotification): a hybrid notification+data payload made the
+      // browser auto-display the notification block AND the SW's onBackgroundMessage
+      // display the data → TWO notifications per message. Data-only shows exactly one
+      // (via the SW), matching the non-duplicating schedule/reminder path. `url` is
+      // the real thread route so the SW can deep-link into THIS conversation.
       notify.sendPushToUser(pool, uid, {
-        title: convName, body: pushBody, url: `chat/${conversationId}`, type: "chat", asNotification: true,
+        title: convName, body: pushBody, url: `m/chat/${conversationId}`, type: "chat",
       }).catch(() => {});
     }
   }

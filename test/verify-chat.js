@@ -145,6 +145,20 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     ok(r.body.conversations.find(c => c.id === jobConv).last_message_preview === '📷 Photo',
        'attachments: list preview shows "📷 Photo" for a photo-only message');
 
+    // 8b) push notification: exactly ONE per offline recipient (not the sender),
+    //     data-only (no asNotification → no duplicate), deep-linked to the thread.
+    const notifyMod = require('../services/notify');
+    const origPush = notifyMod.sendPushToUser;
+    const pushCalls = [];
+    notifyMod.sendPushToUser = async (conn, userId, opts) => { pushCalls.push({ userId, opts }); };
+    await as(74).post(`/chat/conversations/${grpConv}/messages`).send({ body: 'ping' });
+    await new Promise((r) => setTimeout(r, 50)); // pushes are fire-and-forget
+    notifyMod.sendPushToUser = origPush;
+    const recips = pushCalls.map((c) => Number(c.userId)).sort();
+    ok(pushCalls.length === 2 && recips.join(',') === '360,372', 'push: one per offline recipient (both members, not the sender)');
+    ok(pushCalls.every((c) => c.opts.url === `m/chat/${grpConv}` && c.opts.type === 'chat'), 'push: deep-links to m/chat/<conversationId>, type=chat');
+    ok(pushCalls.every((c) => !c.opts.asNotification), 'push: data-only (no asNotification block → no duplicate display)');
+
     // 9) message reactions (tapbacks) — toggle semantics + validation + read-back
     await mig.ensureChatReactionsTable(conn);
     // 74 reacts 👍 on the job message
