@@ -1311,6 +1311,25 @@ async function ensureChatBackfill(connection) {
   chatBackfillDone = true;
 }
 
+// Message reactions ("tapbacks") — one emoji per user per message (tap a new one
+// to replace, the same one to remove). Idempotent create.
+let chatReactionsEnsured = false;
+async function ensureChatReactionsTable(connection) {
+  if (chatReactionsEnsured) return;
+  await connection.query(`CREATE TABLE IF NOT EXISTS chat_message_reactions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    message_id INT NOT NULL,
+    conversation_id INT NOT NULL,
+    user_id INT NOT NULL,
+    emoji VARCHAR(16) NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_msg_user (message_id, user_id),
+    INDEX idx_react_msg (message_id),
+    INDEX idx_react_conv (conversation_id)
+  ) ENGINE=InnoDB`);
+  chatReactionsEnsured = true;
+}
+
 // Add 'group' to the chat type enum on an EXISTING table (custom group chats).
 let chatGroupTypeEnsured = false;
 async function ensureChatGroupType(connection) {
@@ -1363,6 +1382,7 @@ async function ensureChatMergeConvertedLeadChats(connection) {
 module.exports = {
   ensureChatTables,
   ensureChatGroupType,
+  ensureChatReactionsTable,
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,

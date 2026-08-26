@@ -227,19 +227,65 @@ async function getMessages(conversationId, { before, limit } = {}) {
   );
   const ids = rows.map((r) => r.id);
   let attByMsg = {};
+  let rxByMsg = {};
   if (ids.length) {
+    const ph = ids.map(() => "?").join(",");
     const [atts] = await pool.query(
       `SELECT id, message_id, type, file_path, file_name, url FROM chat_message_attachments
-        WHERE message_id IN (${ids.map(() => "?").join(",")})`,
+        WHERE message_id IN (${ph})`,
       ids
     );
     for (const a of atts) { (attByMsg[a.message_id] = attByMsg[a.message_id] || []).push(a); }
+    const [rx] = await pool.query(
+      `SELECT message_id, user_id, emoji FROM chat_message_reactions WHERE message_id IN (${ph})`,
+      ids
+    ).catch(() => [[]]); // table may not exist yet on a very old DB → no reactions
+    for (const r of (rx || [])) { (rxByMsg[r.message_id] = rxByMsg[r.message_id] || []).push({ user_id: r.user_id, emoji: r.emoji }); }
   }
   return rows.reverse().map((r) => ({
     id: r.id, conversation_id: r.conversation_id, sender_id: r.sender_id,
     sender_name: r.sender_business || r.sender_name, body: r.body,
-    created_at: r.created_at, attachments: attByMsg[r.id] || [],
+    created_at: r.created_at, attachments: attByMsg[r.id] || [], reactions: rxByMsg[r.id] || [],
   }));
+}
+
+// Allowed quick-react emoji (validated server-side so only these are stored).
+const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "👏", "🔥", "👎"];
+
+/** Toggle a user's reaction on a message (one per user): same emoji removes it,
+ *  a different emoji replaces it, none adds it. Returns the message's full
+ *  reaction list and live-emits `chat:reaction` to every member. */
+async function reactToMessage({ conversationId, messageId, userId, emoji }) {
+  if (!REACTION_EMOJI.includes(String(emoji))) return null;
+  const [[msg]] = await pool.query(
+    "SELECT id FROM chat_messages WHERE id = ? AND conversation_id = ? LIMIT 1",
+    [messageId, conversationId]
+  );
+  if (!msg) return null;
+  const [[existing]] = await pool.query(
+    "SELECT id, emoji FROM chat_message_reactions WHERE message_id = ? AND user_id = ? LIMIT 1",
+    [messageId, userId]
+  );
+  if (existing) {
+    if (existing.emoji === emoji) {
+      await pool.query("DELETE FROM chat_message_reactions WHERE id = ?", [existing.id]);
+    } else {
+      await pool.query("UPDATE chat_message_reactions SET emoji = ?, created_at = NOW() WHERE id = ?", [emoji, existing.id]);
+    }
+  } else {
+    await pool.query(
+      "INSERT INTO chat_message_reactions (message_id, conversation_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?, NOW())",
+      [messageId, conversationId, userId, emoji]
+    );
+  }
+  const [reactions] = await pool.query(
+    "SELECT user_id, emoji FROM chat_message_reactions WHERE message_id = ?",
+    [messageId]
+  );
+  const payload = { conversation_id: Number(conversationId), message_id: Number(messageId), reactions };
+  const [members] = await pool.query("SELECT user_id FROM chat_members WHERE conversation_id = ?", [conversationId]);
+  for (const m of members) realtime.emitToUser(Number(m.user_id), "chat:reaction", payload);
+  return reactions;
 }
 
 async function conversationDisplayName(conversationId, forUserId) {
@@ -318,5 +364,5 @@ async function markRead(conversationId, userId, lastMessageId) {
 module.exports = {
   db, isMember, addMember, removeMember,
   getOrCreateJobConversation, getOrCreateLeadConversation, getOrCreateDirect, createGroup, migrateLeadChatToJob,
-  listMyConversations, totalUnread, getMessages, postMessage, markRead,
+  listMyConversations, totalUnread, getMessages, postMessage, markRead, reactToMessage,
 };

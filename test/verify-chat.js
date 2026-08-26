@@ -143,6 +143,31 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     ok(r.body.conversations.find(c => c.id === jobConv).last_message_preview === '📷 Photo',
        'attachments: list preview shows "📷 Photo" for a photo-only message');
 
+    // 9) message reactions (tapbacks) — toggle semantics + validation + read-back
+    await mig.ensureChatReactionsTable(conn);
+    // 74 reacts 👍 on the job message
+    r = await as(74).post(`/chat/conversations/${jobConv}/messages/${msgId}/react`).send({ emoji: '👍' });
+    ok(r.status === 200 && r.body.reactions.length === 1 && r.body.reactions[0].emoji === '👍', 'react: 👍 added');
+    // 372 reacts ❤️ on the same message → two reactions
+    r = await as(372).post(`/chat/conversations/${jobConv}/messages/${msgId}/react`).send({ emoji: '❤️' });
+    ok(r.status === 200 && r.body.reactions.length === 2, 'react: a second member adds a different emoji');
+    // 74 taps 👍 again → removed (toggle off) → back to one
+    r = await as(74).post(`/chat/conversations/${jobConv}/messages/${msgId}/react`).send({ emoji: '👍' });
+    ok(r.body.reactions.length === 1 && r.body.reactions[0].user_id === 372, 'react: same emoji toggles off');
+    // 372 switches ❤️ → 🔥 (replace, still one per user)
+    r = await as(372).post(`/chat/conversations/${jobConv}/messages/${msgId}/react`).send({ emoji: '🔥' });
+    ok(r.body.reactions.length === 1 && r.body.reactions[0].emoji === '🔥', 'react: different emoji replaces (one per user)');
+    // invalid emoji rejected
+    r = await as(74).post(`/chat/conversations/${jobConv}/messages/${msgId}/react`).send({ emoji: '💩' });
+    ok(r.status === 400, 'react: emoji outside the allow-list is refused (400)');
+    // reactions come back on message read
+    r = await as(372).get(`/chat/conversations/${jobConv}/messages`);
+    const reactedMsg = r.body.messages.find((m) => m.id === msgId);
+    ok(reactedMsg && (reactedMsg.reactions || []).some((x) => x.emoji === '🔥'), 'react: reactions included in getMessages');
+    // non-member cannot react
+    r = await as(360).post(`/chat/conversations/${jobConv}/messages/${msgId}/react`).send({ emoji: '👍' });
+    ok(r.status === 403, 'react: non-member refused (403)');
+
     console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'}: ${pass} passed, ${fail} failed`);
     process.exitCode = fail === 0 ? 0 : 1;
   } catch (e) { console.error('ERROR:', e && e.stack ? e.stack : e); process.exitCode = 2; }

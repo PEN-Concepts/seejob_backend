@@ -118,6 +118,21 @@ router.post("/conversations/:id/photos", requireMember, upload.array("photos", 1
   } catch (e) { res.status(500).json({ message: "Could not post photos." }); }
 });
 
+// Toggle an emoji reaction on a message (one per user). Live-syncs to members.
+router.post("/conversations/:id/messages/:msgId/react", requireMember, async (req, res) => {
+  try {
+    const emoji = String((req.body && req.body.emoji) || "");
+    const reactions = await chat.reactToMessage({
+      conversationId: Number(req.params.id),
+      messageId: Number(req.params.msgId),
+      userId: req.user.id,
+      emoji,
+    });
+    if (reactions === null) return res.status(400).json({ message: "Invalid reaction." });
+    res.json({ reactions });
+  } catch (e) { res.status(500).json({ message: "Could not react." }); }
+});
+
 router.post("/conversations/:id/read", requireMember, async (req, res) => {
   try {
     await chat.markRead(Number(req.params.id), req.user.id, req.body && req.body.last_message_id);
