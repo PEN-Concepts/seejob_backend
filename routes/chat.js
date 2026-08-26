@@ -118,6 +118,32 @@ router.post("/conversations/:id/photos", requireMember, upload.array("photos", 1
   } catch (e) { res.status(500).json({ message: "Could not post photos." }); }
 });
 
+// Edit your own message (within a 2-minute window). Live-syncs to members.
+router.patch("/conversations/:id/messages/:msgId", requireMember, async (req, res) => {
+  try {
+    const r = await chat.editMessage({
+      conversationId: Number(req.params.id),
+      messageId: Number(req.params.msgId),
+      userId: req.user.id,
+      body: req.body && req.body.body,
+    });
+    if (r && r.error === "forbidden") return res.status(403).json({ message: "You can only edit your own message." });
+    if (r && r.error === "expired") return res.status(409).json({ message: "The edit window has passed." });
+    if (r && (r.error === "empty" || r.error === "notfound")) return res.status(400).json({ message: "Could not edit the message." });
+    res.json({ message: r });
+  } catch (e) { res.status(500).json({ message: "Could not edit the message." }); }
+});
+
+// PERMANENT owner-only deletion of a whole conversation (chat + messages + files).
+router.delete("/conversations/:id", requireMember, async (req, res) => {
+  try {
+    const r = await chat.deleteConversation({ conversationId: Number(req.params.id), userId: req.user.id });
+    if (r && r.error === "forbidden") return res.status(403).json({ message: "Only the chat owner can delete this chat." });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "Chat not found." });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: "Could not delete the chat." }); }
+});
+
 // Toggle an emoji reaction on a message (one per user). Live-syncs to members.
 router.post("/conversations/:id/messages/:msgId/react", requireMember, async (req, res) => {
   try {

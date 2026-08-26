@@ -131,6 +131,7 @@ async function migrateLeadChatToJob(conn, leadId, jobId) {
 async function listMyConversations(userId) {
   const [rows] = await pool.query(
     `SELECT c.id, c.type, c.job_id, c.lead_id, c.title, c.last_message_at, c.last_message_preview,
+            c.owner_id, m.role AS my_role,
             j.name AS job_name, j.color AS job_color, j.status AS job_status,
             l.lead_name AS lead_name, l.bid_status AS lead_bid_status,
             (SELECT COUNT(*) FROM chat_messages msg
@@ -172,6 +173,8 @@ async function listMyConversations(userId) {
       id: r.id, type: r.type, job_id: r.job_id, lead_id: r.lead_id, status,
       name, accent, last_message_at: r.last_message_at,
       last_message_preview: r.last_message_preview, unread: Number(r.unread) || 0,
+      // is_owner reuses the Members-panel "Owner" role → gates chat deletion.
+      is_owner: r.my_role === "owner" || Number(r.owner_id) === Number(userId),
       members: [], member_count: 0,
     });
   }
@@ -218,7 +221,7 @@ async function getMessages(conversationId, { before, limit } = {}) {
   let where = "msg.conversation_id = ?";
   if (before) { where += " AND msg.id < ?"; params.push(Number(before)); }
   const [rows] = await pool.query(
-    `SELECT msg.id, msg.conversation_id, msg.sender_id, msg.body, msg.created_at,
+    `SELECT msg.id, msg.conversation_id, msg.sender_id, msg.body, msg.created_at, msg.edited_at,
             u.name AS sender_name, u.business AS sender_business
        FROM chat_messages msg JOIN \`user\` u ON u.id = msg.sender_id
       WHERE ${where}
@@ -245,7 +248,8 @@ async function getMessages(conversationId, { before, limit } = {}) {
   return rows.reverse().map((r) => ({
     id: r.id, conversation_id: r.conversation_id, sender_id: r.sender_id,
     sender_name: r.sender_business || r.sender_name, body: r.body,
-    created_at: r.created_at, attachments: attByMsg[r.id] || [], reactions: rxByMsg[r.id] || [],
+    created_at: r.created_at, edited_at: r.edited_at || null,
+    attachments: attByMsg[r.id] || [], reactions: rxByMsg[r.id] || [],
   }));
 }
 
@@ -354,6 +358,66 @@ async function postMessage({ conversationId, senderId, body, attachments }) {
   return message;
 }
 
+// Edit your own message within a 2-minute window (age computed in SQL to avoid
+// any app/DB timezone skew). Returns {error} or the edited payload; live-emits
+// `chat:message-edit` to all members.
+const EDIT_WINDOW_SECONDS = 120;
+async function editMessage({ conversationId, messageId, userId, body }) {
+  const text = (body == null ? "" : String(body)).trim();
+  if (!text) return { error: "empty" };
+  const [[msg]] = await pool.query(
+    "SELECT sender_id, TIMESTAMPDIFF(SECOND, created_at, NOW()) AS age FROM chat_messages WHERE id = ? AND conversation_id = ? LIMIT 1",
+    [messageId, conversationId]
+  );
+  if (!msg) return { error: "notfound" };
+  if (Number(msg.sender_id) !== Number(userId)) return { error: "forbidden" };
+  if (Number(msg.age) > EDIT_WINDOW_SECONDS) return { error: "expired" };
+  await pool.query("UPDATE chat_messages SET body = ?, edited_at = NOW() WHERE id = ?", [text, messageId]);
+  const [[row]] = await pool.query("SELECT edited_at FROM chat_messages WHERE id = ?", [messageId]);
+  const payload = { conversation_id: Number(conversationId), message_id: Number(messageId), body: text, edited_at: row ? row.edited_at : null };
+  const [members] = await pool.query("SELECT user_id FROM chat_members WHERE conversation_id = ?", [conversationId]);
+  for (const m of members) realtime.emitToUser(Number(m.user_id), "chat:message-edit", payload);
+  return payload;
+}
+
+// PERMANENT owner-only deletion of a whole conversation: removes reactions,
+// attachments, messages, members and the conversation itself for everyone, and
+// unlinks orphaned upload files. Files still referenced by the job's photo
+// library (job_documents) or another chat are KEPT so nothing shared breaks.
+async function deleteConversation({ conversationId, userId }) {
+  const [[conv]] = await pool.query("SELECT id, owner_id FROM chat_conversations WHERE id = ? LIMIT 1", [conversationId]);
+  if (!conv) return { error: "notfound" };
+  const [[ownerMember]] = await pool.query(
+    "SELECT id FROM chat_members WHERE conversation_id = ? AND user_id = ? AND role = 'owner' LIMIT 1",
+    [conversationId, userId]
+  );
+  const isOwner = Number(conv.owner_id) === Number(userId) || !!ownerMember;
+  if (!isOwner) return { error: "forbidden" };
+
+  const [atts] = await pool.query("SELECT file_path FROM chat_message_attachments WHERE conversation_id = ?", [conversationId]);
+  const [members] = await pool.query("SELECT user_id FROM chat_members WHERE conversation_id = ?", [conversationId]);
+
+  await pool.query("DELETE FROM chat_message_reactions WHERE conversation_id = ?", [conversationId]).catch(() => {});
+  await pool.query("DELETE FROM chat_message_attachments WHERE conversation_id = ?", [conversationId]);
+  await pool.query("DELETE FROM chat_messages WHERE conversation_id = ?", [conversationId]);
+  await pool.query("DELETE FROM chat_members WHERE conversation_id = ?", [conversationId]);
+  await pool.query("DELETE FROM chat_conversations WHERE id = ?", [conversationId]);
+
+  // Unlink each upload file only if nothing else still points at it.
+  const fs = require("fs");
+  const path = require("path");
+  for (const a of atts) {
+    const fp = String(a.file_path || "");
+    if (!/\/?uploads\//i.test(fp)) continue;
+    const [[jd]] = await pool.query("SELECT id FROM job_documents WHERE path = ? LIMIT 1", [fp]).catch(() => [[null]]);
+    const [[oc]] = await pool.query("SELECT id FROM chat_message_attachments WHERE file_path = ? LIMIT 1", [fp]);
+    if (jd || oc) continue; // still referenced elsewhere → keep the file
+    fs.unlink(path.join(__dirname, "..", "uploads", path.basename(fp)), () => {});
+  }
+  for (const m of members) realtime.emitToUser(Number(m.user_id), "chat:conversation-deleted", { conversation_id: Number(conversationId) });
+  return { ok: true };
+}
+
 async function markRead(conversationId, userId, lastMessageId) {
   await pool.query(
     "UPDATE chat_members SET last_read_message_id = GREATEST(COALESCE(last_read_message_id,0), ?) WHERE conversation_id = ? AND user_id = ?",
@@ -365,4 +429,5 @@ module.exports = {
   db, isMember, addMember, removeMember,
   getOrCreateJobConversation, getOrCreateLeadConversation, getOrCreateDirect, createGroup, migrateLeadChatToJob,
   listMyConversations, totalUnread, getMessages, postMessage, markRead, reactToMessage,
+  editMessage, deleteConversation,
 };

@@ -29,6 +29,7 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     await conn.query('CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(120), user_id INT, status VARCHAR(4) NULL, bid_status VARCHAR(20) NULL)');
     await conn.query('CREATE TABLE job_contacts (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, job_id INT, contact_id INT)');
     await conn.query('CREATE TABLE user_device_tokens (id INT AUTO_INCREMENT PRIMARY KEY, user_id INT, fcm_token VARCHAR(255) NULL)');
+    await conn.query('CREATE TABLE job_documents (id INT AUTO_INCREMENT PRIMARY KEY, path VARCHAR(255), name VARCHAR(255), job_id INT, type VARCHAR(20))');
     await conn.query(`INSERT INTO \`user\`(id,name,business,created_by) VALUES
       (74,'Owner Poul',NULL,NULL),(372,'Rolando','C & R TILE',74),(360,'John','John Painting',74)`);
     await conn.query("INSERT INTO job (id,name,created_by,status,color) VALUES (100,'Lynes ADU',74,1,'#3b82f6')");
@@ -37,6 +38,7 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
 
     const mig = require('../services/dbMigrations');
     await mig.ensureChatTables(conn);
+    await mig.ensureChatMessageEditColumn(conn);
     ok(!!(await conn.query("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_conversations'"))[0].length, 'ensureChatTables: chat_conversations exists');
     await mig.ensureChatBackfill(conn);
     const convCount = (await conn.query("SELECT COUNT(*) n FROM chat_conversations"))[0][0].n;
@@ -167,6 +169,46 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     // non-member cannot react
     r = await as(360).post(`/chat/conversations/${jobConv}/messages/${msgId}/react`).send({ emoji: '👍' });
     ok(r.status === 403, 'react: non-member refused (403)');
+
+    // 10) 2-minute message editing
+    r = await as(74).post(`/chat/conversations/${grpConv}/messages`).send({ body: 'ontheway' });
+    const editId = r.body.message.id;
+    r = await as(74).patch(`/chat/conversations/${grpConv}/messages/${editId}`).send({ body: 'On the way — 10 min' });
+    ok(r.status === 200 && r.body.message.body === 'On the way — 10 min' && r.body.message.edited_at, 'edit: own message updated within window (edited_at set)');
+    r = await as(372).get(`/chat/conversations/${grpConv}/messages`);
+    const em = r.body.messages.find((m) => m.id === editId);
+    ok(em && em.body === 'On the way — 10 min' && em.edited_at, 'edit: read-back shows new body + edited_at');
+    r = await as(372).patch(`/chat/conversations/${grpConv}/messages/${editId}`).send({ body: 'hijack' });
+    ok(r.status === 403, "edit: another member can't edit someone else's message (403)");
+    r = await as(74).patch(`/chat/conversations/${grpConv}/messages/${editId}`).send({ body: '   ' });
+    ok(r.status === 400, 'edit: empty body rejected (400)');
+
+    // 11) owner-only permanent chat deletion (+ list is_owner flag)
+    r = await as(74).get('/chat/conversations');
+    ok(r.body.conversations.find((c) => c.id === grpConv).is_owner === true, 'delete: creator sees is_owner=true on their group');
+    ok(r.body.conversations.find((c) => c.id === jobConv).is_owner === true, 'delete: owner sees is_owner=true on the job chat');
+    r = await as(372).get('/chat/conversations');
+    ok(r.body.conversations.find((c) => c.id === grpConv).is_owner === false, 'delete: a non-owner member sees is_owner=false');
+    // non-owner cannot delete
+    r = await as(372).delete(`/chat/conversations/${grpConv}`);
+    ok(r.status === 403, 'delete: non-owner is refused (403)');
+    // a referenced upload file (in job_documents) must survive the delete
+    await conn.query("INSERT INTO job_documents (path, name, job_id, type) VALUES ('/uploads/site-a.jpg','site-a.jpg',100,'photo')");
+    // owner deletes the group → gone for everyone
+    r = await as(74).delete(`/chat/conversations/${grpConv}`);
+    ok(r.status === 200, 'delete: owner deletes the custom group (200)');
+    const gone = (await conn.query('SELECT COUNT(*) n FROM chat_conversations WHERE id=?', [grpConv]))[0][0].n;
+    const msgsGone = (await conn.query('SELECT COUNT(*) n FROM chat_messages WHERE conversation_id=?', [grpConv]))[0][0].n;
+    const memGone = (await conn.query('SELECT COUNT(*) n FROM chat_members WHERE conversation_id=?', [grpConv]))[0][0].n;
+    ok(gone === 0 && msgsGone === 0 && memGone === 0, 'delete: conversation + messages + members all removed');
+    r = await as(372).get('/chat/conversations');
+    ok(!r.body.conversations.some((c) => c.id === grpConv), 'delete: the deleted group no longer lists for other members');
+    // owner deletes the JOB chat (which had photo attachments) — file shared with job_documents is kept
+    r = await as(74).delete(`/chat/conversations/${jobConv}`);
+    ok(r.status === 200, 'delete: owner can also delete a job chat (200)');
+    const attGone = (await conn.query('SELECT COUNT(*) n FROM chat_message_attachments WHERE conversation_id=?', [jobConv]))[0][0].n;
+    const jdKept = (await conn.query("SELECT COUNT(*) n FROM job_documents WHERE path='/uploads/site-a.jpg'"))[0][0].n;
+    ok(attGone === 0 && jdKept === 1, 'delete: chat attachments removed but the job-library file row is preserved');
 
     console.log(`\n${fail === 0 ? 'PASS' : 'FAIL'}: ${pass} passed, ${fail} failed`);
     process.exitCode = fail === 0 ? 0 : 1;

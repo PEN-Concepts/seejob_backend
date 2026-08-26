@@ -1311,6 +1311,20 @@ async function ensureChatBackfill(connection) {
   chatBackfillDone = true;
 }
 
+// Add edited_at to chat_messages (2-minute in-place message editing). Idempotent.
+let chatEditColEnsured = false;
+async function ensureChatMessageEditColumn(connection) {
+  if (chatEditColEnsured) return;
+  try {
+    const [[col]] = await connection.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_messages' AND COLUMN_NAME='edited_at'`
+    );
+    if (!col) await connection.query("ALTER TABLE chat_messages ADD COLUMN edited_at DATETIME NULL");
+  } catch (e) { /* non-fatal */ }
+  chatEditColEnsured = true;
+}
+
 // Message reactions ("tapbacks") — one emoji per user per message (tap a new one
 // to replace, the same one to remove). Idempotent create.
 let chatReactionsEnsured = false;
@@ -1383,6 +1397,7 @@ module.exports = {
   ensureChatTables,
   ensureChatGroupType,
   ensureChatReactionsTable,
+  ensureChatMessageEditColumn,
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,
