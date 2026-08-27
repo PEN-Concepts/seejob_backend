@@ -118,6 +118,18 @@ router.post("/conversations/:id/photos", requireMember, upload.array("photos", 1
   } catch (e) { res.status(500).json({ message: "Could not post photos." }); }
 });
 
+// Set a custom icon photo for a conversation (account-owner only).
+router.post("/conversations/:id/icon", requireMember, upload.single("icon"), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ message: "No image." });
+    const iconPath = `/uploads/${req.file.filename}`;
+    const r = await chat.setConversationIcon({ conversationId: Number(req.params.id), userId: req.user.id, iconPath });
+    if (r && r.error === "forbidden") return res.status(403).json({ message: "Only the chat owner can set the photo." });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "Chat not found." });
+    res.json({ icon_url: r.icon_url });
+  } catch (e) { res.status(500).json({ message: "Could not set the photo." }); }
+});
+
 // Edit your own message (within a 2-minute window). Live-syncs to members.
 router.patch("/conversations/:id/messages/:msgId", requireMember, async (req, res) => {
   try {

@@ -39,6 +39,7 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     const mig = require('../services/dbMigrations');
     await mig.ensureChatTables(conn);
     await mig.ensureChatMessageEditColumn(conn);
+    await mig.ensureChatIconColumn(conn);
     ok(!!(await conn.query("SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_conversations'"))[0].length, 'ensureChatTables: chat_conversations exists');
     await mig.ensureChatBackfill(conn);
     const convCount = (await conn.query("SELECT COUNT(*) n FROM chat_conversations"))[0][0].n;
@@ -219,6 +220,15 @@ const ok = (c, m) => { c ? pass++ : fail++; console.log(`${c ? '  ✓' : '  ✗ 
     ok(r.status === 403, 'delete: the employee creator cannot delete their own group (403)');
     r = await as(74).delete(`/chat/conversations/${empGrp}`);
     ok(r.status === 200, 'delete: the account owner CAN delete the employee-made group (200)');
+
+    // 10c) chat icon photo — account-owner only; returned in the list
+    const chat = require('../services/chat');
+    let ic = await chat.setConversationIcon({ conversationId: jobConv, userId: 372, iconPath: '/uploads/x.jpg' });
+    ok(ic && ic.error === 'forbidden', 'icon: a non-owner cannot set the chat photo');
+    ic = await chat.setConversationIcon({ conversationId: jobConv, userId: 74, iconPath: '/uploads/oak.jpg' });
+    ok(ic && ic.icon_url === '/uploads/oak.jpg', 'icon: the account owner sets the chat photo');
+    r = await as(74).get('/chat/conversations');
+    ok(r.body.conversations.find((c) => c.id === jobConv).icon_url === '/uploads/oak.jpg', 'icon: icon_url is returned in listMyConversations');
 
     // 11) owner-only permanent chat deletion (+ list is_owner flag)
     r = await as(74).get('/chat/conversations');

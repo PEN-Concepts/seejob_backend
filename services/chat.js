@@ -131,7 +131,7 @@ async function migrateLeadChatToJob(conn, leadId, jobId) {
 async function listMyConversations(userId) {
   const [rows] = await pool.query(
     `SELECT c.id, c.type, c.job_id, c.lead_id, c.title, c.last_message_at, c.last_message_preview,
-            c.owner_id,
+            c.owner_id, c.icon_url,
             (CASE WHEN ow.category = 1 AND ow.created_by IS NOT NULL THEN ow.created_by ELSE c.owner_id END) AS acct_owner,
             j.name AS job_name, j.color AS job_color, j.status AS job_status,
             l.lead_name AS lead_name, l.bid_status AS lead_bid_status,
@@ -178,6 +178,7 @@ async function listMyConversations(userId) {
       // is_owner = the ACCOUNT owner (the boss) of this chat's account → gates
       // deletion for ALL chat types (an employee who starts a group is NOT the boss).
       is_owner: Number(r.acct_owner) === Number(userId),
+      icon_url: r.icon_url || null,
       members: [], member_count: 0,
     });
   }
@@ -456,6 +457,17 @@ async function deleteConversation({ conversationId, userId }) {
   return { ok: true };
 }
 
+// Set a conversation's custom icon photo — ACCOUNT owner only (same gate as delete).
+async function setConversationIcon({ conversationId, userId, iconPath }) {
+  const [[conv]] = await pool.query("SELECT owner_id FROM chat_conversations WHERE id = ? LIMIT 1", [conversationId]);
+  if (!conv) return { error: "notfound" };
+  const access = require("../utils/access");
+  const acctOwner = await access.resolveOwnerId(Number(conv.owner_id));
+  if (Number(userId) !== Number(acctOwner)) return { error: "forbidden" };
+  await pool.query("UPDATE chat_conversations SET icon_url = ? WHERE id = ?", [iconPath, conversationId]);
+  return { icon_url: iconPath };
+}
+
 async function markRead(conversationId, userId, lastMessageId) {
   await pool.query(
     "UPDATE chat_members SET last_read_message_id = GREATEST(COALESCE(last_read_message_id,0), ?) WHERE conversation_id = ? AND user_id = ?",
@@ -467,5 +479,5 @@ module.exports = {
   db, isMember, addMember, removeMember,
   getOrCreateJobConversation, getOrCreateLeadConversation, getOrCreateDirect, createGroup, migrateLeadChatToJob,
   listMyConversations, totalUnread, getMessages, postMessage, markRead, reactToMessage,
-  editMessage, deleteMessage, deleteConversation,
+  editMessage, deleteMessage, deleteConversation, setConversationIcon,
 };

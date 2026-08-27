@@ -1311,6 +1311,20 @@ async function ensureChatBackfill(connection) {
   chatBackfillDone = true;
 }
 
+// Add icon_url to chat_conversations (owner-set custom chat photo). Idempotent.
+let chatIconColEnsured = false;
+async function ensureChatIconColumn(connection) {
+  if (chatIconColEnsured) return;
+  try {
+    const [[col]] = await connection.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_conversations' AND COLUMN_NAME='icon_url'`
+    );
+    if (!col) await connection.query("ALTER TABLE chat_conversations ADD COLUMN icon_url VARCHAR(500) NULL");
+  } catch (e) { /* non-fatal */ }
+  chatIconColEnsured = true;
+}
+
 // Add edited_at to chat_messages (2-minute in-place message editing). Idempotent.
 let chatEditColEnsured = false;
 async function ensureChatMessageEditColumn(connection) {
@@ -1398,6 +1412,7 @@ module.exports = {
   ensureChatGroupType,
   ensureChatReactionsTable,
   ensureChatMessageEditColumn,
+  ensureChatIconColumn,
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,
