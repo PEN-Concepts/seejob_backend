@@ -2103,6 +2103,16 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
     String(req.query?.includeArchived ?? '').trim() === '1' ||
     String(req.query?.includeArchived ?? '').trim().toLowerCase() === 'true';
   const archivedClause = includeArchived ? '' : 'AND t.archived_at IS NULL';
+  // Opt-in (mobile Task Manager): return jobs/leads of ALL statuses so the client status
+  // chips (Active/Completed/Archived/Leads) have the full set to filter. Web omits this
+  // param, so its payload is unchanged (active jobs + non-archived leads only).
+  const allStatuses =
+    String(req.query?.allStatuses ?? '').trim() === '1' ||
+    String(req.query?.allStatuses ?? '').trim().toLowerCase() === 'true';
+  const jobStatusClause = allStatuses ? '' : 'AND j.status = 1';
+  const leadStatusClause = allStatuses
+    ? ''
+    : "AND (l.status IS NULL OR l.status <> 3) AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')";
   let connection;
 
   try {
@@ -2144,7 +2154,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
              WHERE LOWER(t.task_type) = 'job' AND t.job_id IS NOT NULL
                AND (t.user_id = ? OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
            )
-           AND j.status = 1
+           ${jobStatusClause}
          ORDER BY j.sort_order ASC, j.id ASC`;
       jobsParams = [loggedInUserId, loggedInUserId];
     } else {
@@ -2164,7 +2174,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
                WHERE t.team_id IS NOT NULL AND tu.user_id = ?
              )
            )
-           AND j.status = 1
+           ${jobStatusClause}
          ORDER BY j.sort_order ASC, j.id ASC`;
       jobsParams = [loggedInUserId, managerId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId];
     }
@@ -2194,8 +2204,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
                WHERE LOWER(t.task_type) = 'lead' AND t.team_id IS NOT NULL AND tu.user_id = ?
              )
            )
-           AND (l.status IS NULL OR l.status <> 3)
-           AND (l.bid_status IS NULL OR l.bid_status <> 'Archived')
+           ${leadStatusClause}
          ORDER BY l.created_at DESC`;
       leadsParams = [managerId, loggedInUserId];
     }
