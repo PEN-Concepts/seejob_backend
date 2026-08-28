@@ -10,6 +10,7 @@ const pool = require('./config/connection');
 const logger = require("./common/logger");
 const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatBackfill, ensureChatMergeConvertedLeadChats } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
+const { repaletteOrphanedColors } = require("./services/jobColorPalette");
 const userRoute = require("./routes/users");
 const contactRoute = require("./routes/contacts");
 const publicRoute = require("./routes/publics");
@@ -208,6 +209,13 @@ const startServer = async (retries = 5, delay = 5000) => {
                 await ensureChatIconColumn(migrationConn);
                 await ensureChatBackfill(migrationConn);
                 await ensureChatMergeConvertedLeadChats(migrationConn);
+                // Recolour any active job holding a colour dropped in the 2026-08-27
+                // pool revision onto a distinct current colour (idempotent; valid
+                // colours kept). Log the count.
+                try {
+                    const recolored = await repaletteOrphanedColors(migrationConn);
+                    if (recolored > 0) logger.info(`repaletteOrphanedColors: recoloured ${recolored} job(s) onto the revised pool`);
+                } catch (e) { logger.error('repaletteOrphanedColors failed:', e); }
             } catch (err) {
                 logger.error('boot migrations failed:', err);
             } finally {

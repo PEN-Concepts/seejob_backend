@@ -13,22 +13,31 @@
 // Approved muted, RED-FREE 47-colour pool (task #53). Order is verbatim from the
 // approved list — do not reorder/substitute. Sunflower #fdb813 intentionally
 // matches the brand Sunflower (owner's explicit choice for this pool).
+// Revised distinct 35-colour pool (2026-08-27, Poul-approved): removed the
+// near-duplicate / too-pale / muddy tones from the old 46, added spread in
+// rust / burnt-orange / royal-blue. #c1651d stays a normal pool colour.
+// #FF4D00 is NOT in the pool — it is RESERVED as the GC-assigned signal (below).
 const JOB_COLORS = [
-  // Orange / rust (4) — #a8461f removed (too close to the other rusts; per owner)
-  '#c1651d', '#8a4a2e', '#b5794f', '#a95e3b',
-  // Gold / amber / yellow (6)
-  '#c68a1f', '#c9a227', '#d4a017', '#a67c2e', '#fdb813', '#d6c148',
-  // Brown (5)
-  '#6b4226', '#4a3a2a', '#8f6a45', '#725649', '#422619',
-  // Tan / camel (7)
-  '#b8834f', '#c9a878', '#dcc39a', '#b8b08a', '#cbb573', '#d5d1b9', '#c1bda1',
-  // Green (9)
-  '#6b7a2e', '#4a7a3d', '#8a9a7a', '#3ea88a', '#1f5c45', '#9adcc2', '#879c2e', '#6fb89a', '#2fbab0',
-  // Blue / teal (8)
-  '#2f7d7d', '#7fa8c9', '#3b6f9b', '#3d4a8a', '#b3a6e6', '#4689b5', '#6a7c90', '#866dd1',
+  // Orange / rust / burnt (6) — #cc5500 burnt, #c1651d orange, #b7410e rust,
+  // #a95e3b terracotta, #9e4624 deep rust, #b5794f camel (lightest)
+  '#cc5500', '#c1651d', '#b7410e', '#a95e3b', '#9e4624', '#b5794f',
+  // Gold / amber (3)
+  '#d4a017', '#fdb813', '#d6c148',
+  // Brown (3)
+  '#6b4226', '#8f6a45', '#422619',
+  // Tan / camel (3)
+  '#c9a878', '#dcc39a', '#cbb573',
+  // Green (6)
+  '#4a7a3d', '#879c2e', '#8a9a7a', '#3ea88a', '#1f5c45', '#2fbab0',
+  // Blue / teal (7) — #2c52a0 = deepened royal blue (true #4169e1 too bright here)
+  '#2f7d7d', '#7fa8c9', '#3b6f9b', '#3d4a8a', '#4689b5', '#6a7c90', '#2c52a0',
   // Purple / pink (7)
-  '#6b3b9b', '#7a3d6b', '#a83e7a', '#b5788a', '#aa91b6', '#926ca4', '#60294d',
+  '#6b3b9b', '#7a3d6b', '#a83e7a', '#b5788a', '#aa91b6', '#866dd1', '#60294d',
 ];
+
+// RESERVED — never auto-assigned to any job. Rendered at view time for a
+// subcontractor/contractor on a job a GC assigned to them ("this came from a GC").
+const RESERVED_GC_COLOR = '#ff4d00';
 
 // Family index ranges within JOB_COLORS (46 colours after removing one rust),
 // listed in a WARM/COOL-ALTERNATING traversal order so the round-robin picks a
@@ -37,13 +46,13 @@ const JOB_COLORS = [
 // tan) instead of a run of warm tones. The JOB_COLORS list itself is unchanged;
 // this is only the order families are visited when assigning.
 const FAMILIES = [
-  [0, 3],    // orange/rust (warm)
-  [22, 30],  // green (cool)
-  [4, 9],    // gold/amber (warm)
-  [31, 38],  // blue/teal (cool)
-  [10, 14],  // brown (warm)
-  [39, 45],  // purple/pink (cool)
-  [15, 21],  // tan/camel (warm)
+  [0, 5],    // orange/rust/burnt (warm)
+  [15, 20],  // green (cool)
+  [6, 8],    // gold/amber (warm)
+  [21, 27],  // blue/teal (cool)
+  [9, 11],   // brown (warm)
+  [28, 34],  // purple/pink (cool)
+  [12, 14],  // tan/camel (warm)
 ];
 
 // PICK_ORDER: the SAME 47 colours, but walked round-robin across families so
@@ -152,4 +161,46 @@ async function backfillJobColors(connection, opts = {}) {
   return { apply, reassign, scanned: rows.length, filled, plan };
 }
 
-module.exports = { JOB_COLORS, pickJobColor, backfillJobColors };
+const JOB_COLOR_SET = new Set(JOB_COLORS.map((c) => c.toLowerCase()));
+
+/**
+ * One-time-EFFECT, idempotent recolour for a pool revision (2026-08-27). Recolours
+ * only ACTIVE jobs whose stored colour is no longer in the pool (removed in the
+ * revision) onto a distinct current pool colour, per account. Jobs holding a
+ * still-valid colour (e.g. Lynes #c1651d, Samuel #6b4226, Kasberger #2f7d7d) are
+ * left untouched. Naturally idempotent: after one run no active job holds an
+ * orphaned colour, so re-runs are no-ops; #ff4d00 is not in the pool so is never
+ * assigned. Safe to wire into boot.
+ */
+async function repaletteOrphanedColors(connection) {
+  const [rows] = await connection.query(
+    `SELECT j.id, j.color, COALESCE(u.created_by, j.created_by) AS account_root
+       FROM job j LEFT JOIN \`user\` u ON u.id = j.created_by
+      WHERE j.status = 1 AND j.color IS NOT NULL AND j.color <> ''
+      ORDER BY j.id ASC`
+  );
+  const byAccount = new Map();
+  for (const r of rows) {
+    if (!byAccount.has(r.account_root)) byAccount.set(r.account_root, []);
+    byAccount.get(r.account_root).push(r);
+  }
+  let recolored = 0;
+  for (const [, jobs] of byAccount) {
+    const used = new Set(
+      jobs.map((j) => String(j.color || '').toLowerCase()).filter((c) => JOB_COLOR_SET.has(c))
+    );
+    for (const j of jobs) {
+      const c = String(j.color || '').trim().toLowerCase();
+      if (JOB_COLOR_SET.has(c)) continue; // still a valid pool colour → keep it
+      const color =
+        PICK_ORDER.find((x) => !used.has(x.toLowerCase())) ||
+        PICK_ORDER[used.size % PICK_ORDER.length];
+      used.add(color.toLowerCase());
+      await connection.query('UPDATE job SET color = ? WHERE id = ?', [color, j.id]);
+      recolored++;
+    }
+  }
+  return recolored;
+}
+
+module.exports = { JOB_COLORS, RESERVED_GC_COLOR, pickJobColor, backfillJobColors, repaletteOrphanedColors };

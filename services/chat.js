@@ -133,7 +133,7 @@ async function listMyConversations(userId) {
     `SELECT c.id, c.type, c.job_id, c.lead_id, c.title, c.last_message_at, c.last_message_preview,
             c.owner_id, c.icon_url,
             (CASE WHEN ow.category = 1 AND ow.created_by IS NOT NULL THEN ow.created_by ELSE c.owner_id END) AS acct_owner,
-            j.name AS job_name, j.color AS job_color, j.status AS job_status,
+            j.name AS job_name, j.color AS job_color, j.status AS job_status, j.created_by AS job_created_by,
             l.lead_name AS lead_name, l.bid_status AS lead_bid_status,
             (SELECT COUNT(*) FROM chat_messages msg
                WHERE msg.conversation_id = c.id
@@ -148,6 +148,13 @@ async function listMyConversations(userId) {
       ORDER BY c.last_message_at IS NULL, c.last_message_at DESC, c.id DESC`,
     [userId, userId]
   );
+  // GC-assigned override (Part C): a JOB chat whose job was created OUTSIDE the viewer's
+  // account (a GC assigned it to this sub) shows the reserved orange accent instead of
+  // the job's palette colour. Employees fold into the owner's account so they're not
+  // flagged. Leads unaffected.
+  const access = require("../utils/access");
+  const { RESERVED_GC_COLOR } = require("./jobColorPalette");
+  const viewerOwner = Number(await access.resolveOwnerId(Number(userId))) || Number(userId);
   const out = [];
   for (const r of rows) {
     let name = r.title || "";
@@ -155,7 +162,10 @@ async function listMyConversations(userId) {
     // Normalized status (matches the Jobs page rowStatus rule) for the list filter.
     let status = "direct";
     if (r.type === "job") {
-      name = r.job_name || "Job"; accent = r.job_color || null;
+      name = r.job_name || "Job";
+      const cb = Number(r.job_created_by || 0);
+      const gcAssigned = cb && cb !== Number(userId) && cb !== viewerOwner;
+      accent = gcAssigned ? RESERVED_GC_COLOR : (r.job_color || null);
       status = Number(r.job_status) === 1 ? "active" : "completed";
     } else if (r.type === "lead") {
       name = r.lead_name || "Lead"; accent = LEAD_GREY;
