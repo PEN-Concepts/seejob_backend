@@ -156,26 +156,32 @@ async function reassignActiveDiverse(connection, opts = {}) {
   const apply = opts.apply === true;
   const full = opts.full === true;
   const [rows] = await connection.query(
-    `SELECT j.id, j.color, COALESCE(u.created_by, j.created_by) AS account_root
+    `SELECT j.id, j.color, j.color_locked, COALESCE(u.created_by, j.created_by) AS account_root
        FROM job j LEFT JOIN \`user\` u ON u.id = j.created_by
       WHERE j.status = 1
       ORDER BY account_root ASC, j.id ASC`
   );
   const byAccount = new Map();
   for (const r of rows) { if (!byAccount.has(r.account_root)) byAccount.set(r.account_root, []); byAccount.get(r.account_root).push(r); }
+  const isLocked = (j) => Number(j.color_locked) === 1 && !!String(j.color || '');
   const plan = []; let changed = 0, accountsTouched = 0;
   for (const [account, jobs] of byAccount) {
     // decide new colour per job
     const assignments = new Map(); // jobId -> new colour
     if (full) {
       const placed = [];
-      for (const j of jobs) { const c = pickDiverse(placed); placed.push(c); assignments.set(j.id, c); }
+      for (const j of jobs) {
+        if (isLocked(j)) { placed.push(String(j.color)); assignments.set(j.id, String(j.color)); continue; } // user pick — never move
+        const c = pickDiverse(placed); placed.push(c); assignments.set(j.id, c);
+      }
     } else {
-      // Pass 1: keepers (distinct enough); Pass 2: reassign the rest against ALL keepers.
+      // Pass 1: keepers (locked jobs are ALWAYS keepers; plus distinct-enough ones);
+      // Pass 2: reassign the rest against ALL keepers.
       const keptColors = [];
       const toReassign = [];
       for (const j of jobs) {
         const c = String(j.color || '');
+        if (isLocked(j)) { keptColors.push(c); assignments.set(j.id, c); continue; } // user pick — forced keeper
         const valid = !!groupOf(c);
         let md = Infinity;
         for (const kc of keptColors) { const d = washDist(c, kc); if (d < md) md = d; }
@@ -187,6 +193,7 @@ async function reassignActiveDiverse(connection, opts = {}) {
     }
     let touched = false;
     for (const j of jobs) {
+      if (isLocked(j)) continue; // defence-in-depth: a locked job's colour is never written
       const color = assignments.get(j.id);
       if (!color) continue;
       if (String(j.color || '').toLowerCase() !== color.toLowerCase()) {
@@ -230,7 +237,7 @@ async function backfillJobColors(connection, opts = {}) {
   // All ACTIVE jobs (color released on complete/archive, so only status=1 holds),
   // tagged with the account root they display under (same rule as /all-tasks).
   const [rows] = await connection.query(
-    `SELECT j.id, j.color, COALESCE(u.created_by, j.created_by) AS account_root
+    `SELECT j.id, j.color, j.color_locked, COALESCE(u.created_by, j.created_by) AS account_root
        FROM job j
        LEFT JOIN \`user\` u ON u.id = j.created_by
       WHERE j.status = 1
@@ -258,6 +265,7 @@ async function backfillJobColors(connection, opts = {}) {
       }
     }
     for (const j of jobs) {
+      if (Number(j.color_locked) === 1) { const lc = String(j.color || '').toLowerCase(); if (lc) used.add(lc); continue; } // user pick — never overwrite
       if (!reassign && String(j.color || '').trim()) continue; // fill mode keeps existing
       const color =
         PICK_ORDER.find((c) => !used.has(c.toLowerCase())) ||
@@ -287,7 +295,7 @@ const JOB_COLOR_SET = new Set(JOB_COLORS.map((c) => c.toLowerCase()));
  */
 async function repaletteOrphanedColors(connection) {
   const [rows] = await connection.query(
-    `SELECT j.id, j.color, COALESCE(u.created_by, j.created_by) AS account_root
+    `SELECT j.id, j.color, j.color_locked, COALESCE(u.created_by, j.created_by) AS account_root
        FROM job j LEFT JOIN \`user\` u ON u.id = j.created_by
       WHERE j.status = 1 AND j.color IS NOT NULL AND j.color <> ''
       ORDER BY j.id ASC`
@@ -304,6 +312,7 @@ async function repaletteOrphanedColors(connection) {
     );
     for (const j of jobs) {
       const c = String(j.color || '').trim().toLowerCase();
+      if (Number(j.color_locked) === 1) { if (c) used.add(c); continue; } // user pick — never recolour
       if (JOB_COLOR_SET.has(c)) continue; // still a valid pool colour → keep it
       const color =
         PICK_ORDER.find((x) => !used.has(x.toLowerCase())) ||

@@ -14,8 +14,8 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn, ensureGanttStageProgressTable, assignJobNumberIfMissing } = require("../services/dbMigrations");
-const { pickJobColor, backfillJobColors, reassignActiveDiverse } = require("../services/jobColorPalette");
+const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn, ensureJobColorLockedColumn, ensureGanttStageProgressTable, assignJobNumberIfMissing } = require("../services/dbMigrations");
+const { pickJobColor, backfillJobColors, reassignActiveDiverse, RESERVED_GC_COLOR } = require("../services/jobColorPalette");
 
 // Normalize an owner_type/job_type param: anything but 'lead' is a job. Lets the
 // stages/materials tables distinguish lead-owned rows from job-owned ones even
@@ -3100,4 +3100,41 @@ async function enforcePlanFeatureForMaterials(req, res, next) {
     if (connection) connection.release();
   }
 }
+// Manual job-colour override (Jobs page). { color:"#rrggbb" } locks a user pick;
+// { auto:true } clears the lock and auto-assigns a fresh diversity-aware colour.
+// A locked colour is never overwritten by pickJobColor or the reassign/backfill
+// routines (they all skip color_locked=1). The reserved GC signal is rejected.
+router.patch("/:id/color", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+  const jobId = Number(req.params.id);
+  const auto = !!(req.body && req.body.auto);
+  const color = req.body && req.body.color;
+  if (!jobId) return res.status(400).json({ message: "Invalid job id" });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureJobColorColumn(connection);
+    await ensureJobColorLockedColumn(connection);
+    const [[job]] = await connection.query("SELECT id, created_by FROM job WHERE id = ? LIMIT 1", [jobId]);
+    if (!job) return res.status(404).json({ message: "Job not found" });
+    if (!(await isSameAccount(req.user.id, job.created_by, connection))) {
+      return res.status(403).json({ code: "OWNERSHIP_DENIED", message: "You can only recolour your own jobs." });
+    }
+    if (auto) {
+      const newColor = await pickJobColor(connection, job.created_by);
+      await connection.query("UPDATE job SET color = ?, color_locked = 0 WHERE id = ?", [newColor, jobId]);
+      return res.json({ success: true, color: newColor, color_locked: 0 });
+    }
+    const hex = String(color || "").trim().toLowerCase();
+    if (!/^#[0-9a-f]{6}$/.test(hex)) return res.status(400).json({ message: "Invalid colour." });
+    if (hex === String(RESERVED_GC_COLOR).toLowerCase()) return res.status(400).json({ message: "That colour is reserved." });
+    await connection.query("UPDATE job SET color = ?, color_locked = 1 WHERE id = ?", [hex, jobId]);
+    return res.json({ success: true, color: hex, color_locked: 1 });
+  } catch (err) {
+    logger.error("Set job colour error:", err);
+    return res.status(500).json({ message: "Server error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 module.exports = router;
