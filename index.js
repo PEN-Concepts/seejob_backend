@@ -8,7 +8,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
-const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatBackfill, ensureChatMergeConvertedLeadChats } = require("./services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatFilesColumns, ensureChatBackfill, ensureChatMergeConvertedLeadChats } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
 const { repaletteOrphanedColors, reassignActiveDiverse } = require("./services/jobColorPalette");
 const userRoute = require("./routes/users");
@@ -207,6 +207,7 @@ const startServer = async (retries = 5, delay = 5000) => {
                 await ensureChatReactionsTable(migrationConn);
                 await ensureChatMessageEditColumn(migrationConn);
                 await ensureChatIconColumn(migrationConn);
+                await ensureChatFilesColumns(migrationConn);
                 await ensureChatBackfill(migrationConn);
                 await ensureChatMergeConvertedLeadChats(migrationConn);
                 // Recolour any active job holding a colour dropped in the 2026-08-27

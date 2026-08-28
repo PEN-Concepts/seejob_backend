@@ -2532,6 +2532,34 @@ router.patch("/job-file/:id/share", auth.authenticateToken, denyExpiredFreeWrite
   }
 });
 
+// Rename a job file/document (owner-only). Updates the shared record: any chat
+// attachment pointing at this doc reflects the new name too (shared-record model).
+router.patch("/job-file/:id/rename", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+  const fileId = req.params.id;
+  const name = String(req.body?.name || "").trim();
+  if (!name) return res.status(400).json({ message: "Name is required." });
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [rows] = await connection.query(
+      "SELECT d.id, j.created_by FROM job_documents d JOIN job j ON j.id = d.job_id WHERE d.id = ? LIMIT 1",
+      [fileId]
+    );
+    if (!rows.length) return res.status(404).json({ message: "File not found" });
+    if (!(await isSameAccount(req.user.id, rows[0].created_by, connection))) {
+      return res.status(403).json({ code: "OWNERSHIP_DENIED", message: "You can only rename files on your own jobs." });
+    }
+    await connection.execute("UPDATE job_documents SET name = ? WHERE id = ?", [name, fileId]);
+    await connection.execute("UPDATE chat_message_attachments SET file_name = ? WHERE job_document_id = ?", [name, fileId]).catch(() => {});
+    res.json({ success: true, id: Number(fileId), name });
+  } catch (err) {
+    logger.error("Rename job file error:", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // Delete a single job file (photo or document) by its row id. Deleting by id
 // (not by name) avoids wiping duplicate-named files. Only the owning account
 // may delete, and the file is removed from disk too.

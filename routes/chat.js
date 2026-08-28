@@ -124,7 +124,7 @@ router.post("/conversations/:id/icon", requireMember, upload.single("icon"), asy
     if (!req.file) return res.status(400).json({ message: "No image." });
     const iconPath = `/uploads/${req.file.filename}`;
     const r = await chat.setConversationIcon({ conversationId: Number(req.params.id), userId: req.user.id, iconPath });
-    if (r && r.error === "forbidden") return res.status(403).json({ message: "Only the chat owner can set the photo." });
+    if (r && r.error === "forbidden") return res.status(403).json({ message: "You don't have permission to set this chat's photo." });
     if (r && r.error === "notfound") return res.status(404).json({ message: "Chat not found." });
     res.json({ icon_url: r.icon_url });
   } catch (e) { res.status(500).json({ message: "Could not set the photo." }); }
@@ -191,13 +191,14 @@ router.post("/conversations/:id/read", requireMember, async (req, res) => {
 router.get("/conversations/:id/members", requireMember, async (req, res) => {
   try {
     const [rows] = await pool.query(
-      `SELECT m.user_id, m.role, u.name, u.business AS business_name, u.image
+      `SELECT m.user_id, m.role, m.can_edit_photo, u.name, u.business AS business_name, u.image
          FROM chat_members m JOIN \`user\` u ON u.id = m.user_id
         WHERE m.conversation_id = ?
         ORDER BY (m.role='owner') DESC, COALESCE(NULLIF(u.business,''), u.name)`,
       [Number(req.params.id)]
     );
-    res.json({ members: rows });
+    const [[conv]] = await pool.query("SELECT created_by FROM chat_conversations WHERE id = ? LIMIT 1", [Number(req.params.id)]);
+    res.json({ members: rows, created_by: conv ? conv.created_by : null });
   } catch (e) { res.status(500).json({ message: "Could not load members." }); }
 });
 
@@ -215,6 +216,88 @@ router.delete("/conversations/:id/members/:userId", requireMember, async (req, r
     await chat.removeMember(pool, Number(req.params.id), Number(req.params.userId));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ message: "Could not remove the member." }); }
+});
+
+// Grant/revoke a member's "can edit the group photo" (chat creator only).
+router.post("/conversations/:id/members/:userId/photo-grant", requireMember, async (req, res) => {
+  try {
+    const r = await chat.setMemberPhotoGrant({
+      conversationId: Number(req.params.id), userId: req.user.id,
+      memberId: Number(req.params.userId), canEdit: !!(req.body && req.body.can_edit),
+    });
+    if (r && r.error === "forbidden") return res.status(403).json({ message: "Only the chat owner can change this." });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "Chat not found." });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: "Could not update the permission." }); }
+});
+
+// ---- Files panel (paperclip) ----
+
+// All files + pictures in the conversation (message-borne and panel-only pulls).
+router.get("/conversations/:id/files", requireMember, async (req, res) => {
+  try {
+    res.json({ files: await chat.listConversationFiles(Number(req.params.id)) });
+  } catch (e) { res.status(500).json({ message: "Could not load files." }); }
+});
+
+// Add freshly-captured/uploaded files or pictures. For a job-linked chat each becomes
+// ONE shared job_documents record; posts a thread message (fresh upload → thread).
+// Optional body `titles` (JSON array) supplies per-file display names, index-aligned.
+router.post("/conversations/:id/files", requireMember, upload.array("files", 20), async (req, res) => {
+  try {
+    if (!req.files || !req.files.length) return res.status(400).json({ message: "No files." });
+    let titles = [];
+    try { titles = req.body && req.body.titles ? JSON.parse(req.body.titles) : []; } catch (_) { titles = []; }
+    const files = req.files.map((f) => ({ file_path: `/uploads/${f.filename}`, file_name: f.originalname, mime_type: f.mimetype }));
+    const r = await chat.addUploadedFilesToChat({ conversationId: Number(req.params.id), senderId: req.user.id, files, titles });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "Chat not found." });
+    res.json(r);
+  } catch (e) { res.status(500).json({ message: "Could not add files." }); }
+});
+
+// Pull existing job documents into the Files panel only (no thread message). Job-chats only.
+// Body: { items: [{ job_document_id, title? }] }.
+router.post("/conversations/:id/files/attach-job", requireMember, async (req, res) => {
+  try {
+    const items = Array.isArray(req.body && req.body.items) ? req.body.items : [];
+    const r = await chat.attachJobDocsToChat({ conversationId: Number(req.params.id), userId: req.user.id, items });
+    if (r && r.error === "nojob") return res.status(400).json({ message: "This chat has no attached job." });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "Chat not found." });
+    res.json(r);
+  } catch (e) { res.status(500).json({ message: "Could not attach files." }); }
+});
+
+// Rename a chat file (updates the shared job record when linked).
+router.patch("/conversations/:id/files/:attId", requireMember, async (req, res) => {
+  try {
+    const r = await chat.renameChatFile({ conversationId: Number(req.params.id), attachmentId: Number(req.params.attId), name: req.body && req.body.name });
+    if (r && r.error === "empty") return res.status(400).json({ message: "Name is required." });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "File not found." });
+    res.json(r);
+  } catch (e) { res.status(500).json({ message: "Could not rename the file." }); }
+});
+
+// Remove a file from the chat (detach only — never deletes the job's record).
+router.delete("/conversations/:id/files/:attId", requireMember, async (req, res) => {
+  try {
+    const r = await chat.detachChatFile({ conversationId: Number(req.params.id), attachmentId: Number(req.params.attId) });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "File not found." });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: "Could not remove the file." }); }
+});
+
+// Chat settings — rename the group and/or set the attached job (creator only).
+router.patch("/conversations/:id/settings", requireMember, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const r = await chat.updateConversationSettings({
+      conversationId: Number(req.params.id), userId: req.user.id,
+      name: body.name, jobId: body.job_id,
+    });
+    if (r && r.error === "forbidden") return res.status(403).json({ message: "Only the chat owner can change settings." });
+    if (r && r.error === "notfound") return res.status(404).json({ message: "Chat not found." });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: "Could not update settings." }); }
 });
 
 module.exports = router;

@@ -1339,6 +1339,32 @@ async function ensureChatMessageEditColumn(connection) {
   chatEditColEnsured = true;
 }
 
+// Chat Files feature (2026-08-28): link a chat attachment to a SHARED job_documents
+// row (job-attached chats — rename/detach act on the shared record), and a per-member
+// "can edit the group photo" grant (chat-creator can toggle it). Both idempotent.
+let chatFilesColsEnsured = false;
+async function ensureChatFilesColumns(connection) {
+  if (chatFilesColsEnsured) return;
+  try {
+    const [[a]] = await connection.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_message_attachments' AND COLUMN_NAME='job_document_id'`
+    );
+    if (!a) await connection.query("ALTER TABLE chat_message_attachments ADD COLUMN job_document_id INT NULL, ADD INDEX idx_att_jobdoc (job_document_id)");
+    // Files pulled from the job attach to the panel WITHOUT posting a thread message, so
+    // message_id must allow NULL (panel-only attachments).
+    await connection.query("ALTER TABLE chat_message_attachments MODIFY COLUMN message_id INT NULL");
+  } catch (e) { /* non-fatal */ }
+  try {
+    const [[m]] = await connection.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='chat_members' AND COLUMN_NAME='can_edit_photo'`
+    );
+    if (!m) await connection.query("ALTER TABLE chat_members ADD COLUMN can_edit_photo TINYINT(1) NOT NULL DEFAULT 0");
+  } catch (e) { /* non-fatal */ }
+  chatFilesColsEnsured = true;
+}
+
 // Message reactions ("tapbacks") — one emoji per user per message (tap a new one
 // to replace, the same one to remove). Idempotent create.
 let chatReactionsEnsured = false;
@@ -1413,6 +1439,7 @@ module.exports = {
   ensureChatReactionsTable,
   ensureChatMessageEditColumn,
   ensureChatIconColumn,
+  ensureChatFilesColumns,
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,
