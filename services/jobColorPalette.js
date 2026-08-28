@@ -136,6 +136,12 @@ async function pickJobColor(connection, createdBy) {
  *  for a fixed job set. Returns { scanned, changed, plan[] }. apply=false = dry run. */
 async function reassignActiveDiverse(connection, opts = {}) {
   const apply = opts.apply === true;
+  // guarded=true → only reassign accounts that are actually CLUSTERED (some coarse group
+  // holds >=2 active jobs WHILE another group is empty, i.e. there's an empty group to
+  // spread into). After a reassign the account is balanced, so guarded re-runs are no-ops
+  // — safe to run on every boot (the visual change lands once). guarded=false = full
+  // reassign of every account (the owner-triggered endpoint).
+  const guarded = opts.guarded === true;
   const [rows] = await connection.query(
     `SELECT j.id, j.color, COALESCE(u.created_by, j.created_by) AS account_root
        FROM job j LEFT JOIN \`user\` u ON u.id = j.created_by
@@ -144,8 +150,16 @@ async function reassignActiveDiverse(connection, opts = {}) {
   );
   const byAccount = new Map();
   for (const r of rows) { if (!byAccount.has(r.account_root)) byAccount.set(r.account_root, []); byAccount.get(r.account_root).push(r); }
-  const plan = []; let changed = 0;
+  const plan = []; let changed = 0, accountsTouched = 0;
   for (const [account, jobs] of byAccount) {
+    if (guarded) {
+      const counts = { red_orange: 0, yellow_gold: 0, brown_tan: 0, green: 0, blue_purple: 0 };
+      for (const j of jobs) { const g = groupOf(j.color); if (g) counts[g]++; }
+      const vals = Object.values(counts);
+      const clustered = Math.max(...vals) >= 2 && Math.min(...vals) === 0;
+      if (!clustered) continue; // already spread → leave this account's colours alone
+    }
+    accountsTouched++;
     const placed = [];
     for (const j of jobs) {
       const color = pickDiverse(placed);
@@ -157,7 +171,7 @@ async function reassignActiveDiverse(connection, opts = {}) {
       }
     }
   }
-  return { apply, scanned: rows.length, changed, plan };
+  return { apply, guarded, scanned: rows.length, accountsTouched, changed, plan };
 }
 
 /**
