@@ -76,16 +76,88 @@ const PICK_ORDER = (() => {
 
 /** First palette colour not held by this creator's active jobs, in family-spread
  *  PICK_ORDER; cycles when full. */
+// ---- DIVERSITY-AWARE assignment (2026-08-28) ----
+// Poul's 5 COARSE perceptual groups. Assigning by fine family (orange/gold/brown/tan)
+// still clustered several jobs into the warm-earth neighbourhood; grouping coarsely and
+// preferring an under-represented group spreads an account's jobs across yellow / green /
+// blue / brown / red as intended.
+const GROUPS = {
+  red_orange:  ['#cc5500', '#c1651d', '#b7410e', '#a95e3b', '#9e4624'],
+  yellow_gold: ['#d4a017', '#fdb813', '#d6c148'],
+  brown_tan:   ['#6b4226', '#8f6a45', '#422619', '#b5794f', '#c9a878', '#dcc39a', '#cbb573'],
+  green:       ['#4a7a3d', '#879c2e', '#8a9a7a', '#3ea88a', '#1f5c45', '#2fbab0'],
+  blue_purple: ['#2f7d7d', '#7fa8c9', '#3b6f9b', '#3d4a8a', '#4689b5', '#6a7c90', '#2c52a0', '#6b3b9b', '#7a3d6b', '#a83e7a', '#b5788a', '#aa91b6', '#866dd1', '#60294d'],
+};
+// warm/cool-alternating so ties (first few jobs) still spread across the spectrum.
+const GROUP_ORDER = ['red_orange', 'green', 'blue_purple', 'yellow_gold', 'brown_tan'];
+const COLOR_GROUP = (() => { const m = new Map(); for (const g of Object.keys(GROUPS)) for (const c of GROUPS[g]) m.set(c.toLowerCase(), g); return m; })();
+function groupOf(hex) { return COLOR_GROUP.get(String(hex || '').toLowerCase()) || null; }
+function _rgb(h) { h = String(h).replace('#', ''); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
+function _dist(a, b) { const [r1, g1, b1] = _rgb(a), [r2, g2, b2] = _rgb(b); return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2); }
+/** From `cands`, the colour whose nearest already-used colour is farthest (max-min) — keeps
+ *  a repeated group's colours distinct instead of picking two near-identical oranges. */
+function farthestFrom(cands, usedList) {
+  if (!usedList.length) return cands[0];
+  let best = cands[0], bestMin = -1;
+  for (const c of cands) {
+    let md = Infinity;
+    for (const u of usedList) { const d = _dist(c, u); if (d < md) md = d; }
+    if (md > bestMin) { bestMin = md; best = c; }
+  }
+  return best;
+}
+/** Pick a colour for one new job (or one job during a reassign) given the colours the
+ *  account's other active jobs already hold: least-used group, then farthest within it. */
+function pickDiverse(usedList) {
+  const used = new Set(usedList.map((c) => String(c).toLowerCase()));
+  const byGroup = { red_orange: 0, yellow_gold: 0, brown_tan: 0, green: 0, blue_purple: 0 };
+  for (const c of used) { const g = groupOf(c); if (g) byGroup[g]++; }
+  let best = GROUP_ORDER[0], bestN = Infinity;
+  for (const g of GROUP_ORDER) { if (byGroup[g] < bestN) { bestN = byGroup[g]; best = g; } }
+  const cands = GROUPS[best].filter((c) => !used.has(c.toLowerCase()));
+  if (!cands.length) return PICK_ORDER.find((c) => !used.has(c.toLowerCase())) || PICK_ORDER[used.size % PICK_ORDER.length];
+  return farthestFrom(cands, usedList);
+}
+
+/** Colour for a NEW job — diversity-aware over the creator's other ACTIVE jobs, so the
+ *  account's jobs stay spread across hue groups. Existing jobs are never touched here. */
 async function pickJobColor(connection, createdBy) {
   const [rows] = await connection.query(
     'SELECT color FROM job WHERE created_by = ? AND status = 1 AND color IS NOT NULL',
     [createdBy]
   );
-  const used = new Set((rows || []).map((r) => String(r.color || '').toLowerCase()));
-  for (const c of PICK_ORDER) {
-    if (!used.has(c.toLowerCase())) return c;
+  const usedList = (rows || []).map((r) => String(r.color || '')).filter(Boolean);
+  return pickDiverse(usedList);
+}
+
+/** ONE-TIME (owner-triggered) diversity reassignment of EXISTING active jobs: per account,
+ *  in id order, reassign every active job via pickDiverse over the colours already placed
+ *  for that account this run — spreads the current jobs across hue groups. Deterministic
+ *  for a fixed job set. Returns { scanned, changed, plan[] }. apply=false = dry run. */
+async function reassignActiveDiverse(connection, opts = {}) {
+  const apply = opts.apply === true;
+  const [rows] = await connection.query(
+    `SELECT j.id, j.color, COALESCE(u.created_by, j.created_by) AS account_root
+       FROM job j LEFT JOIN \`user\` u ON u.id = j.created_by
+      WHERE j.status = 1
+      ORDER BY account_root ASC, j.id ASC`
+  );
+  const byAccount = new Map();
+  for (const r of rows) { if (!byAccount.has(r.account_root)) byAccount.set(r.account_root, []); byAccount.get(r.account_root).push(r); }
+  const plan = []; let changed = 0;
+  for (const [account, jobs] of byAccount) {
+    const placed = [];
+    for (const j of jobs) {
+      const color = pickDiverse(placed);
+      placed.push(color);
+      if (String(j.color || '').toLowerCase() !== color.toLowerCase()) {
+        plan.push({ jobId: j.id, account, from: j.color || null, to: color });
+        if (apply) await connection.query('UPDATE job SET color = ? WHERE id = ?', [color, j.id]);
+        changed++;
+      }
+    }
   }
-  return PICK_ORDER[used.size % PICK_ORDER.length];
+  return { apply, scanned: rows.length, changed, plan };
 }
 
 /**
@@ -203,4 +275,4 @@ async function repaletteOrphanedColors(connection) {
   return recolored;
 }
 
-module.exports = { JOB_COLORS, RESERVED_GC_COLOR, pickJobColor, backfillJobColors, repaletteOrphanedColors };
+module.exports = { JOB_COLORS, RESERVED_GC_COLOR, pickJobColor, pickDiverse, backfillJobColors, repaletteOrphanedColors, reassignActiveDiverse };

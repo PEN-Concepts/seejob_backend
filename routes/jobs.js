@@ -15,7 +15,7 @@ const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn, ensureGanttStageProgressTable, assignJobNumberIfMissing } = require("../services/dbMigrations");
-const { pickJobColor, backfillJobColors } = require("../services/jobColorPalette");
+const { pickJobColor, backfillJobColors, reassignActiveDiverse } = require("../services/jobColorPalette");
 
 // Normalize an owner_type/job_type param: anything but 'lead' is a job. Lets the
 // stages/materials tables distinguish lead-owned rows from job-owned ones even
@@ -2086,7 +2086,12 @@ router.get("/admin/backfill-colors", auth.authenticateToken, async (req, res) =>
     }
     const apply = String(req.query.apply || "") === "1";
     const reassign = String(req.query.reassign || "") === "1";
-    const result = await backfillJobColors(connection, { apply, reassign });
+    // ?diverse=1 → one-time diversity reassignment of existing active jobs (spread across
+    // hue groups). ?apply=1 writes; omit apply for a dry-run plan.
+    const diverse = String(req.query.diverse || "") === "1";
+    const result = diverse
+      ? await reassignActiveDiverse(connection, { apply })
+      : await backfillJobColors(connection, { apply, reassign });
     return res.status(200).json(result);
   } catch (err) {
     logger.error("backfill-colors error:", err);
