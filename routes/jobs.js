@@ -2086,11 +2086,13 @@ router.get("/admin/backfill-colors", auth.authenticateToken, async (req, res) =>
     }
     const apply = String(req.query.apply || "") === "1";
     const reassign = String(req.query.reassign || "") === "1";
-    // ?diverse=1 → one-time diversity reassignment of existing active jobs (spread across
-    // hue groups). ?apply=1 writes; omit apply for a dry-run plan.
+    // ?diverse=1 → de-cluster existing active jobs (conservative: only recolour
+    // near-duplicates). Add &full=1 to aggressively reassign EVERY active job. ?apply=1
+    // writes; omit apply for a dry-run plan.
     const diverse = String(req.query.diverse || "") === "1";
+    const full = String(req.query.full || "") === "1";
     const result = diverse
-      ? await reassignActiveDiverse(connection, { apply })
+      ? await reassignActiveDiverse(connection, { apply, full })
       : await backfillJobColors(connection, { apply, reassign });
     return res.status(200).json(result);
   } catch (err) {

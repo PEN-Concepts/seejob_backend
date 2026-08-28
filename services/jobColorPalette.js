@@ -94,6 +94,17 @@ const COLOR_GROUP = (() => { const m = new Map(); for (const g of Object.keys(GR
 function groupOf(hex) { return COLOR_GROUP.get(String(hex || '').toLowerCase()) || null; }
 function _rgb(h) { h = String(h).replace('#', ''); return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)]; }
 function _dist(a, b) { const [r1, g1, b1] = _rgb(a), [r2, g2, b2] = _rgb(b); return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2); }
+// Distance in WASHED space (the improved FE boostForWash + 30% composite over #34291b) —
+// this is what a viewer actually sees on a card, so it's the right metric for "too close".
+// Kept in sync with fe job-color.service.ts boostForWash. CONSERVATIVE_T ≈ min washed
+// distance below which two jobs read as the same colour (tuned on real data).
+const CONSERVATIVE_T = 24;
+function _hsl(r, g, b) { r /= 255; g /= 255; b /= 255; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn; let h = 0; const l = (mx + mn) / 2; const s = d === 0 ? 0 : l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); if (d) { if (mx === r) h = (g - b) / d + (g < b ? 6 : 0); else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4; h /= 6; } return [h * 360, s, l]; }
+function _hslRgb(H, s, l) { H = (((H % 360) + 360) % 360) / 360; const a = s * Math.min(l, 1 - l); const f = (n) => { const k = (n + H * 12) % 12; return 255 * (l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1))); }; return [f(0), f(8), f(4)]; }
+function _boost(hex) { const [r, g, b] = _rgb(hex); const [H, s, l] = _hsl(r, g, b); let l2 = 0.16 + l * 0.78; l2 = 0.5 + (l2 - 0.5) * 1.35; l2 = Math.max(0.2, Math.min(0.82, l2)); return _hslRgb(H, Math.min(1, s * 1.6 + 0.18), l2); }
+const _WASHBASE = _rgb('#34291b');
+function _wash(hex, a = 0.30) { const [r, g, b] = _boost(hex); return [r * a + _WASHBASE[0] * (1 - a), g * a + _WASHBASE[1] * (1 - a), b * a + _WASHBASE[2] * (1 - a)]; }
+function washDist(a, b) { const [r1, g1, b1] = _wash(a), [r2, g2, b2] = _wash(b); return Math.sqrt((r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2); }
 /** From `cands`, the colour whose nearest already-used colour is farthest (max-min) — keeps
  *  a repeated group's colours distinct instead of picking two near-identical oranges. */
 function farthestFrom(cands, usedList) {
@@ -101,7 +112,7 @@ function farthestFrom(cands, usedList) {
   let best = cands[0], bestMin = -1;
   for (const c of cands) {
     let md = Infinity;
-    for (const u of usedList) { const d = _dist(c, u); if (d < md) md = d; }
+    for (const u of usedList) { const d = washDist(c, u); if (d < md) md = d; }
     if (md > bestMin) { bestMin = md; best = c; }
   }
   return best;
@@ -119,29 +130,31 @@ function pickDiverse(usedList) {
   return farthestFrom(cands, usedList);
 }
 
-/** Colour for a NEW job — diversity-aware over the creator's other ACTIVE jobs, so the
- *  account's jobs stay spread across hue groups. Existing jobs are never touched here. */
+/** Colour for a NEW job — diversity-aware over ALL the ACCOUNT's active jobs (not just this
+ *  creator's), so the colour is chosen against exactly what shows together on the account's
+ *  Jobs list / calendar / Task Manager. Existing jobs are never touched here. */
 async function pickJobColor(connection, createdBy) {
   const [rows] = await connection.query(
-    'SELECT color FROM job WHERE created_by = ? AND status = 1 AND color IS NOT NULL',
+    `SELECT j.color FROM job j LEFT JOIN \`user\` u ON u.id = j.created_by
+      WHERE COALESCE(u.created_by, j.created_by) = (SELECT COALESCE(created_by, id) FROM \`user\` WHERE id = ?)
+        AND j.status = 1 AND j.color IS NOT NULL`,
     [createdBy]
   );
   const usedList = (rows || []).map((r) => String(r.color || '')).filter(Boolean);
   return pickDiverse(usedList);
 }
 
-/** ONE-TIME (owner-triggered) diversity reassignment of EXISTING active jobs: per account,
- *  in id order, reassign every active job via pickDiverse over the colours already placed
- *  for that account this run — spreads the current jobs across hue groups. Deterministic
- *  for a fixed job set. Returns { scanned, changed, plan[] }. apply=false = dry run. */
+/** CONSERVATIVE reassignment of existing active jobs (per account, scoped to what shows
+ *  together on the account's list). Two passes: KEEP every job whose current (valid pool)
+ *  colour is >= CONSERVATIVE_T in WASHED space from all already-kept jobs; recolour ONLY the
+ *  near-duplicates onto a distinct colour. So distinct jobs (e.g. Dumas purple, Kasberger
+ *  teal, Mann green) are left alone and only true clashes move. Naturally minimal AND
+ *  idempotent: after a run no two kept jobs are within T, so re-runs change nothing — safe
+ *  on boot. `full:true` → aggressive reassign of every job (owner endpoint). Returns
+ *  { apply, full, scanned, accountsTouched, changed, plan[] }; apply=false = dry run. */
 async function reassignActiveDiverse(connection, opts = {}) {
   const apply = opts.apply === true;
-  // guarded=true → only reassign accounts that are actually CLUSTERED (some coarse group
-  // holds >=2 active jobs WHILE another group is empty, i.e. there's an empty group to
-  // spread into). After a reassign the account is balanced, so guarded re-runs are no-ops
-  // — safe to run on every boot (the visual change lands once). guarded=false = full
-  // reassign of every account (the owner-triggered endpoint).
-  const guarded = opts.guarded === true;
+  const full = opts.full === true;
   const [rows] = await connection.query(
     `SELECT j.id, j.color, COALESCE(u.created_by, j.created_by) AS account_root
        FROM job j LEFT JOIN \`user\` u ON u.id = j.created_by
@@ -152,26 +165,40 @@ async function reassignActiveDiverse(connection, opts = {}) {
   for (const r of rows) { if (!byAccount.has(r.account_root)) byAccount.set(r.account_root, []); byAccount.get(r.account_root).push(r); }
   const plan = []; let changed = 0, accountsTouched = 0;
   for (const [account, jobs] of byAccount) {
-    if (guarded) {
-      const counts = { red_orange: 0, yellow_gold: 0, brown_tan: 0, green: 0, blue_purple: 0 };
-      for (const j of jobs) { const g = groupOf(j.color); if (g) counts[g]++; }
-      const vals = Object.values(counts);
-      const clustered = Math.max(...vals) >= 2 && Math.min(...vals) === 0;
-      if (!clustered) continue; // already spread → leave this account's colours alone
+    // decide new colour per job
+    const assignments = new Map(); // jobId -> new colour
+    if (full) {
+      const placed = [];
+      for (const j of jobs) { const c = pickDiverse(placed); placed.push(c); assignments.set(j.id, c); }
+    } else {
+      // Pass 1: keepers (distinct enough); Pass 2: reassign the rest against ALL keepers.
+      const keptColors = [];
+      const toReassign = [];
+      for (const j of jobs) {
+        const c = String(j.color || '');
+        const valid = !!groupOf(c);
+        let md = Infinity;
+        for (const kc of keptColors) { const d = washDist(c, kc); if (d < md) md = d; }
+        if (valid && (keptColors.length === 0 || md >= CONSERVATIVE_T)) { keptColors.push(c); assignments.set(j.id, c); }
+        else toReassign.push(j);
+      }
+      const placed = [...keptColors];
+      for (const j of toReassign) { const c = pickDiverse(placed) || String(j.color || ''); placed.push(c); assignments.set(j.id, c); }
     }
-    accountsTouched++;
-    const placed = [];
+    let touched = false;
     for (const j of jobs) {
-      const color = pickDiverse(placed);
-      placed.push(color);
+      const color = assignments.get(j.id);
+      if (!color) continue;
       if (String(j.color || '').toLowerCase() !== color.toLowerCase()) {
+        touched = true;
         plan.push({ jobId: j.id, account, from: j.color || null, to: color });
         if (apply) await connection.query('UPDATE job SET color = ? WHERE id = ?', [color, j.id]);
         changed++;
       }
     }
+    if (touched) accountsTouched++;
   }
-  return { apply, guarded, scanned: rows.length, accountsTouched, changed, plan };
+  return { apply, full, scanned: rows.length, accountsTouched, changed, plan };
 }
 
 /**

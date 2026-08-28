@@ -216,11 +216,12 @@ const startServer = async (retries = 5, delay = 5000) => {
                     const recolored = await repaletteOrphanedColors(migrationConn);
                     if (recolored > 0) logger.info(`repaletteOrphanedColors: recoloured ${recolored} job(s) onto the revised pool`);
                 } catch (e) { logger.error('repaletteOrphanedColors failed:', e); }
-                // Spread each CLUSTERED account's active jobs across hue groups (guarded →
-                // fires once per clustered account, no-op thereafter; Poul-approved 2026-08-28).
+                // Conservatively de-cluster each account's active jobs: recolour only the
+                // near-duplicates (washed distance < threshold), keep distinct ones as-is.
+                // Idempotent (no-op once no two kept jobs clash). Poul-approved 2026-08-28.
                 try {
-                    const r = await reassignActiveDiverse(migrationConn, { apply: true, guarded: true });
-                    if (r.changed > 0) logger.info(`reassignActiveDiverse: spread ${r.changed} job(s) across ${r.accountsTouched} clustered account(s)`);
+                    const r = await reassignActiveDiverse(migrationConn, { apply: true });
+                    if (r.changed > 0) logger.info(`reassignActiveDiverse: de-clustered ${r.changed} job(s) across ${r.accountsTouched} account(s)`);
                 } catch (e) { logger.error('reassignActiveDiverse failed:', e); }
             } catch (err) {
                 logger.error('boot migrations failed:', err);
