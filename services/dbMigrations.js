@@ -375,6 +375,57 @@ async function ensureInvoicesTable(connection) {
   invoicesTableEnsured = true;
 }
 
+// Invoice DOCUMENT schema (2026-08-28): extends job_invoices with the editable
+// content (dates, tax, notes, payment instructions), computed totals, status
+// timestamps (sent/viewed/paid) and a public share token; adds the line-items
+// table; and adds a company-profile payment_instructions source on the user row
+// (auto-fills a new invoice). Idempotent, self-bootstrapping from the invoice routes.
+let invoiceDocSchemaEnsured = false;
+async function ensureInvoiceDocumentSchema(connection) {
+  if (invoiceDocSchemaEnsured) return;
+  await ensureInvoicesTable(connection);
+  const addCol = async (table, col, def) => {
+    const [[c]] = await connection.query(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?`,
+      [table, col]
+    );
+    if (!c) await connection.query(`ALTER TABLE \`${table}\` ADD COLUMN ${col} ${def}`);
+  };
+  const cols = [
+    ["issued_date", "DATE NULL"],
+    ["due_date", "DATE NULL"],
+    ["tax_rate", "DECIMAL(6,3) NULL DEFAULT 0"],
+    ["notes", "TEXT NULL"],
+    ["payment_instructions", "TEXT NULL"],
+    ["subtotal", "DECIMAL(12,2) NULL DEFAULT 0"],
+    ["tax_amount", "DECIMAL(12,2) NULL DEFAULT 0"],
+    ["total", "DECIMAL(12,2) NULL DEFAULT 0"],
+    ["sent_at", "DATETIME NULL"],
+    ["viewed_at", "DATETIME NULL"],
+    ["paid_at", "DATETIME NULL"],
+    ["public_token", "VARCHAR(64) NULL"],
+    ["updated_at", "DATETIME NULL"],
+  ];
+  for (const [col, def] of cols) await addCol("job_invoices", col, def);
+  try { await connection.query("ALTER TABLE job_invoices ADD INDEX idx_ji_token (public_token)"); } catch (e) { /* exists */ }
+  await connection.query("UPDATE job_invoices SET status='Draft' WHERE status IS NULL OR status=''").catch(() => {});
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS job_invoice_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      invoice_id INT NOT NULL,
+      description TEXT NULL,
+      qty DECIMAL(12,3) NULL DEFAULT 0,
+      rate DECIMAL(12,2) NULL DEFAULT 0,
+      amount DECIMAL(12,2) NULL DEFAULT 0,
+      sort INT NULL DEFAULT 0,
+      INDEX idx_ii_invoice (invoice_id)
+    ) ENGINE=InnoDB
+  `);
+  // Company-profile default for the invoice "how to pay me" block.
+  await addCol("user", "payment_instructions", "TEXT NULL");
+  invoiceDocSchemaEnsured = true;
+}
+
 // Backend-scheduled reminders: rows the sendReminders cron scans each minute and
 // delivers via FCM, so alerts fire even when the app is closed. fire_at is stored
 // in UTC (compared against UTC_TIMESTAMP()) to be timezone-safe.
@@ -858,6 +909,21 @@ async function ensureJobColorColumn(connection) {
   );
   if (!row) await connection.query('ALTER TABLE `job` ADD COLUMN `color` VARCHAR(9) DEFAULT NULL');
   jobColorEnsured = true;
+}
+
+// job.color_locked (2026-08-28) — 1 when a user MANUALLY picked the job's colour
+// from the Jobs-page override picker. Auto-assignment (pickJobColor) and every
+// reassign/backfill routine must SKIP a locked job so a user choice is never
+// silently overwritten. "Use automatic color" clears it back to 0.
+let jobColorLockedEnsured = false;
+async function ensureJobColorLockedColumn(connection) {
+  if (jobColorLockedEnsured) return;
+  const [[row]] = await connection.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'job' AND COLUMN_NAME = 'color_locked'`
+  );
+  if (!row) await connection.query('ALTER TABLE `job` ADD COLUMN `color_locked` TINYINT(1) NOT NULL DEFAULT 0');
+  jobColorLockedEnsured = true;
 }
 
 // appointments.all_day — 1 = all-day event (no meaningful time/countdown). The
@@ -1456,6 +1522,7 @@ module.exports = {
   ensureSubscriptionPaymentColumns,
   ensurePaymentReceiptsTable,
   ensureJobColorColumn,
+  ensureJobColorLockedColumn,
   ensureAppointmentAllDayColumn,
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,
@@ -1471,6 +1538,7 @@ module.exports = {
   backfillJobNumbers,
   assignJobNumberIfMissing,
   ensureInvoicesTable,
+  ensureInvoiceDocumentSchema,
   ensureRemindersTable,
   ensureScheduleTemplateTables,
   ensurePlanLevelColumn,

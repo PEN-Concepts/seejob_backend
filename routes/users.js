@@ -1499,7 +1499,7 @@ router.get("/getuser", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
     query =
-      "SELECT u.id,u.name, c.name as 'category', c.id as 'category_id', sc.id as 'subcategory_id', sc.name 'subcategory', u.email,u.role as 'role', r.name 'role_name' ,u.image,u.mobile,u.business,u.organization_name,u.trade,u.social_security,u.street,city,u.zipcode,u.contact_note,u.status, u.contact_available FROM user u join category c on (c.id = u.category) join subcategory sc on (sc.id = u.subcategory) join role r on (r.id = u.role) where u.id = ?";
+      "SELECT u.id,u.name, c.name as 'category', c.id as 'category_id', sc.id as 'subcategory_id', sc.name 'subcategory', u.email,u.role as 'role', r.name 'role_name' ,u.image,u.mobile,u.business,u.organization_name,u.trade,u.social_security,u.street,city,u.state,u.zipcode,u.contact_note,u.payment_instructions,u.status, u.contact_available FROM user u join category c on (c.id = u.category) join subcategory sc on (sc.id = u.subcategory) join role r on (r.id = u.role) where u.id = ?";
     const [rows] = await connection.query(query, [signedin_user]);
     res.status(200).json({
       code: "200",
@@ -2240,7 +2240,7 @@ router.post("/updateuser", auth.authenticateToken, async (req, res) => {
     // `time_zone` (legacy short code) and `timezone` (canonical IANA) use COALESCE
     // so a save that omits them (e.g. an empty value) never wipes the stored value.
     query =
-      "UPDATE `user` SET `name` = ?, `email` = ? , `mobile` = ?, `category` = ?, `subcategory` = ?, `business` = ?, `organization_name` = ?, `trade` = ?, `social_security` = ?, `street` = ?, `city` = ?, `state` = ?, `zipcode` = ?, `contact_note` = ?, `updated_at` = ?, `updated_by` = ?, `secondary_email` = ?, `show_email`= ? , `time_zone` = COALESCE(?, `time_zone`), `timezone` = COALESCE(?, `timezone`) WHERE (`id` = ?)";
+      "UPDATE `user` SET `name` = ?, `email` = ? , `mobile` = ?, `category` = ?, `subcategory` = ?, `business` = ?, `organization_name` = ?, `trade` = ?, `social_security` = ?, `street` = ?, `city` = ?, `state` = ?, `zipcode` = ?, `contact_note` = ?, `updated_at` = ?, `updated_by` = ?, `secondary_email` = ?, `show_email`= ? , `payment_instructions` = COALESCE(?, `payment_instructions`), `time_zone` = COALESCE(?, `time_zone`), `timezone` = COALESCE(?, `timezone`) WHERE (`id` = ?)";
 
     const [result] = await connection.query(query, [
       r.name,
@@ -2261,6 +2261,7 @@ router.post("/updateuser", auth.authenticateToken, async (req, res) => {
       signedin_user,
       r.secondary_email,
       show_email,
+      r.payment_instructions !== undefined ? r.payment_instructions : null,
       r.time_zone || null,
       r.timezone || null,
       signedin_user,
