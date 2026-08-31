@@ -103,6 +103,10 @@ router.post('/change-orders/public/:token/respond', async (req, res) => {
     const safeClientNotes = client_notes !== undefined ? String(client_notes || '') : null;
 
     if (action === 'accept') {
+      // Status flips to SIGNED only on an ACTUAL signature completion — never on send.
+      if (!signature_data || !String(signature_data).trim()) {
+        return res.status(400).json({ code: 'NO_SIGNATURE', message: 'A signature is required to accept.' });
+      }
       const safeSignedDate = signed_date ? String(signed_date).slice(0, 10) : null;
       await connection.execute(
         `UPDATE change_orders
@@ -115,6 +119,9 @@ router.post('/change-orders/public/:token/respond', async (req, res) => {
           WHERE id = ?`,
         [safeSignedDate, signature_data || null, signed_name || co.client_name, safeClientNotes, getTimeStamp(), co.id],
       );
+      // Email a signed PDF copy to the client (+ CC the sender). Best-effort, async.
+      const signedRow = { ...co, status: 'SIGNED', client_signature_data: signature_data || null, client_signed_name: signed_name || co.client_name, client_signed_at: safeSignedDate || new Date().toISOString().slice(0, 10) };
+      require('../services/signedDocPdf').sendSignedCopy(signedRow, 'change_order').catch(() => {});
     } else {
       await connection.execute(
         `UPDATE change_orders
