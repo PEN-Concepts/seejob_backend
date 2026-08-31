@@ -14,7 +14,7 @@ const multer = require("multer");
 const fs = require("fs");
 const nodemailer = require("nodemailer");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
-const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureJobColorColumn, ensureJobColorLockedColumn, ensureGanttStageProgressTable, assignJobNumberIfMissing } = require("../services/dbMigrations");
+const { ensureContactStatusColumn, ensureOwnerTypeColumns, ensureMaterialsExtraColumns, ensureJobColorColumn, ensureJobColorLockedColumn, ensureGanttStageProgressTable, assignJobNumberIfMissing } = require("../services/dbMigrations");
 const { pickJobColor, backfillJobColors, reassignActiveDiverse, RESERVED_GC_COLOR } = require("../services/jobColorPalette");
 
 // Normalize an owner_type/job_type param: anything but 'lead' is a job. Lets the
@@ -158,12 +158,17 @@ function generateOTP() {
 const materialSchema = Joi.object({
   job_id: Joi.number().integer().required(),
   owner_type: Joi.string().valid("job", "lead").default("job"),
+  // Existing columns (item_type/material/color are relabelled in the UI to
+  // Material/Type, Color, Model/Code #); category/location/finish are net-new.
   item_type: Joi.string().max(45).allow(null, ""),
   room: Joi.string().max(45).allow(null, ""),
   material: Joi.string().max(45).allow(null, ""),
   manufacturer: Joi.string().max(45).allow(null, ""),
   size: Joi.string().max(45).allow(null, ""),
   color: Joi.string().max(45).allow(null, ""),
+  category: Joi.string().max(45).allow(null, ""),
+  location: Joi.string().max(45).allow(null, ""),
+  finish: Joi.string().max(45).allow(null, ""),
 });
 
 // Shared, provider-switchable transport (see services/mailer.js).
@@ -2776,6 +2781,7 @@ router.get("/materials", auth.authenticateToken, blockExpiredOwnRecord((r) => r.
   try {
     connection = await pool.getConnection();
     await ensureOwnerTypeColumns(connection);
+    await ensureMaterialsExtraColumns(connection);
 
     const userId = req.user && req.user.id ? req.user.id : res.locals.id;
     const features = await getActivePlanFeatures(connection, userId);
@@ -2821,18 +2827,19 @@ router.post("/materials", auth.authenticateToken, denyExpiredFreeWrites, enforce
     });
   }
 
-  const { job_id, item_type, room, material, manufacturer, size, color } = value;
+  const { job_id, item_type, room, material, manufacturer, size, color, category, location, finish } = value;
   const ownerType = ownerTypeOf(value.owner_type);
 
   let connection;
   try {
     connection = await pool.getConnection();
     await ensureOwnerTypeColumns(connection);
+    await ensureMaterialsExtraColumns(connection);
 
     const [result] = await connection.execute(
-      `INSERT INTO materials (job_id, owner_type, item_type, room, material, manufacturer, size, color)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [job_id, ownerType, item_type ?? null, room ?? null, material ?? null, manufacturer ?? null, size ?? null, color ?? null]
+      `INSERT INTO materials (job_id, owner_type, item_type, room, material, manufacturer, size, color, category, location, finish)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [job_id, ownerType, item_type ?? null, room ?? null, material ?? null, manufacturer ?? null, size ?? null, color ?? null, category ?? null, location ?? null, finish ?? null]
     );
 
     res.status(201).json({
@@ -2862,11 +2869,12 @@ router.put("/materials/:id", auth.authenticateToken, denyExpiredFreeWrites, enfo
     });
   }
 
-  const { item_type, room, material, manufacturer, size, color } = value;
+  const { item_type, room, material, manufacturer, size, color, category, location, finish } = value;
 
   let connection;
   try {
     connection = await pool.getConnection();
+    await ensureMaterialsExtraColumns(connection);
 
     const [existing] = await connection.execute(
       "SELECT id, job_id, owner_type FROM materials WHERE id = ?",
@@ -2880,9 +2888,9 @@ router.put("/materials/:id", auth.authenticateToken, denyExpiredFreeWrites, enfo
       return res.status(403).json({ code: "403", message: "This material does not belong to your account." });
 
     await connection.execute(
-      `UPDATE materials SET item_type = ?, room = ?, material = ?, manufacturer = ?, size = ?, color = ?
+      `UPDATE materials SET item_type = ?, room = ?, material = ?, manufacturer = ?, size = ?, color = ?, category = ?, location = ?, finish = ?
        WHERE id = ?`,
-      [item_type ?? null, room ?? null, material ?? null, manufacturer ?? null, size ?? null, color ?? null, id]
+      [item_type ?? null, room ?? null, material ?? null, manufacturer ?? null, size ?? null, color ?? null, category ?? null, location ?? null, finish ?? null, id]
     );
 
     res.status(200).json({

@@ -83,6 +83,23 @@ async function ensureOwnerTypeColumns(connection) {
   ownerTypeEnsured = true;
 }
 
+// Materials redesign (2026-08-31): the table originally had item_type/room/material/
+// manufacturer/size/color. The new 9-field spec adds three net-new columns —
+// category (a fixed dropdown), location (the card title), and finish. Additive +
+// idempotent; existing columns are relabelled in the UI (item_type→Material/Type,
+// material→Color, color→Model/Code #), no data touched.
+let materialsExtraColsEnsured = false;
+async function ensureMaterialsExtraColumns(connection) {
+  if (materialsExtraColsEnsured) return;
+  for (const col of ['category', 'location', 'finish']) {
+    const [cols] = await connection.query(`SHOW COLUMNS FROM materials LIKE '${col}'`);
+    if (!cols.length) {
+      await connection.query(`ALTER TABLE materials ADD COLUMN ${col} VARCHAR(45) NULL`);
+    }
+  }
+  materialsExtraColsEnsured = true;
+}
+
 // Job Budget: `sub_cost` = what the subcontractor charges you for a line, stored
 // alongside `amount` (= what you bill the client / "Client budget"). Additive,
 // idempotent; runs once per process before a budget save/load.
@@ -1527,6 +1544,7 @@ module.exports = {
   ensureContactStatusColumn,
   ensureLeadBidStatusColumn,
   ensureOwnerTypeColumns,
+  ensureMaterialsExtraColumns,
   ensureSubCostColumn,
   ensureInHouseColumn,
   ensureBudgetPercentColumns,
