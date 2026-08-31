@@ -2372,6 +2372,114 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
   }
 });
 
+/**
+ * Job Schedule (mobile dashboard week view).
+ *
+ * Returns a flat, per-day-ready list of everything happening on the caller's
+ * jobs between ?start and ?end (inclusive, YYYY-MM-DD), MERGING:
+ *   - Master-Calendar job milestones  (tasks.is_calendar_task = 1, Gantt-driven)
+ *   - Task-Manager tasks assigned to a job (tasks.is_calendar_task = 0)
+ * Both live in the `tasks` table, so one query covers both; `type` tells them
+ * apart for the client.
+ *
+ * Read-only by design (no completion/photo/urgent here). Two guarantees are
+ * enforced HERE, at the query level, so completed work never reaches the client:
+ *   - completed excluded:  COALESCE(t.status,0) <> 1  (status=1 = fully done;
+ *     assignee_completed=1 alone is "worker says done, awaiting GC" → still shown)
+ *   - archived excluded:   t.archived_at IS NULL
+ *
+ * Role scope (category-aware, mirrors GET /jobs): owner + employees (category 1,
+ * whose resolveOwnerId = the owner) see ALL active account jobs; contractors/
+ * clients (category 2/3) are self-scoped to jobs they're assigned to (a task/team/
+ * contact on the job). Unassigned-to-a-person job tasks still appear — assignee_name
+ * comes back empty and the client leaves that area blank (never "Unassigned").
+ */
+router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
+  const me = req.user.id;
+  const dateRe = /^\d{4}-\d{2}-\d{2}$/;
+  const start = String(req.query?.start || "").trim();
+  const end = String(req.query?.end || "").trim();
+  if (!dateRe.test(start) || !dateRe.test(end)) {
+    return res.status(400).json({ message: "start and end (YYYY-MM-DD) are required" });
+  }
+  let connection;
+  try {
+    connection = await pool.getConnection();
+
+    const ownerId = await resolveOwnerId(me, connection);
+    const accountSql = "SELECT id FROM `user` WHERE id = ? OR (created_by = ? AND category = 1)";
+
+    // Visible ACTIVE jobs (status = 1): account jobs for owner/employees, plus any
+    // job the caller is personally attached to via a task, team, or contact. For a
+    // self-scoped contractor/client the account set is just themselves, so this
+    // collapses to "jobs I'm assigned to".
+    const [jobRows] = await connection.query(
+      `SELECT j.id, j.name
+         FROM job j
+        WHERE j.status = 1
+          AND (
+            j.created_by IN (${accountSql})
+            OR j.id IN (SELECT job_id FROM tasks WHERE user_id = ?)
+            OR j.id IN (
+                 SELECT DISTINCT t.job_id FROM tasks t
+                 JOIN team_user tu ON tu.team_id = t.team_id
+                 WHERE t.team_id IS NOT NULL AND tu.user_id = ?
+               )
+            OR j.id IN (SELECT job_id FROM job_contacts WHERE contact_id = ?)
+          )`,
+      [ownerId, ownerId, me, me, me]
+    );
+
+    const jobIds = jobRows.map((j) => j.id);
+    if (!jobIds.length) return res.status(200).json({ items: [] });
+
+    // Milestones (is_calendar_task=1) and tasks (0) both come from `tasks`.
+    const [rows] = await connection.query(
+      `SELECT
+         t.id,
+         t.task_name,
+         t.job_id,
+         t.start_date,
+         t.is_calendar_task,
+         j.name       AS job_name,
+         u.name       AS user_name,
+         tm.team_name AS team_name
+       FROM tasks t
+       JOIN job j        ON j.id = t.job_id
+       LEFT JOIN \`user\` u ON u.id = t.user_id
+       LEFT JOIN teams tm  ON tm.id = t.team_id
+       WHERE LOWER(t.task_type) = 'job'
+         AND t.archived_at IS NULL
+         AND COALESCE(t.status, 0) <> 1
+         AND t.start_date IS NOT NULL
+         AND DATE(t.start_date) BETWEEN ? AND ?
+         AND t.job_id IN (?)
+       ORDER BY t.start_date ASC, t.is_calendar_task DESC, t.id ASC`,
+      [start, end, jobIds]
+    );
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      title: r.task_name || "Item",
+      job_name: r.job_name || "",
+      // Person assignee wins; else the team; else blank (client renders nothing).
+      assignee_name: (r.user_name || r.team_name || "").trim(),
+      type: Number(r.is_calendar_task) === 1 ? "milestone" : "task",
+      date:
+        r.start_date instanceof Date
+          ? `${r.start_date.getFullYear()}-${String(r.start_date.getMonth() + 1).padStart(2, "0")}-${String(r.start_date.getDate()).padStart(2, "0")}`
+          : String(r.start_date).slice(0, 10),
+    }));
+
+    res.status(200).json({ items });
+  } catch (err) {
+    logger.error("Error in /jobs/job-schedule: " + err.message);
+    res.status(500).json({ message: "Server error", error: err.message });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 router.get("/get-job-address/:id", auth.authenticateToken, requireJobOwnership((r) => r.params.id), async (req, res) => {
   const jobId = req.params.id;
   let connection;
