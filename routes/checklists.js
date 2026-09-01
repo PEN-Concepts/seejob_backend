@@ -8,6 +8,18 @@ const multer = require('multer');
 const path = require('path');
 const logger = require('../common/logger');
 const { getAccessMode } = require('../utils/access');
+const chat = require('../services/chat');
+const mailer = require('../services/mailer');
+
+// Minimal HTML escaper for the shared-snapshot email body.
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 async function resolveBillingUserId(connection, userId) {
   let billingUserId = userId;
@@ -642,6 +654,99 @@ router.delete('/sections/:id', auth.authenticateToken, async (req, res) => {
     }
   } catch (err) {
     logger.error('Error deleting checklist section:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /sections/:id/share  — send a one-way, point-in-time snapshot of an
+// owned Notepad. This grants NO access: it renders the section's current items
+// into a checklist and delivers it over Email (branded HTML) or in-house Chat
+// (a direct message). SMS is handled client-side (plain text), so it never
+// reaches this endpoint. Owner-only, like every other Notepad read.
+const shareChecklistSchema = Joi.object({
+  channel: Joi.string().valid('email', 'chat').required(),
+  to_email: Joi.string().email().when('channel', { is: 'email', then: Joi.required(), otherwise: Joi.optional() }),
+  to_user_id: Joi.number().integer().positive().when('channel', { is: 'chat', then: Joi.required(), otherwise: Joi.optional() }),
+}).unknown(true);
+
+router.post('/sections/:id/share', auth.authenticateToken, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!id) return res.status(400).json({ success: false, message: 'Invalid checklist section id' });
+
+  const { error, value } = shareChecklistSchema.validate(req.body || {});
+  if (error) return res.status(400).json({ success: false, message: error.details[0].message });
+  const channel = value.channel;
+
+  try {
+    const signedin_user = res.locals.id;
+    const connection = await pool.getConnection();
+    try {
+      const access = await getChecklistAccess(connection, signedin_user);
+      if (!access.allowed) {
+        return res.status(403).json({ success: false, message: 'Clipboard requires an active plan.' });
+      }
+
+      // Owner-only: you can only share a Notepad you own.
+      const section = await getOwnedSection(connection, id, signedin_user);
+      if (!section) {
+        return res.status(404).json({ success: false, message: 'Checklist section not found' });
+      }
+
+      // Point-in-time item list. Live items only (a snapshot of the current pad).
+      const [items] = await connection.query(
+        `SELECT name, status FROM check_list WHERE section_id = ? ORDER BY id ASC`,
+        [id],
+      );
+
+      const title = (section.title && String(section.title).trim()) || 'My Notepad';
+      const isDone = (it) => String(it.status || '').toLowerCase() === 'completed';
+
+      // Plain-text snapshot — used for chat, and as the email text/alt part.
+      const textLines = items.map((it) => `${isDone(it) ? '[x]' : '[ ]'} ${it.name || ''}`);
+      const textBody =
+        `${title}\n\n` + (textLines.length ? textLines.join('\n') : '(empty)') +
+        `\n\n— Shared from See Job Run`;
+
+      if (channel === 'email') {
+        const to = String(value.to_email).trim();
+        const rows = items
+          .map((it) => {
+            const done = isDone(it);
+            const box = done ? '&#9745;' : '&#9744;'; // ☑ / ☐
+            const color = done ? '#8a8a8a' : '#222222';
+            const deco = done ? 'text-decoration:line-through;' : '';
+            return `<tr><td style="padding:6px 8px;font-size:16px;color:${color};${deco}"><span style="font-size:18px;margin-right:8px">${box}</span>${escapeHtml(it.name || '')}</td></tr>`;
+          })
+          .join('');
+        const html =
+          `<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;padding:8px">` +
+          `<h2 style="color:#c42034;margin:0 0 12px">${escapeHtml(title)}</h2>` +
+          `<table style="width:100%;border-collapse:collapse;background:#fff;border:1px solid #eee;border-radius:8px;overflow:hidden">` +
+          (rows || `<tr><td style="padding:10px 8px;color:#999;font-style:italic">(empty)</td></tr>`) +
+          `</table>` +
+          `<p style="color:#999;font-size:12px;margin-top:16px">This is a read-only snapshot shared from See Job Run. It won't update if the notepad changes.</p>` +
+          `</div>`;
+        await mailer.sendMail({ to, subject: `Notepad: ${title}`, html, text: textBody });
+        return res.status(200).json({ success: true, message: 'Notepad sent by email.' });
+      }
+
+      // channel === 'chat' — open (or reuse) the direct conversation and post
+      // the snapshot as a normal message from the sender.
+      const toUser = Number(value.to_user_id);
+      if (toUser === Number(signedin_user)) {
+        return res.status(400).json({ success: false, message: 'Pick someone else to share with.' });
+      }
+      const conversationId = await chat.getOrCreateDirect(connection, signedin_user, toUser);
+      if (!conversationId) {
+        return res.status(400).json({ success: false, message: 'Could not open a chat with that person.' });
+      }
+      await chat.postMessage({ conversationId, senderId: signedin_user, body: textBody });
+      return res.status(200).json({ success: true, message: 'Notepad sent to chat.', conversation_id: conversationId });
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    logger.error('Error sharing checklist section:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
