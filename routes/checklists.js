@@ -6,7 +6,6 @@ const auth = require('../services/authentication');
 const { getTimeStamp, timeStampFor, getUserTz } = require('../common/timdate');
 const multer = require('multer');
 const path = require('path');
-const admin = require('../config/firebase-admin');
 const logger = require('../common/logger');
 const { getAccessMode } = require('../utils/access');
 
@@ -61,7 +60,8 @@ async function getChecklistAccess(connection, userId) {
   return { role, allowed: true, canWrite: mode !== 'expired_free', expired: mode === 'expired_free' };
 }
 
- const VALID_CHECKLIST_TYPES = new Set(['task', 'shopping']);
+ // Notepad is a single list type now — the "shopping" variant was retired.
+ const VALID_CHECKLIST_TYPES = new Set(['task']);
 
 // Notepad "command center" auto-clear columns:
 //   filed_at = when the item got a home elsewhere (delegated / calendar /
@@ -100,12 +100,14 @@ const FILED_ELIGIBLE_SQL = `(
   OR (assign_to IS NOT NULL AND (assign_to <> created_by OR due_date IS NOT NULL))
 )`;
 
+ // Only one type remains ('task' = a Notepad page). Any legacy 'shopping' input
+ // is coerced to 'task' so old clients/rows can't create the retired variant.
  function normalizeChecklistType(type) {
-   return String(type || '').toLowerCase() === 'shopping' ? 'shopping' : 'task';
+   return 'task';
  }
 
  function getDefaultSectionTitle(type) {
-   return normalizeChecklistType(type) === 'shopping' ? 'Shopping List' : 'My Notepad';
+   return 'My Notepad';
  }
 
  async function getNextSectionSortOrder(connection, userId, type) {
@@ -120,12 +122,13 @@ const FILED_ELIGIBLE_SQL = `(
  }
 
  async function getAccessibleSection(connection, sectionId, userId) {
+  // Single-owner: a section is only accessible to its owner (share removed).
   const [[row]] = await connection.query(
     `SELECT id, owner_user_id, shared_with_user_id, type, title, sort_order, created_at, updated_at
      FROM checklist_sections
      WHERE id = ?
-       AND (owner_user_id = ? OR shared_with_user_id = ? )`,
-    [sectionId, userId, userId, userId],
+       AND owner_user_id = ?`,
+    [sectionId, userId],
   );
   return row || null;
 }
@@ -196,17 +199,12 @@ async function getAccessibleChecklistItem(connection, id, userId, extraFields = 
     LEFT JOIN checklist_sections s ON s.id = c.section_id
     WHERE c.id = ?
       AND (
-        (c.section_id IS NOT NULL AND (s.owner_user_id = ? OR s.shared_with_user_id = ?))
+        (c.section_id IS NOT NULL AND s.owner_user_id = ?)
         OR
-        (c.section_id IS NULL AND (c.created_by = ? OR c.assign_to = ?))
-        OR
-        EXISTS (
-          SELECT 1 FROM team_user tu
-          WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-        )
+        (c.section_id IS NULL AND c.created_by = ?)
       )
     LIMIT 1`,
-    [id, userId, userId, userId, userId, userId, userId],
+    [id, userId, userId],
   );
   return row || null;
 }
@@ -226,7 +224,7 @@ const createChecklistSchema = Joi.object({
   calendar_task_id: Joi.number().integer().positive().allow(null).optional(),
   appointment_id: Joi.number().integer().positive().allow(null).optional(),
   section_id: Joi.number().integer().positive().allow(null).optional(),
-  type: Joi.string().valid('task', 'shopping').required(),
+  type: Joi.string().valid('task').required(),
 });
 
 const updateChecklistSchema = Joi.object({
@@ -244,14 +242,14 @@ const updateChecklistSchema = Joi.object({
   calendar_task_id: Joi.number().integer().positive().allow(null).optional(),
   appointment_id: Joi.number().integer().positive().allow(null).optional(),
   section_id: Joi.number().integer().positive().allow(null).optional(),
-  type: Joi.string().valid('task', 'shopping').optional(),
+  type: Joi.string().valid('task').optional(),
   // Reference an existing photo (e.g. a linked See Job Run job photo) without
   // a file upload. Stored as a single reference string; handled at PUT /update/:id.
   photo: Joi.string().allow('', null).max(255).optional(),
 });
 
 const createChecklistSectionSchema = Joi.object({
-  type: Joi.string().valid('task', 'shopping').required(),
+  type: Joi.string().valid('task').required(),
   title: Joi.string().allow('', null).max(255).optional(),
   shared_with_user_id: Joi.number().allow(null).optional(),
 
@@ -322,7 +320,7 @@ router.post('/sections', auth.authenticateToken, async (req, res) => {
 
       const type = normalizeChecklistType(payload.type);
       const title = String(payload.title || '').trim() || getDefaultSectionTitle(type);
-      const sharedWithUserId = payload.shared_with_user_id ? Number(payload.shared_with_user_id) || null : null;
+      const sharedWithUserId = null; // share removed — Notepad sections are single-owner
       const sortOrder = payload.sort_order ?? await getNextSectionSortOrder(connection, signedin_user, type);
 
       const [result] = await connection.query(
@@ -363,15 +361,12 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
         return res.status(403).json({ success: false, message: 'Clipboard requires an active plan.' });
       }
 
-      if (!req.query.type || String(req.query.type) === 'task') {
-        await ensureDefaultSection(connection, signedin_user, 'task');
-      }
-      if (!req.query.type || String(req.query.type) === 'shopping') {
-        await ensureDefaultSection(connection, signedin_user, 'shopping');
-      }
+      // Seed a single default "My Notepad" page for a brand-new user. The
+      // "shopping" default was retired (single list type now).
+      await ensureDefaultSection(connection, signedin_user, 'task');
 
       const requestedType = req.query.type;
-      const params = [signedin_user, signedin_user, signedin_user];
+      const params = [signedin_user];
       let sql = `
         SELECT
           s.id,
@@ -381,15 +376,13 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
           s.title,
           s.sort_order,
           owner.name AS owner_name,
-          shared.name AS shared_with_name,
-          assigned.name AS assign_to_name,
+          NULL AS shared_with_name,
+          NULL AS assign_to_name,
           COUNT(c.id) AS item_count
         FROM checklist_sections s
         LEFT JOIN user owner ON owner.id = s.owner_user_id
-        LEFT JOIN user shared ON shared.id = s.shared_with_user_id
-        LEFT JOIN user assigned ON assigned.id = s.shared_with_user_id
         LEFT JOIN check_list c ON c.section_id = s.id
-        WHERE (s.owner_user_id = ? OR s.shared_with_user_id = ?)
+        WHERE s.owner_user_id = ?
       `;
 
       if (requestedType && VALID_CHECKLIST_TYPES.has(String(requestedType))) {
@@ -398,7 +391,7 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
       }
 
       sql += `
-        GROUP BY s.id, s.owner_user_id, s.shared_with_user_id, s.type, s.title, s.sort_order, owner.name, shared.name, assigned.name
+        GROUP BY s.id, s.owner_user_id, s.shared_with_user_id, s.type, s.title, s.sort_order, owner.name
         ORDER BY s.type ASC, s.sort_order ASC, s.id ASC
       `;
 
@@ -423,12 +416,9 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
         return res.status(403).json({ success: false, message: 'Clipboard requires an active plan.' });
       }
 
-      if (!req.query.type || String(req.query.type) === 'task') {
-        await ensureDefaultSection(connection, signedin_user, 'task');
-      }
-      if (!req.query.type || String(req.query.type) === 'shopping') {
-        await ensureDefaultSection(connection, signedin_user, 'shopping');
-      }
+      // Seed a single default "My Notepad" page for a brand-new user. The
+      // "shopping" default was retired (single list type now).
+      await ensureDefaultSection(connection, signedin_user, 'task');
 
       const requestedType = req.query.type;
       // We also include sections that contain at least one item assigned to a
@@ -439,35 +429,12 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
       // SHARED with them by another account, or containing an item assigned to a
       // team they're on, stay visible (collaborator content — requirement #4).
       // The owner-branch is dropped for expired users; paid/trial are unchanged.
-      const sectionParams = access.expired
-        ? [signedin_user, signedin_user]
-        : [signedin_user, signedin_user, signedin_user];
-      const sectionsWhere = access.expired
-        ? `(
-            s.shared_with_user_id = ?
-            OR s.id IN (
-              SELECT DISTINCT c.section_id
-              FROM check_list c
-              WHERE c.section_id IS NOT NULL AND c.created_by <> ${Number(signedin_user)}
-                AND EXISTS (
-                  SELECT 1 FROM team_user tu
-                  WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-                )
-            )
-          )`
-        : `(
-            s.owner_user_id = ?
-            OR s.shared_with_user_id = ?
-            OR s.id IN (
-              SELECT DISTINCT c.section_id
-              FROM check_list c
-              WHERE c.section_id IS NOT NULL
-                AND EXISTS (
-                  SELECT 1 FROM team_user tu
-                  WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-                )
-            )
-          )`;
+      // Single-owner Notepad: a user only ever sees their OWN sections + items.
+      // (Section share, item delegation, and team visibility were all removed —
+      // there is no cross-user access path anymore, so the expired-collaborator
+      // branch is gone too; an expired user simply sees their own pages read-only.)
+      const sectionParams = [signedin_user];
+      const sectionsWhere = `s.owner_user_id = ?`;
       let sectionsSql = `
         SELECT
           s.id,
@@ -477,12 +444,10 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
           s.title,
           s.sort_order,
           owner.name AS owner_name,
-          shared.name AS shared_with_name
-          , assigned.name AS assign_to_name
+          NULL AS shared_with_name,
+          NULL AS assign_to_name
         FROM checklist_sections s
         LEFT JOIN user owner ON owner.id = s.owner_user_id
-        LEFT JOIN user shared ON shared.id = s.shared_with_user_id
-        LEFT JOIN user assigned ON assigned.id = s.shared_with_user_id
         WHERE ${sectionsWhere}
       `;
 
@@ -493,35 +458,13 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
 
       sectionsSql += ' ORDER BY s.type ASC, s.sort_order ASC, s.id ASC';
 
-      // 5 params for the 5 placeholders in the WHERE below (owner, shared,
-      // created_by, assign_to, team-user). A 6th param here would be wrongly
-      // consumed by the appended "AND c.type = ?" clause, making it compare
-      // c.type to a user id and return zero items.
-      // Expired: only collaborator items stay — an item in a section shared TO
-      // them, an item delegated to them BY SOMEONE ELSE (assign_to me, created by
-      // another), or a team item authored by another account. Their own items
-      // (self-created, incl. self-delegated) are locked. Paid/trial: unchanged.
-      const itemParams = access.expired
-        ? [signedin_user, signedin_user]
-        : [signedin_user, signedin_user, signedin_user, signedin_user, signedin_user];
-      const itemsWhere = access.expired
-        ? `(
-            (c.section_id IS NOT NULL AND s.shared_with_user_id = ?)
-            OR (c.assign_to = ? AND c.created_by <> ${Number(signedin_user)})
-            OR (
-              c.created_by <> ${Number(signedin_user)}
-              AND EXISTS (SELECT 1 FROM team_user tu WHERE tu.team_id = c.assign_to AND tu.user_id = ${Number(signedin_user)})
-            )
-          )`
-        : `(
-            (c.section_id IS NOT NULL AND (s.owner_user_id = ? OR s.shared_with_user_id = ?))
+      // Owner-only items: a section item the caller owns, or a no-section item
+      // they created. No shared/delegated/team access remains.
+      const itemParams = [signedin_user, signedin_user];
+      const itemsWhere = `(
+            (c.section_id IS NOT NULL AND s.owner_user_id = ?)
             OR
-            (c.section_id IS NULL AND (c.created_by = ? OR c.assign_to = ?))
-            OR
-            EXISTS (
-              SELECT 1 FROM team_user tu
-              WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-            )
+            (c.section_id IS NULL AND c.created_by = ?)
           )`;
       // tm.* is populated only when assign_to matches a teams.id, giving the
       // frontend a way to render the team chip without a dedicated column.
@@ -635,11 +578,8 @@ router.put('/sections/:id', auth.authenticateToken, async (req, res) => {
         fields.push('title = ?');
         values.push(String(payload.title || '').trim() || getDefaultSectionTitle(section.type));
       }
-      if (payload.shared_with_user_id !== undefined) {
-        fields.push('shared_with_user_id = ?');
-        values.push(payload.shared_with_user_id ? Number(payload.shared_with_user_id) || null : null);
-      }
-  
+      // shared_with_user_id is intentionally ignored — Notepad sections are
+      // single-owner now (the "Share With" grant was removed).
       if (payload.sort_order !== undefined) {
         fields.push('sort_order = ?');
         values.push(payload.sort_order);
@@ -826,89 +766,9 @@ router.post('/create', auth.authenticateToken, async (req, res) => {
   }
 });
 
-// Send an immediate nudge to the assigned user of a checklist item
-router.post('/nudge/:id', auth.authenticateToken, async (req, res) => {
-  const id = Number(req.params.id);
-  if (!id) return res.status(400).json({ success: false, message: 'Invalid checklist id' });
-
-  try {
-    const signedin_user = res.locals.id;
-    const connection = await pool.getConnection();
-    try {
-      const access = await getChecklistAccess(connection, signedin_user);
-      if (!access.allowed) {
-        return res.status(403).json({ success: false, message: 'Clipboard requires an active plan.' });
-      }
-      if (!access.canWrite) {
-        return res.status(403).json({ success: false, message: 'Your plan does not allow modifying Clipboard.' });
-      }
-    } finally {
-      connection.release();
-    }
-
-    const [[row]] = await pool.query(
-      `SELECT c.id, c.name, c.assign_to
-       FROM check_list c
-       LEFT JOIN checklist_sections s ON s.id = c.section_id
-       WHERE c.id = ?
-         AND (
-           (c.section_id IS NOT NULL AND (s.owner_user_id = ? OR s.shared_with_user_id = ?))
-           OR
-           (c.section_id IS NULL AND (c.created_by = ? OR c.assign_to = ?))
-           OR
-           EXISTS (
-             SELECT 1 FROM team_user tu
-             WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-           )
-         )`,
-      [id, signedin_user, signedin_user, signedin_user, signedin_user, signedin_user]
-    );
-
-    if (!row) {
-      return res.status(404).json({ success: false, message: 'Checklist item not found' });
-    }
-    if (!row.assign_to) {
-      return res.status(400).json({ success: false, message: 'Checklist item has no assigned user' });
-    }
-
-    const actorId = req.user && req.user.id ? req.user.id : signedin_user;
-    const [[actorRow]] = await pool.query('SELECT name FROM user WHERE id=?', [actorId]);
-    const actorName = actorRow ? actorRow.name : 'Someone';
-
-    const assignedUser = row.assign_to;
-    const url = '/checklist3';
-    const notifyMessage = `${actorName} nudged you on checklist: "${row.name}".`;
-
-    await pool.query(
-      `INSERT INTO notifications (sender_id, receiver_id, content, status, url, created_by)
-       VALUES (?, ?, ?, 1, ?, ?)`,
-      [actorId, assignedUser, notifyMessage, url, actorId]
-    );
-
-    const [[recipient]] = await pool.query(
-      'SELECT fcm_token FROM user_device_tokens WHERE user_id=?',
-      [assignedUser]
-    );
-
-    if (recipient && recipient.fcm_token) {
-      const message = {
-        token: recipient.fcm_token,
-        notification: { title: 'Checklist Nudge', body: notifyMessage },
-        data: { type: 'checklist_nudge', checklist_id: String(id), url },
-      };
-      try {
-        await admin.messaging().send(message);
-      } catch (err) {
-        logger.error('FCM Error:', err);
-      }
-    }
-
-    res.status(200).json({ success: true, message: 'Nudge sent' });
-  } catch (err) {
-    logger.error("Checklist nudge error:", err);
-    res.status(500).json({ success: false, message: 'Internal server error' });
-  }
-});
+// NOTE: POST /nudge/:id was removed — item-level delegation (notify an assigned
+// person on a Notepad item) is gone. Collaboration lives in Task Manager now;
+// a Notepad item that needs another person is "promoted to a Task" instead.
 
 router.get('/list', auth.authenticateToken, async (req, res) => {
   try {
@@ -923,7 +783,7 @@ router.get('/list', auth.authenticateToken, async (req, res) => {
       connection.release();
     }
     const type = req.query.type;
-    const allowedTypes = new Set(['task', 'shopping']);
+    const allowedTypes = new Set(['task']);
 
     let sql = `
       SELECT
@@ -959,17 +819,13 @@ router.get('/list', auth.authenticateToken, async (req, res) => {
       LEFT JOIN teams tm ON tm.id = c.assign_to
     `;
 
-    const params = [signedin_user, signedin_user, signedin_user, signedin_user, signedin_user];
+    const params = [signedin_user, signedin_user];
 
+    // Single-owner: only the caller's own section items + own no-section items.
     sql += ` WHERE (
-      (c.section_id IS NOT NULL AND (s.owner_user_id = ? OR s.shared_with_user_id = ?))
+      (c.section_id IS NOT NULL AND s.owner_user_id = ?)
       OR
-      (c.section_id IS NULL AND (c.created_by = ? OR c.assign_to = ?))
-      OR
-      EXISTS (
-        SELECT 1 FROM team_user tu
-        WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-      )
+      (c.section_id IS NULL AND c.created_by = ?)
     )`;
 
     if (type && allowedTypes.has(String(type))) {
@@ -1212,17 +1068,12 @@ router.put('/status-update', auth.authenticateToken, async (req, res) => {
       SET c.status = ?
       WHERE c.id IN (${placeholders})
         AND (
-          (c.section_id IS NOT NULL AND (s.owner_user_id = ? OR s.shared_with_user_id = ?))
+          (c.section_id IS NOT NULL AND s.owner_user_id = ?)
           OR
-          (c.section_id IS NULL AND (c.created_by = ? OR c.assign_to = ?))
-          OR
-          EXISTS (
-            SELECT 1 FROM team_user tu
-            WHERE tu.team_id = c.assign_to AND tu.user_id = ?
-          )
+          (c.section_id IS NULL AND c.created_by = ?)
         )
     `;
-    const [result] = await pool.query(sql, [status, ...ids, signedin_user, signedin_user, signedin_user, signedin_user, signedin_user]);
+    const [result] = await pool.query(sql, [status, ...ids, signedin_user, signedin_user]);
 
     res.status(200).json({
       success: true,
