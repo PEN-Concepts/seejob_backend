@@ -526,9 +526,10 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
         itemsSql += ' AND 1 = 0';
       }
 
-      // Completed items sink to the bottom (but keep their normal row); newest
-      // first within each of the open / completed groups.
-      itemsSql += " ORDER BY (c.status = 'completed') ASC, c.id DESC";
+      // Ordering (Notepad): completed items sink to the bottom (keeping their
+      // normal row); starred items pin to the top of the active section; newest
+      // first otherwise.
+      itemsSql += " ORDER BY (c.status = 'completed') ASC, (c.priority = 'high') DESC, c.id DESC";
 
       const [sections, items] = await Promise.all([
         connection.query(sectionsSql, sectionParams).then(([rows]) => rows),
