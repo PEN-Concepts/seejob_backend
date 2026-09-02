@@ -147,50 +147,11 @@ async function sendDefaults(connection) {
     }
   }
 
-  // Notepad items with a due date → 10 min before (timed) or 8 AM (date-only).
-  let notes = [];
-  try {
-    [notes] = await connection.query(
-      `SELECT c.id, c.name, c.due_date, c.created_by AS uid, j.name AS job_name
-       FROM check_list c
-       LEFT JOIN job j ON j.id = c.job_id
-       WHERE c.due_date IS NOT NULL
-         AND (c.status IS NULL OR c.status <> 'completed')
-         AND DATE(c.due_date) BETWEEN ? AND ?`,
-      [from, to]
-    );
-  } catch (e) {
-    if (e && e.code !== 'ER_BAD_FIELD_ERROR' && e.code !== 'ER_NO_SUCH_TABLE') throw e;
-  }
-  for (const c of notes) {
-    const uid = Number(c.uid);
-    if (!uid) continue;
-    const utz = await tzForUser(connection, uid, tzCache);
-    const raw = String(c.due_date).replace('T', ' ');
-    const dateStr = raw.slice(0, 10);
-    const hasTime = /\d{2}:\d{2}/.test(raw) && !/00:00(:00)?$/.test(raw);
-    let shouldFire = false;
-    if (hasTime) {
-      const dueM = moment.tz(raw, 'YYYY-MM-DD HH:mm:ss', utz);
-      if (!dueM.isValid()) continue;
-      const fireM = dueM.clone().subtract(10, 'minutes');
-      shouldFire = now.isSameOrAfter(fireM) && now.isBefore(dueM.clone().add(5, 'minutes'));
-    } else {
-      const eightAM = moment.tz(`${dateStr} 08:00:00`, 'YYYY-MM-DD HH:mm:ss', utz);
-      // Compare in the user's zone so the "same day" guard is correct for them.
-      const nowUtz = now.clone().tz(utz);
-      shouldFire = nowUtz.isSameOrAfter(eightAM) && nowUtz.isSame(eightAM, 'day');
-    }
-    if (shouldFire && (await claimDefault(connection, uid, 'note', `${c.id}:default`))) {
-      await sendToUser(connection, uid, {
-        type: 'note',
-        title: String(c.name || 'Reminder'),
-        jobName: c.job_name ? String(c.job_name) : '',
-        body: c.job_name ? 'Job: ' + c.job_name : '',
-        url: 'checklist3',
-      });
-    }
-  }
+  // Notepad items DO NOT get an automatic default reminder. A Notepad item only
+  // ever pushes when the user explicitly sets a reminder on it (stored in the
+  // `reminders` table and delivered by sendDueExplicit). "No reminder" means zero
+  // pushes — full stop. (Removing the old due-date-derived 10-min/8-AM default
+  // also eliminates the double-notify that happened alongside an explicit lead.)
 }
 
 async function tick() {
