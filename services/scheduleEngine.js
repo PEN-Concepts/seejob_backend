@@ -183,6 +183,13 @@ function computeSchedule({ items, deps, startDate, skipSaturday, skipSunday }) {
         : anchorStr;
     }
 
+    // Floor every item at the schedule anchor: nothing starts before the schedule's
+    // start date. This clamps a STALE/early pin (e.g. a "start" item still pinned to
+    // an old start of 08-31 while the schedule now starts 09-17) up to the start date,
+    // so the whole Depends-on chain follows the declared start. A pin that is ON or
+    // AFTER the start date is untouched (legit forward pins still hold).
+    if (start < anchorStr) start = anchorStr;
+
     const end = addWorkingDays(start, duration - 1, skipSat, skipSun);
     results[id] = { start, end, duration };
   }
