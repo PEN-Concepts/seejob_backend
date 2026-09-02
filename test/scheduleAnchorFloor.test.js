@@ -41,5 +41,29 @@ ok(early.length === 0, 'no item starts before the schedule start date', JSON.str
 ok(r.ok !== false, 'schedule computed (no cycle)');
 ok(Object.keys(r.results).length === 3, 'all items computed');
 
+// ---- pin also floors after DEPENDENCIES (real Color Stucco / Railings case) ----
+// Color Stucco pinned 09-28 but its scratch-coat dependency now ends 09-29 → it must
+// FLOOR to 09-30 (no bust), and dragging the last item LATER must be accepted.
+{
+  const it2 = [
+    { id: 1, name: 'Stucco lath', duration_days: 2 },                                  // start 09-28 → end 09-29
+    { id: 2, name: 'Color Stucco', duration_days: 1, pinned_start_date: '2026-09-28' }, // pinned before its dep finishes
+    { id: 3, name: 'Railings', duration_days: 1 },                                       // depends on both
+  ];
+  const dp2 = [
+    { item_id: 2, depends_on_item_id: 1 },
+    { item_id: 3, depends_on_item_id: 1 }, { item_id: 3, depends_on_item_id: 2 },
+  ];
+  const r2 = engine.computeSchedule({ items: it2, deps: dp2, startDate: '2026-09-28', skipSaturday: true, skipSunday: true });
+  ok(r2.conflicts.length === 0, 'no bust: Color Stucco pin earlier than its dependency floors instead of blocking', JSON.stringify(r2.conflicts));
+  ok(r2.results[2].start === '2026-09-30', 'Color Stucco floors to 09-30 (working day after Stucco lath ends 09-29)', 'got ' + r2.results[2].start);
+
+  // Drag Railings (the last item) to a far LATER date — must be accepted, no conflict.
+  it2[2].pinned_start_date = '2026-10-15';
+  const r3 = engine.computeSchedule({ items: it2, deps: dp2, startDate: '2026-09-28', skipSaturday: true, skipSunday: true });
+  ok(r3.conflicts.length === 0, 'dragging the last item LATER is accepted (a later move can never bust)', JSON.stringify(r3.conflicts));
+  ok(r3.results[3].start === '2026-10-15', 'Railings honors its later pin (10-15)', 'got ' + r3.results[3].start);
+}
+
 console.log(`\nScheduleEngine anchor-floor test\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

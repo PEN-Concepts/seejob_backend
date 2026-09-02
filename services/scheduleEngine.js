@@ -165,30 +165,29 @@ function computeSchedule({ items, deps, startDate, skipSaturday, skipSunday }) {
     const duration = normalizeDuration(it.duration_days);
     const depIds = Array.from(preds.get(id));
 
-    let start;
-    if (it.pinned_start_date) {
-      // Explicit user override (e.g. calendar drag) — honored as-is, not snapped.
-      start = fmtYMD(parseYMD(it.pinned_start_date));
-    } else if (!depIds.length) {
-      start = anchorStr;
-    } else {
-      // Start the working day AFTER the LATEST-finishing dependency.
+    // A start is built from THREE floors; the LATEST wins. Nothing may start
+    // before (a) the schedule anchor, or (b) the working day after its latest
+    // dependency finishes. A pinned_start_date is treated as a "no earlier than"
+    // hint — it can push an item LATER, but never in front of (a) or (b). This
+    // means a pin can NEVER create a dependency bust: a stale/early pin (e.g. a
+    // "start" item still pinned to 08-31 while the schedule starts 09-17, or a
+    // Color-Stucco pin of 09-28 whose scratch-coat dependency now ends 09-29)
+    // is simply floored up to the legal date instead of blocking the schedule.
+    let depFloor = null;
+    if (depIds.length) {
       let latestEnd = null;
       for (const d of depIds) {
         const de = results[d] && results[d].end;
         if (de && (latestEnd === null || de > latestEnd)) latestEnd = de;
       }
-      start = latestEnd
-        ? addWorkingDays(latestEnd, 1, skipSat, skipSun)
-        : anchorStr;
+      if (latestEnd) depFloor = addWorkingDays(latestEnd, 1, skipSat, skipSun);
     }
-
-    // Floor every item at the schedule anchor: nothing starts before the schedule's
-    // start date. This clamps a STALE/early pin (e.g. a "start" item still pinned to
-    // an old start of 08-31 while the schedule now starts 09-17) up to the start date,
-    // so the whole Depends-on chain follows the declared start. A pin that is ON or
-    // AFTER the start date is untouched (legit forward pins still hold).
-    if (start < anchorStr) start = anchorStr;
+    let start = anchorStr;                          // floor (a): schedule start
+    if (depFloor && depFloor > start) start = depFloor; // floor (b): after dependencies
+    if (it.pinned_start_date) {
+      const pin = fmtYMD(parseYMD(it.pinned_start_date));
+      if (pin > start) start = pin;                 // pin only wins when it's LATER
+    }
 
     const end = addWorkingDays(start, duration - 1, skipSat, skipSun);
     results[id] = { start, end, duration };

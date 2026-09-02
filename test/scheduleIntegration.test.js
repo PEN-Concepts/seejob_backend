@@ -239,38 +239,42 @@ const tokenFor = (id, role, workingId) => jwt.sign({ id, role, working_id: worki
     ok(rApplyCycle.status === 409 && rApplyCycle.body.code === 'CYCLE', `apply of cyclic template → 409 CYCLE, not silently computed (got ${rApplyCycle.status} ${rApplyCycle.body.code || ''})`);
 
     // ---------- T6: dependency BUSTS rejected at write-time (behavior reversal) ----------
-    section('T6 — dependency busts are REJECTED, not flagged (reject-at-write-time)');
+    section('T6 — a too-early pin FLOORS after its dependency (never a blocking bust)');
     const gs = await request(app).get(`/api/v1/job-schedules/${JOB}?owner_type=job`).set(auth(goldTok));
     const sid6 = gs.body.data.schedule.id;
     const bo = Object.fromEntries(gs.body.data.items.map((i) => [i.sort_order, i]));
     const it1 = bo[1]; // Temp. Toilet (no deps)
     const it2 = bo[2]; // Stake out building (depends on Temp. Toilet)
+    const ymd = (v) => String(v).slice(0, 10);
 
-    // (a) pin item 2 before its dependency finishes → 409, nothing saved
+    // (a) pin item 2 before its dependency finishes → ACCEPTED (200); the pin is kept
+    //     as a "no earlier than" floor and the item computes to AFTER its dependency.
     const rEarly = await request(app).put(`/api/v1/job-schedules/${sid6}/items/${it2.id}`).set(auth(goldTok)).send({ pinned_start_date: '2026-08-03' });
-    ok(rEarly.status === 409 && rEarly.body.code === 'SCHEDULE_CONFLICT', `pin item 2 too early → 409 SCHEDULE_CONFLICT (got ${rEarly.status} ${rEarly.body.code || ''})`);
-    ok(/Stake out/i.test(rEarly.body.message || '') && /Temp\. Toilet/i.test(rEarly.body.message || ''),
-      `message names the item + its dependency: "${rEarly.body.message}"`);
-    const [[chk2a]] = await pool.query('SELECT pinned_start_date FROM job_schedule_items WHERE id=?', [it2.id]);
-    ok(chk2a.pinned_start_date === null, 'rejected pin was NOT persisted (write rolled back)');
+    ok(rEarly.status === 200, `pin item 2 too early is ACCEPTED, not rejected → 200 (got ${rEarly.status} ${rEarly.body.code || ''})`);
+    const [[chk2a]] = await pool.query('SELECT pinned_start_date, computed_start_date FROM job_schedule_items WHERE id=?', [it2.id]);
+    ok(ymd(chk2a.pinned_start_date) === '2026-08-03', 'the pin IS persisted (kept as the floor hint)');
+    const [[dep1]] = await pool.query('SELECT computed_end_date FROM job_schedule_items WHERE id=?', [it1.id]);
+    ok(ymd(chk2a.computed_start_date) > ymd(dep1.computed_end_date), `item 2 floored to AFTER its dependency finishes (start ${ymd(chk2a.computed_start_date)} > dep end ${ymd(dep1.computed_end_date)})`);
 
-    // (b) a valid, later pin is accepted (control)
+    // (b) a valid, later pin is honored (control)
     const rLate = await request(app).put(`/api/v1/job-schedules/${sid6}/items/${it2.id}`).set(auth(goldTok)).send({ pinned_start_date: '2026-09-01' });
-    ok(rLate.status === 200, `a later (valid) pin is accepted → 200 (got ${rLate.status})`);
+    ok(rLate.status === 200, `a later pin is honored → 200 (got ${rLate.status})`);
 
-    // (c) DOWNSTREAM bust: grow item 1's duration so it ends after item 2's pin → reject naming item 2
+    // (c) DOWNSTREAM shift: grow item 1's duration so it ends after item 2's pin →
+    //     ACCEPTED; item 1's duration IS changed and item 2 floors after it (no block).
     const rDown = await request(app).put(`/api/v1/job-schedules/${sid6}/items/${it1.id}`).set(auth(goldTok)).send({ duration_days: 40 });
-    ok(rDown.status === 409 && rDown.body.code === 'SCHEDULE_CONFLICT', `duration edit causing a DOWNSTREAM bust → 409 (got ${rDown.status})`);
-    ok(/Stake out/i.test(rDown.body.message || ''), `downstream rejection names the affected item (Stake out), not the edited one: "${rDown.body.message}"`);
-    const [[chk1]] = await pool.query('SELECT duration_days FROM job_schedule_items WHERE id=?', [it1.id]);
-    ok(Number(chk1.duration_days) === 1, `edited item's duration NOT changed (rejected; still 1, got ${chk1.duration_days})`);
+    ok(rDown.status === 200, `duration edit that pushes a dependent is ACCEPTED (item floors, not blocked) → 200 (got ${rDown.status})`);
+    const [[chk1]] = await pool.query('SELECT duration_days, computed_end_date FROM job_schedule_items WHERE id=?', [it1.id]);
+    ok(Number(chk1.duration_days) === 40, `edited item's duration WAS changed (now 40, got ${chk1.duration_days})`);
+    const [[chk2c]] = await pool.query('SELECT computed_start_date FROM job_schedule_items WHERE id=?', [it2.id]);
+    ok(ymd(chk2c.computed_start_date) > ymd(chk1.computed_end_date), `item 2 floored after item 1's grown end (start ${ymd(chk2c.computed_start_date)} > ${ymd(chk1.computed_end_date)})`);
 
-    // (d) calendar-drag path (PUT /tasks/update) too early → 409, task unchanged
+    // (d) calendar-drag path (PUT /tasks/update) too early → ACCEPTED; the item floors.
     const rDragBust = await request(app).put(`/api/v1/tasks/update/${it2.task_id}`).set(auth(goldTok))
       .send({ start_date: '2026-08-03', duration_days: 1, user_id: it2.assignee_user_id, task_name: it2.name });
-    ok(rDragBust.status === 409 && rDragBust.body.code === 'SCHEDULE_CONFLICT', `calendar-drag too early → 409 (got ${rDragBust.status} ${rDragBust.body.code || ''})`);
-    const [[t2]] = await pool.query('SELECT start_date FROM tasks WHERE id=?', [it2.task_id]);
-    ok(String(t2.start_date).slice(0, 10) !== '2026-08-03', `dragged task was NOT moved to the rejected date (got ${String(t2.start_date).slice(0, 10)})`);
+    ok(rDragBust.status !== 409, `calendar-drag too early is NOT rejected (floors instead of 409) → got ${rDragBust.status}`);
+    const [[t2s]] = await pool.query('SELECT computed_start_date FROM job_schedule_items WHERE id=?', [it2.id]);
+    ok(ymd(t2s.computed_start_date) > ymd(chk1.computed_end_date), `dragged item floored after its dependency, not left at the impossible 08-03 (got ${ymd(t2s.computed_start_date)})`);
 
     // ---------- T7: is_inspection flags, provenance (adopt), reset ----------
     section('T7 — inspection flags + provenance (adopt/clone) + reset-to-starter');
