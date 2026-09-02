@@ -518,24 +518,17 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
         itemParams.push(String(requestedType));
       }
 
-      // Auto-clear: hide items filed > grace minutes ago (unless Kept). The
-      // "Recently filed" peek (?filed=1) shows ONLY those cleared items.
+      // (Auto-clear/"Keep" removed) — every owned item stays on the Notepad; the
+      // deprecated "Recently filed" peek (?filed=1) now returns nothing.
       await ensureNotepadFlowColumns(connection);
-      // Grace timer is evaluated in the viewer's saved timezone (their wall clock)
-      // instead of the DB server's NOW(), so the 7-minute countdown lines up with
-      // what the user sees regardless of the server's zone.
-      const graceTz = await getUserTz(connection, signedin_user);
-      const graceNow = timeStampFor(graceTz);
       const filedView = String(req.query.filed || '') === '1';
       if (filedView) {
-        itemsSql += ` AND c.kept = 0 AND c.filed_at IS NOT NULL AND c.filed_at <= (? - INTERVAL ${NOTEPAD_FILE_GRACE_MIN} MINUTE)`;
-        itemParams.push(graceNow);
-      } else {
-        itemsSql += ` AND (c.kept = 1 OR c.filed_at IS NULL OR c.filed_at > (? - INTERVAL ${NOTEPAD_FILE_GRACE_MIN} MINUTE))`;
-        itemParams.push(graceNow);
+        itemsSql += ' AND 1 = 0';
       }
 
-      itemsSql += ' ORDER BY c.id DESC';
+      // Completed items sink to the bottom (but keep their normal row); newest
+      // first within each of the open / completed groups.
+      itemsSql += " ORDER BY (c.status = 'completed') ASC, c.id DESC";
 
       const [sections, items] = await Promise.all([
         connection.query(sectionsSql, sectionParams).then(([rows]) => rows),
@@ -1083,17 +1076,8 @@ router.put('/update/:id', auth.authenticateToken, async (req, res) => {
         return res.status(404).json({ success: false, message: 'Checklist item not found' });
       }
 
-      // Once the item has a home elsewhere (delegated / calendar / appointment /
-      // completed), stamp filed_at so it auto-clears from the Notepad after the
-      // grace period — unless the user tapped "Keep" (kept = 1).
-      await ensureNotepadFlowColumns(connection);
-      // Stamp filed_at in the acting user's timezone so it matches the grace read.
-      const filedTz = await getUserTz(connection, res.locals.id);
-      await connection.query(
-        `UPDATE check_list SET filed_at = ?
-         WHERE id = ? AND filed_at IS NULL AND kept = 0 AND ${FILED_ELIGIBLE_SQL}`,
-        [timeStampFor(filedTz), id]
-      );
+      // (Auto-clear/"Keep" removed) — completed items now just sink to the bottom
+      // of the Notepad and stay put; nothing gets filed away on a countdown.
 
       res.status(200).json({ success: true, message: 'Checklist item updated successfully' });
     } finally {
