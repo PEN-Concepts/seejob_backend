@@ -7,7 +7,7 @@ const { getTimeStamp, timeStampFor, getUserTz } = require('../common/timdate');
 const multer = require('multer');
 const path = require('path');
 const logger = require('../common/logger');
-const { getAccessMode } = require('../utils/access');
+const { getAccessMode, isSameAccount } = require('../utils/access');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
 
@@ -96,7 +96,26 @@ async function ensureNotepadFlowColumns(connection) {
   if (!ld.length) {
     await connection.query("ALTER TABLE check_list ADD COLUMN lead_id INT NULL DEFAULT NULL");
   }
+  // Optional job attached to a whole Notepad section: tasks created inside it
+  // already know their job (so pushing a task only needs an assignee). NULL = no
+  // job attached. Stores a JOB id only (never a lead).
+  const [sj] = await connection.query("SHOW COLUMNS FROM checklist_sections LIKE 'job_id'");
+  if (!sj.length) {
+    await connection.query("ALTER TABLE checklist_sections ADD COLUMN job_id INT NULL DEFAULT NULL");
+  }
   notepadFlowEnsured = true;
+}
+
+// Resolve a job to attach to a notepad section. Must be a real JOB that belongs
+// to the caller's ACCOUNT (never a foreign job — that would leak its name/colour
+// onto the attacher's pad). null in → null out (detach / no job). Returns
+// { ok, jobId } — ok:false means the supplied id is missing or cross-account.
+async function resolveNotepadJob(connection, jobId, userId) {
+  if (jobId == null || jobId === '') return { ok: true, jobId: null };
+  const [[row]] = await connection.query('SELECT created_by FROM `job` WHERE id = ? LIMIT 1', [Number(jobId)]);
+  if (!row) return { ok: false, jobId: null };
+  if (!(await isSameAccount(userId, row.created_by, connection))) return { ok: false, jobId: null };
+  return { ok: true, jobId: Number(jobId) };
 }
 
 // Minutes an item lingers on the Notepad after it's filed (grace to edit/Keep).
@@ -264,13 +283,16 @@ const createChecklistSectionSchema = Joi.object({
   type: Joi.string().valid('task').required(),
   title: Joi.string().allow('', null).max(255).optional(),
   shared_with_user_id: Joi.number().allow(null).optional(),
-
+  // Optional job attached to the whole notepad (null = none).
+  job_id: Joi.number().integer().positive().allow(null).optional(),
   sort_order: Joi.number().integer().min(0).allow(null).optional(),
 });
 
 const updateChecklistSectionSchema = Joi.object({
   title: Joi.string().allow('', null).max(255).optional(),
   shared_with_user_id: Joi.number().allow(null).optional(),
+  // Attach / detach a job after the fact (null = detach).
+  job_id: Joi.number().integer().positive().allow(null).optional(),
   sort_order: Joi.number().integer().min(0).allow(null).optional(),
 });
 
@@ -335,11 +357,18 @@ router.post('/sections', auth.authenticateToken, async (req, res) => {
       const sharedWithUserId = null; // share removed — Notepad sections are single-owner
       const sortOrder = payload.sort_order ?? await getNextSectionSortOrder(connection, signedin_user, type);
 
+      await ensureNotepadFlowColumns(connection);
+      const jobRes = await resolveNotepadJob(connection, payload.job_id, signedin_user);
+      if (!jobRes.ok) {
+        return res.status(403).json({ success: false, message: 'That job is not in your account.' });
+      }
+      const jobId = jobRes.jobId;
+
       const [result] = await connection.query(
         `INSERT INTO checklist_sections
-          (owner_user_id, shared_with_user_id, type, title, sort_order)
-         VALUES (?, ?, ?, ?, ?)`,
-        [signedin_user, sharedWithUserId, type, title, sortOrder],
+          (owner_user_id, shared_with_user_id, type, title, sort_order, job_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [signedin_user, sharedWithUserId, type, title, sortOrder, jobId],
       );
 
       res.status(201).json({
@@ -352,6 +381,7 @@ router.post('/sections', auth.authenticateToken, async (req, res) => {
           type,
           title,
           sort_order: sortOrder,
+          job_id: jobId,
         },
       });
     } finally {
@@ -376,6 +406,7 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
       // Seed a single default "My Notepad" page for a brand-new user. The
       // "shopping" default was retired (single list type now).
       await ensureDefaultSection(connection, signedin_user, 'task');
+      await ensureNotepadFlowColumns(connection); // so s.job_id is selectable
 
       const requestedType = req.query.type;
       const params = [signedin_user];
@@ -387,12 +418,16 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
           s.type,
           s.title,
           s.sort_order,
+          s.job_id,
+          j.name AS job_name,
+          j.color AS job_color,
           owner.name AS owner_name,
           NULL AS shared_with_name,
           NULL AS assign_to_name,
           COUNT(c.id) AS item_count
         FROM checklist_sections s
         LEFT JOIN user owner ON owner.id = s.owner_user_id
+        LEFT JOIN \`job\` j ON j.id = s.job_id
         LEFT JOIN check_list c ON c.section_id = s.id
         WHERE s.owner_user_id = ?
       `;
@@ -403,7 +438,7 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
       }
 
       sql += `
-        GROUP BY s.id, s.owner_user_id, s.shared_with_user_id, s.type, s.title, s.sort_order, owner.name
+        GROUP BY s.id, s.owner_user_id, s.shared_with_user_id, s.type, s.title, s.sort_order, s.job_id, j.name, j.color, owner.name
         ORDER BY s.type ASC, s.sort_order ASC, s.id ASC
       `;
 
@@ -431,6 +466,7 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
       // Seed a single default "My Notepad" page for a brand-new user. The
       // "shopping" default was retired (single list type now).
       await ensureDefaultSection(connection, signedin_user, 'task');
+      await ensureNotepadFlowColumns(connection); // so s.job_id is selectable
 
       const requestedType = req.query.type;
       // We also include sections that contain at least one item assigned to a
@@ -455,11 +491,15 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
           s.type,
           s.title,
           s.sort_order,
+          s.job_id,
+          j.name AS job_name,
+          j.color AS job_color,
           owner.name AS owner_name,
           NULL AS shared_with_name,
           NULL AS assign_to_name
         FROM checklist_sections s
         LEFT JOIN user owner ON owner.id = s.owner_user_id
+        LEFT JOIN \`job\` j ON j.id = s.job_id
         WHERE ${sectionsWhere}
       `;
 
@@ -589,6 +629,16 @@ router.put('/sections/:id', auth.authenticateToken, async (req, res) => {
       if (payload.sort_order !== undefined) {
         fields.push('sort_order = ?');
         values.push(payload.sort_order);
+      }
+      // Attach / detach a job (null = detach). Validate it's a job in the account.
+      if (payload.job_id !== undefined) {
+        await ensureNotepadFlowColumns(connection);
+        const jobRes = await resolveNotepadJob(connection, payload.job_id, signedin_user);
+        if (!jobRes.ok) {
+          return res.status(403).json({ success: false, message: 'That job is not in your account.' });
+        }
+        fields.push('job_id = ?');
+        values.push(jobRes.jobId);
       }
 
       if (!fields.length) {
