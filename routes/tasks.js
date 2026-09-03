@@ -582,26 +582,46 @@ router.post("/create", auth.authenticateToken, denyExpiredFreeWrites, upload.sin
     try {
       const [[actorRow]] = await connection.query("SELECT name FROM `user` WHERE id=?", [signedin_user]);
       const actorName = (actorRow && actorRow.name) ? actorRow.name : 'Someone';
+      // Job names for the tasks being assigned, so the notification can name the
+      // job (e.g. a Notepad push under an attached job) — the recipient knows what
+      // they've been given without opening the app.
+      const jobNameById = {};
+      const jobIds = [...new Set(insertedTasks.map((t) => t.job_id).filter(Boolean))];
+      if (jobIds.length) {
+        try {
+          const [jrows] = await connection.query(
+            `SELECT id, name FROM \`job\` WHERE id IN (${jobIds.map(() => '?').join(',')})`,
+            jobIds
+          );
+          for (const r of jrows) jobNameById[r.id] = r.name;
+        } catch (e) { /* best-effort: fall back to task name only */ }
+      }
       const byUser = new Map();
       for (const t of insertedTasks) {
         // Notify EVERY assignee (multi-assignee), not just the primary.
         const targets = (t.assignees && t.assignees.length) ? t.assignees : (t.user_id ? [t.user_id] : []);
         for (const uid of targets) {
           if (!uid || String(uid) === String(signedin_user)) continue;
-          if (!byUser.has(uid)) byUser.set(uid, { names: [], urgent: false });
+          if (!byUser.has(uid)) byUser.set(uid, { names: [], jobNames: [], urgent: false });
           const g = byUser.get(uid);
           g.names.push(t.task_name);
+          g.jobNames.push(t.job_id ? (jobNameById[t.job_id] || null) : null);
           if (Number(t.is_urgent) === 1) g.urgent = true; // any urgent task → red push
         }
       }
       for (const [uid, g] of byUser) {
         const names = g.names;
+        // Single task: name the job too when it has one ("… on Lynes - ADU").
+        const soloJob = names.length === 1 ? g.jobNames[0] : null;
         const content = names.length === 1
-          ? `${actorName} assigned you a task: "${names[0]}".`
+          ? `${actorName} assigned you a task${soloJob ? ` on ${soloJob}` : ''}: "${names[0]}".`
           : `${actorName} assigned you ${names.length} tasks.`;
         // Push body is the task's own text (no framing sentence), per the CCP; the
-        // in-app notification row keeps the descriptive `content`.
-        const pushBody = names.length === 1 ? names[0] : names.join(', ');
+        // in-app notification row keeps the descriptive `content`. Append the job so
+        // the recipient sees which job it's under.
+        const pushBody = names.length === 1
+          ? (soloJob ? `${names[0]} — ${soloJob}` : names[0])
+          : names.join(', ');
         try {
           await notify.insertNotification(connection, { senderId: signedin_user, receiverId: uid, content, url: '/task' });
           await notify.sendPushToUser(connection, uid, {

@@ -49,6 +49,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       appointment_id INT NULL, filed_at DATETIME NULL, kept TINYINT DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     await conn.query("CREATE TABLE teams (id INT PRIMARY KEY, team_name VARCHAR(120), team_color VARCHAR(20))");
+    await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, created_by INT NULL, name VARCHAR(150), color VARCHAR(30) NULL, status INT DEFAULT 1)");
     await conn.query("INSERT INTO `user` (id,name,email,role) VALUES (700,'Owner Olly','olly@x.com',14),(701,'Other Ollie','ollie@x.com',14)");
 
     const express = require('express');
