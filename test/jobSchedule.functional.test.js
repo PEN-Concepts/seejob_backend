@@ -86,6 +86,13 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query("INSERT INTO gantt_stage_progress (schedule_item_id,job_id,percent) VALUES (500,10,40)");
     // Task 2 (Order lumber) has TWO assignees → assignees array of both names.
     await conn.query("INSERT INTO task_assignees (task_id,user_id) VALUES (2,702),(2,701)");
+    // Phase 2b — carried over: tasks dated BEFORE a chosen today (2026-09-02), on job 10.
+    await conn.query(`INSERT INTO tasks (id,task_name,job_id,task_type,start_date,is_calendar_task,user_id,team_id,status,assignee_completed,archived_at,created_by) VALUES
+      (20,'Overdue punch item',10,'job','2026-08-28 08:00:00',0,701,NULL,0,0,NULL,700),   -- incomplete task before today -> CARRIED
+      (21,'Old done task',10,'job','2026-08-28 08:00:00',0,701,NULL,1,1,NULL,700),         -- completed -> NOT carried
+      (22,'Overdue trade',10,'job','2026-08-28 08:00:00',1,NULL,800,0,0,NULL,700)          -- a Gantt trade (schedule item) -> NEVER carried
+    `);
+    await conn.query("INSERT INTO job_schedule_items (id,task_id) VALUES (501,22)");
 
     const express = require('express');
     app = express();
@@ -138,6 +145,18 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const eRes = await request(app).get('/api/jobs/job-schedule' + range).set('Authorization', tok(701));
     const eIds = (eRes.body.items || []).map((i) => Number(i.id)).sort((a, b) => a - b);
     ok(JSON.stringify(eIds) === JSON.stringify([1, 2, 3, 4, 5, 8, 10]), 'role-scope: employee (category 1) sees the whole account like the owner', JSON.stringify(eIds));
+
+    // ===== Phase 2b — CARRIED OVER (incomplete tasks before today) =====
+    const cover = await request(app).get('/api/jobs/job-schedule?start=2026-09-01&end=2026-09-07&today=2026-09-02').set('Authorization', tok(700));
+    const carried = cover.body.carried || [];
+    const carIds = carried.map((i) => Number(i.id)).sort((a, b) => a - b);
+    ok(Array.isArray(cover.body.carried), 'carried: response includes a carried[] array', JSON.stringify(Object.keys(cover.body)));
+    ok(carIds.includes(20), 'carried: incomplete task dated before today IS carried (20)', JSON.stringify(carIds));
+    ok(!carIds.includes(21), 'carried: a COMPLETED past task is NOT carried (21)', JSON.stringify(carIds));
+    ok(!carIds.includes(22), 'carried: a Gantt schedule item is NEVER carried (22)', JSON.stringify(carIds));
+    ok(!carIds.some((id) => [1, 2, 3, 5, 8].includes(id)), 'carried: on-or-after-today items are not carried (only < today)', JSON.stringify(carIds));
+    const c20 = carried.find((i) => Number(i.id) === 20);
+    ok(c20 && c20.type === 'task' && c20.date === '2026-08-28' && c20.completed === false, 'carried: item is a task with its real due date (for the days-late figure)', c20 && JSON.stringify([c20.type, c20.date, c20.completed]));
 
     // ===== Bad input =====
     const bad = await request(app).get('/api/jobs/job-schedule?start=nope&end=2026-09-07').set('Authorization', tok(700));
