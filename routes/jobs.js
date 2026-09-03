@@ -2415,6 +2415,11 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
   if (!dateRe.test(start) || !dateRe.test(end)) {
     return res.status(400).json({ message: "start and end (YYYY-MM-DD) are required" });
   }
+  // "Carried over" = incomplete TASKS dated before TODAY. The client passes its
+  // own today (timezone-correct); fall back to the server's date.
+  const _now = new Date();
+  const serverToday = `${_now.getFullYear()}-${String(_now.getMonth() + 1).padStart(2, "0")}-${String(_now.getDate()).padStart(2, "0")}`;
+  const today = dateRe.test(String(req.query?.today || "").trim()) ? String(req.query.today).trim() : serverToday;
   let connection;
   try {
     connection = await pool.getConnection();
@@ -2444,7 +2449,7 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
     );
 
     const jobIds = jobRows.map((j) => j.id);
-    if (!jobIds.length) return res.status(200).json({ items: [] });
+    if (!jobIds.length) return res.status(200).json({ items: [], carried: [] });
 
     // Tasks (is_calendar_task=0 → checkbox) and Gantt trades (a task with a linked
     // job_schedule_items row → percent box) both come from `tasks`. We carry the
@@ -2485,7 +2490,7 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
       [start, end, jobIds]
     );
 
-    const items = rows.map((r) => {
+    const mapRow = (r) => {
       const list = String(r.assignee_list || "")
         .split("\n").map((s) => s.trim()).filter(Boolean);
       const assignees = list.length
@@ -2510,9 +2515,40 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
             ? `${r.start_date.getFullYear()}-${String(r.start_date.getMonth() + 1).padStart(2, "0")}-${String(r.start_date.getDate()).padStart(2, "0")}`
             : String(r.start_date).slice(0, 10),
       };
-    });
+    };
+    const items = rows.map(mapRow);
 
-    res.status(200).json({ items });
+    // CARRIED OVER: incomplete TASKS (never Gantt schedule items — those have a
+    // percent, and the Gantt owns their dates) dated BEFORE today, in the same
+    // visible job set. Returned separately; the client pins them to today, once.
+    const [carriedRows] = await connection.query(
+      `SELECT
+         t.id, t.task_name, t.job_id, t.start_date, t.is_calendar_task,
+         COALESCE(t.status, 0)            AS status,
+         COALESCE(t.assignee_completed,0) AS assignee_completed,
+         j.name AS job_name, u.name AS user_name, tm.team_name AS team_name,
+         NULL AS schedule_item_id, NULL AS percent,
+         (SELECT GROUP_CONCAT(au.name ORDER BY ta.id SEPARATOR '\n')
+            FROM task_assignees ta JOIN \`user\` au ON au.id = ta.user_id
+           WHERE ta.task_id = t.id) AS assignee_list
+       FROM tasks t
+       JOIN job j ON j.id = t.job_id
+       LEFT JOIN \`user\` u ON u.id = t.user_id
+       LEFT JOIN teams tm ON tm.id = t.team_id
+       WHERE LOWER(t.task_type) = 'job'
+         AND t.archived_at IS NULL
+         AND t.start_date IS NOT NULL
+         AND DATE(t.start_date) < ?
+         AND COALESCE(t.status, 0) <> 1
+         AND COALESCE(t.assignee_completed, 0) <> 1
+         AND t.id NOT IN (SELECT task_id FROM job_schedule_items WHERE task_id IS NOT NULL)
+         AND t.job_id IN (?)
+       ORDER BY t.start_date ASC, t.id ASC`,
+      [today, jobIds]
+    );
+    const carried = carriedRows.map(mapRow);
+
+    res.status(200).json({ items, carried });
   } catch (err) {
     logger.error("Error in /jobs/job-schedule: " + err.message);
     res.status(500).json({ message: "Server error", error: err.message });
