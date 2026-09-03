@@ -43,6 +43,11 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query("CREATE TABLE teams (id INT PRIMARY KEY, team_name VARCHAR(120))");
     await conn.query("CREATE TABLE team_user (id INT PRIMARY KEY AUTO_INCREMENT, team_id INT, user_id INT)");
     await conn.query("CREATE TABLE job_contacts (id INT PRIMARY KEY AUTO_INCREMENT, job_id INT, contact_id INT)");
+    // Phase 2: a Gantt trade = a task with a linked job_schedule_items row; its
+    // percent lives in gantt_stage_progress. task_assignees = full multi-assignee set.
+    await conn.query("CREATE TABLE job_schedule_items (id INT PRIMARY KEY, task_id INT NULL)");
+    await conn.query("CREATE TABLE gantt_stage_progress (id INT PRIMARY KEY AUTO_INCREMENT, schedule_item_id INT, job_id INT, owner_type VARCHAR(8) DEFAULT 'job', percent TINYINT DEFAULT 0)");
+    await conn.query("CREATE TABLE task_assignees (id INT PRIMARY KEY AUTO_INCREMENT, task_id INT, user_id INT)");
 
     // ---- Seed accounts: 700 owner(role14), 701 employee(cat1), 702 contractor(cat2) ----
     await conn.query(`INSERT INTO \`user\` (id,name,role,category,created_by) VALUES
@@ -76,6 +81,11 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       (10,'On elm job',14,'job',${IN},0,701,NULL,0,0,NULL,700),              -- owner sees; contractor NOT (not on job 14)
       (11,'On external job',13,'job',${IN},0,999,NULL,0,0,NULL,700)          -- neither owner nor contractor sees
     `);
+    // Task 8 (Stucco) is a real Gantt trade → schedule item 500 at 40% → type 'schedule'.
+    await conn.query("INSERT INTO job_schedule_items (id,task_id) VALUES (500,8)");
+    await conn.query("INSERT INTO gantt_stage_progress (schedule_item_id,job_id,percent) VALUES (500,10,40)");
+    // Task 2 (Order lumber) has TWO assignees → assignees array of both names.
+    await conn.query("INSERT INTO task_assignees (task_id,user_id) VALUES (2,702),(2,701)");
 
     const express = require('express');
     app = express();
@@ -89,22 +99,29 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok(oRes.status === 200 && Array.isArray(oRes.body.items), 'owner: 200 + items[]', JSON.stringify(oRes.body).slice(0, 200));
     const oItems = oRes.body.items || [];
     const oIds = oItems.map((i) => Number(i.id)).sort((a, b) => a - b);
-    ok(JSON.stringify(oIds) === JSON.stringify([1, 2, 3, 5, 8, 10]), 'owner: exactly tasks 1,2,3,5,8,10 (completed/archived/out-of-window/inactive-job/external all excluded)', JSON.stringify(oIds));
+    // Phase 2: completed items are now INCLUDED (a task checked here must stay,
+    // struck through) — so task 4 (status=1) appears. Archived/out-of-window/
+    // inactive-job/external stay excluded.
+    ok(JSON.stringify(oIds) === JSON.stringify([1, 2, 3, 4, 5, 8, 10]), 'owner: tasks 1,2,3,4,5,8,10 (completed now included; archived/out-of-window/inactive/external excluded)', JSON.stringify(oIds));
 
     const byId = (arr, id) => arr.find((i) => Number(i.id) === id);
-    ok(byId(oItems, 4) === undefined, 'exclude: completed task (status=1) never returned');
     ok(byId(oItems, 7) === undefined, 'exclude: archived task never returned');
     ok(byId(oItems, 6) === undefined, 'exclude: out-of-window task never returned');
     ok(byId(oItems, 9) === undefined, 'exclude: task on inactive job (status<>1) never returned');
     ok(byId(oItems, 11) === undefined, 'exclude: external-account job task never returned');
-    ok(!!byId(oItems, 5), 'keep: worker-done-only task (assignee_completed=1, status=0) IS returned');
+
+    const t4 = byId(oItems, 4), t5 = byId(oItems, 5);
+    ok(t4 && t4.completed === true, 'completed: status=1 task INCLUDED and completed=true (stays, struck through)', t4 && JSON.stringify(t4.completed));
+    ok(t5 && t5.completed === true, 'completed: worker-done (assignee_completed=1) → completed=true', t5 && JSON.stringify(t5.completed));
 
     const m1 = byId(oItems, 1), t2 = byId(oItems, 2), st = byId(oItems, 8);
-    ok(m1 && m1.type === 'milestone', 'merge: is_calendar_task=1 -> type "milestone"', m1 && m1.type);
-    ok(t2 && t2.type === 'task', 'merge: is_calendar_task=0 -> type "task"', t2 && t2.type);
-    ok(m1 && m1.assignee_name === '', 'unassigned: milestone assignee_name is BLANK (never "Unassigned")', m1 && JSON.stringify(m1.assignee_name));
-    ok(t2 && t2.assignee_name === 'Contractor Cody', 'assignee: person name returned', t2 && t2.assignee_name);
-    ok(st && st.assignee_name === 'Crew A', 'assignee: team name returned for team task', st && st.assignee_name);
+    ok(m1 && m1.type === 'task' && m1.completed === false, 'type: is_calendar_task=1 with NO schedule item → "task" (checkbox), not done', m1 && m1.type);
+    ok(t2 && t2.type === 'task', 'type: plain task → "task"', t2 && t2.type);
+    ok(st && st.type === 'schedule', 'type: task WITH a linked job_schedule_items → "schedule" (percent box)', st && st.type);
+    ok(st && Number(st.percent) === 40 && Number(st.schedule_item_id) === 500, 'schedule: percent (40) + schedule_item_id (500) returned', st && JSON.stringify([st.percent, st.schedule_item_id]));
+    ok(m1 && Array.isArray(m1.assignees) && m1.assignees.length === 0 && m1.assignee_name === '', 'unassigned: assignees [] + assignee_name BLANK (never "Unassigned")', m1 && JSON.stringify(m1.assignees));
+    ok(t2 && Array.isArray(t2.assignees) && t2.assignees.length === 2 && t2.assignees.includes('Contractor Cody') && t2.assignees.includes('Employee Eve'), 'multi-assignee: assignees lists BOTH names (for "+N")', t2 && JSON.stringify(t2.assignees));
+    ok(st && st.assignee_name === 'Crew A', 'assignee: team name fallback when no task_assignees rows', st && st.assignee_name);
     ok(m1 && m1.job_name === 'Maple Reno', 'job_name returned', m1 && m1.job_name);
     ok(m1 && m1.date === '2026-09-02', 'date normalized to YYYY-MM-DD', m1 && m1.date);
     ok(t2 && String(t2.assignee_name).toLowerCase().indexOf('unassigned') === -1, 'never emits literal "Unassigned"');
@@ -114,13 +131,13 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const cItems = cRes.body.items || [];
     const cIds = cItems.map((i) => Number(i.id)).sort((a, b) => a - b);
     ok(cRes.status === 200, 'contractor: 200');
-    ok(JSON.stringify(cIds) === JSON.stringify([1, 2, 3, 5, 8]), 'role-scope: contractor sees jobs 10 & 11 (all their items) but NOT job 14 task (10)', JSON.stringify(cIds));
+    ok(JSON.stringify(cIds) === JSON.stringify([1, 2, 3, 4, 5, 8]), 'role-scope: contractor sees ALL items on jobs 10 & 11 (incl. completed 4) but NOT job 14 task (10)', JSON.stringify(cIds));
     ok(cItems.every((i) => Number(i.id) !== 10), 'role-scope: contractor does NOT see the Elm-job task (not assigned to that job)');
 
     // ===== Employee (cat 1) — inherits owner, sees the full account like the owner =====
     const eRes = await request(app).get('/api/jobs/job-schedule' + range).set('Authorization', tok(701));
     const eIds = (eRes.body.items || []).map((i) => Number(i.id)).sort((a, b) => a - b);
-    ok(JSON.stringify(eIds) === JSON.stringify([1, 2, 3, 5, 8, 10]), 'role-scope: employee (category 1) sees the whole account like the owner', JSON.stringify(eIds));
+    ok(JSON.stringify(eIds) === JSON.stringify([1, 2, 3, 4, 5, 8, 10]), 'role-scope: employee (category 1) sees the whole account like the owner', JSON.stringify(eIds));
 
     // ===== Bad input =====
     const bad = await request(app).get('/api/jobs/job-schedule?start=nope&end=2026-09-07').set('Authorization', tok(700));
