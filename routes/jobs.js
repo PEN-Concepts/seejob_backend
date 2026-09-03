@@ -2446,7 +2446,13 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
     const jobIds = jobRows.map((j) => j.id);
     if (!jobIds.length) return res.status(200).json({ items: [] });
 
-    // Milestones (is_calendar_task=1) and tasks (0) both come from `tasks`.
+    // Tasks (is_calendar_task=0 → checkbox) and Gantt trades (a task with a linked
+    // job_schedule_items row → percent box) both come from `tasks`. We carry the
+    // schedule_item_id + its gantt_stage_progress percent, the task status (so a
+    // task completed here stays visible, struck through, rather than vanishing),
+    // and the full multi-assignee list (for the "+N" marker). Assignee list uses a
+    // newline separator (names never contain newlines); falls back to the primary
+    // user / team when the join table is empty (pre-multi-assignee rows).
     const [rows] = await connection.query(
       `SELECT
          t.id,
@@ -2454,16 +2460,24 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
          t.job_id,
          t.start_date,
          t.is_calendar_task,
+         COALESCE(t.status, 0)            AS status,
+         COALESCE(t.assignee_completed,0) AS assignee_completed,
          j.name       AS job_name,
          u.name       AS user_name,
-         tm.team_name AS team_name
+         tm.team_name AS team_name,
+         jsi.id       AS schedule_item_id,
+         gsp.percent  AS percent,
+         (SELECT GROUP_CONCAT(au.name ORDER BY ta.id SEPARATOR '\n')
+            FROM task_assignees ta JOIN \`user\` au ON au.id = ta.user_id
+           WHERE ta.task_id = t.id) AS assignee_list
        FROM tasks t
        JOIN job j        ON j.id = t.job_id
        LEFT JOIN \`user\` u ON u.id = t.user_id
        LEFT JOIN teams tm  ON tm.id = t.team_id
+       LEFT JOIN job_schedule_items jsi ON jsi.task_id = t.id
+       LEFT JOIN gantt_stage_progress gsp ON gsp.schedule_item_id = jsi.id
        WHERE LOWER(t.task_type) = 'job'
          AND t.archived_at IS NULL
-         AND COALESCE(t.status, 0) <> 1
          AND t.start_date IS NOT NULL
          AND DATE(t.start_date) BETWEEN ? AND ?
          AND t.job_id IN (?)
@@ -2471,18 +2485,32 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
       [start, end, jobIds]
     );
 
-    const items = rows.map((r) => ({
-      id: r.id,
-      title: r.task_name || "Item",
-      job_name: r.job_name || "",
-      // Person assignee wins; else the team; else blank (client renders nothing).
-      assignee_name: (r.user_name || r.team_name || "").trim(),
-      type: Number(r.is_calendar_task) === 1 ? "milestone" : "task",
-      date:
-        r.start_date instanceof Date
-          ? `${r.start_date.getFullYear()}-${String(r.start_date.getMonth() + 1).padStart(2, "0")}-${String(r.start_date.getDate()).padStart(2, "0")}`
-          : String(r.start_date).slice(0, 10),
-    }));
+    const items = rows.map((r) => {
+      const list = String(r.assignee_list || "")
+        .split("\n").map((s) => s.trim()).filter(Boolean);
+      const assignees = list.length
+        ? list
+        : [String(r.user_name || r.team_name || "").trim()].filter(Boolean);
+      const scheduleItemId = r.schedule_item_id || null;
+      const isSchedule = scheduleItemId != null; // a real Gantt trade → percent box
+      return {
+        id: r.id,
+        title: r.task_name || "Item",
+        job_id: r.job_id,
+        job_name: r.job_name || "",
+        assignees,                                   // full set for the "+N" marker
+        assignee_name: assignees[0] || "",           // primary (back-compat)
+        type: isSchedule ? "schedule" : "task",
+        schedule_item_id: scheduleItemId,
+        percent: isSchedule ? Number(r.percent || 0) : null,
+        status: Number(r.status) || 0,
+        completed: Number(r.status) === 1 || Number(r.assignee_completed) === 1,
+        date:
+          r.start_date instanceof Date
+            ? `${r.start_date.getFullYear()}-${String(r.start_date.getMonth() + 1).padStart(2, "0")}-${String(r.start_date.getDate()).padStart(2, "0")}`
+            : String(r.start_date).slice(0, 10),
+      };
+    });
 
     res.status(200).json({ items });
   } catch (err) {
