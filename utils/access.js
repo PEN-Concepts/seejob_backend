@@ -204,12 +204,29 @@ async function canViewJob(userId, jobId, connection) {
     );
     if (!jobRows.length) return false;
 
+    // "Assigned to this job" = a task on the job whose assignee is this user.
+    // Multi-assignee broadcasts a task to several people: the PRIMARY assignee
+    // sits in tasks.user_id, but SECONDARY/broadcast assignees live only in
+    // task_assignees. Check both so an outside contractor broadcast-assigned to
+    // a foreign job's task can still open that job's page. (task_assignees may
+    // not exist on a bare schema — fall back to primary-only, never throw.)
     const isAssigned = async () => {
       const [t] = await conn.query(
         "SELECT 1 FROM tasks WHERE job_id = ? AND user_id = ? LIMIT 1",
         [jobId, userId]
       );
-      return t.length > 0;
+      if (t.length > 0) return true;
+      try {
+        const [ta] = await conn.query(
+          `SELECT 1 FROM task_assignees ta
+             JOIN tasks t ON t.id = ta.task_id
+            WHERE t.job_id = ? AND ta.user_id = ? LIMIT 1`,
+          [jobId, userId]
+        );
+        return ta.length > 0;
+      } catch (e) {
+        return false;
+      }
     };
 
     const mode = await getAccessMode(userId, conn);

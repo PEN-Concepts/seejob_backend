@@ -2151,6 +2151,7 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
     const isClientViewer = Number(req.user && req.user.category) === 3 && !OWNER_EXEMPT_EMAILS.has(email);
     const clientTaskAssignee = `(
       t.user_id = ?
+      OR t.id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)
       OR (t.team_id IS NOT NULL AND EXISTS (
             SELECT 1 FROM team_user tu WHERE tu.team_id = t.team_id AND tu.user_id = ?
           ))
@@ -2164,11 +2165,13 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
          WHERE j.id IN (
              SELECT DISTINCT t.job_id FROM tasks t
              WHERE LOWER(t.task_type) = 'job' AND t.job_id IS NOT NULL
-               AND (t.user_id = ? OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
+               AND (t.user_id = ?
+                    OR t.id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)
+                    OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
            )
            ${jobStatusClause}
          ORDER BY j.sort_order ASC, j.id ASC`;
-      jobsParams = [loggedInUserId, loggedInUserId];
+      jobsParams = [loggedInUserId, loggedInUserId, loggedInUserId];
     } else {
       jobsSql = `SELECT j.id, j.name, j.job_address AS address, j.status, j.color, j.created_by, uj.name AS created_by_name
          FROM job j
@@ -2185,10 +2188,17 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
                JOIN team_user tu ON tu.team_id = t.team_id
                WHERE t.team_id IS NOT NULL AND tu.user_id = ?
              )
+             -- Multi-assignee: a SECONDARY/broadcast assignee (task_assignees,
+             -- not tasks.user_id) on a task for this job can see the job too.
+             OR j.id IN (
+               SELECT DISTINCT t.job_id FROM tasks t
+               JOIN task_assignees ta ON ta.task_id = t.id
+               WHERE ta.user_id = ?
+             )
            )
            ${jobStatusClause}
          ORDER BY j.sort_order ASC, j.id ASC`;
-      jobsParams = [loggedInUserId, managerId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId];
+      jobsParams = [loggedInUserId, managerId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId, loggedInUserId];
     }
     const [jobs] = await connection.query(jobsSql, jobsParams);
 
@@ -2200,10 +2210,12 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
          WHERE l.id IN (
              SELECT DISTINCT t.job_id FROM tasks t
              WHERE LOWER(t.task_type) = 'lead' AND t.job_id IS NOT NULL
-               AND (t.user_id = ? OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
+               AND (t.user_id = ?
+                    OR t.id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)
+                    OR t.team_id IN (SELECT team_id FROM team_user WHERE user_id = ?))
            )
          ORDER BY l.created_at DESC`;
-      leadsParams = [loggedInUserId, loggedInUserId];
+      leadsParams = [loggedInUserId, loggedInUserId, loggedInUserId];
     } else {
       leadsSql = `SELECT l.id, l.lead_name, l.project_street_address, l.status, l.user_id AS created_by, u.name AS created_by_name
          FROM leads l
@@ -2237,10 +2249,11 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
         OR (t.team_id IS NOT NULL AND EXISTS (
               SELECT 1 FROM team_user tu WHERE tu.team_id = t.team_id AND tu.user_id = ?
             ))
+        OR t.id IN (SELECT task_id FROM task_assignees WHERE user_id = ?)
       )`;
     const taskAssigneeParams = isClientViewer
-      ? [loggedInUserId, loggedInUserId]
-      : [loggedInUserId, managerId, managerId, loggedInUserId];
+      ? [loggedInUserId, loggedInUserId, loggedInUserId]
+      : [loggedInUserId, managerId, managerId, loggedInUserId, loggedInUserId];
 
     const jobTasksByJobId = {};
     const leadTasksByLeadId = {};
