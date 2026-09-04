@@ -52,7 +52,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query("INSERT INTO subscriptions (user_id,status) VALUES (900,'active'),(910,'active'),(920,'active')");
     await conn.query("INSERT INTO job (id,created_by,name,status) VALUES (1900,900,'G job',1)");
     // Task on G's job whose PRIMARY assignee (tasks.user_id) is the cross-company sub S.
-    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,description,priority,status,complete_percentage,start_date,duration_days,is_urgent,assignee_completed,created_at) VALUES (2900,1900,910,900,'job','Framing','desc','low',0,20,'2026-09-10',3,0,0, NOW())");
+    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,description,priority,status,complete_percentage,start_date,end_date,duration_days,is_urgent,assignee_completed,created_at) VALUES (2900,1900,910,900,'job','Framing','desc','low',0,20,'2026-09-10','2026-09-12',3,0,0, NOW())");
 
     const express = require('express');
     app = express();
@@ -66,20 +66,22 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // Each carries user_id:910 (real FE edits always echo the primary assignee) so
     // the only *changed* field is the one under test.
     const blocked = [
-      ['complete_percentage', { complete_percentage: 50, user_id: 910 }],
-      ['start_date',          { start_date: '2026-09-01', user_id: 910 }],
-      ['duration_days',       { duration_days: 9, user_id: 910 }],
-      ['task_name',           { task_name: 'Hacked', user_id: 910 }],
-      ['priority',            { priority: 'high', user_id: 910 }],
-      ['description',         { description: 'changed', user_id: 910 }],
-      ['is_urgent',           { is_urgent: 1, user_id: 910 }],
-      ['status_note',         { status_note: 'note', user_id: 910 }],
-      ['is_calendar_task',    { is_calendar_task: 1, user_id: 910 }],
+      ['complete_percentage', { complete_percentage: 50, user_id: 910 }, 'complete_percentage'],
+      ['start_date',          { start_date: '2026-09-01', user_id: 910 }, 'start_date'],
+      ['end_date',            { end_date: '2026-09-25', user_id: 910 }, 'end_date'],
+      ['duration_days',       { duration_days: 9, user_id: 910 }, 'duration_days'],
+      ['task_name',           { task_name: 'Hacked', user_id: 910 }, 'task_name'],
+      ['priority',            { priority: 'high', user_id: 910 }, 'priority'],
+      ['description',         { description: 'changed', user_id: 910 }, 'description'],
+      ['is_urgent',           { is_urgent: 1, user_id: 910 }, 'is_urgent'],
+      ['status_note',         { status_note: 'note', user_id: 910 }, 'status_note'],
+      ['is_calendar_task',    { is_calendar_task: 1, user_id: 910 }, 'is_calendar_task'],
     ];
-    for (const [label, body] of blocked) {
+    for (const [label, body, field] of blocked) {
       const r = await subPut(body);
-      ok(r.status === 403 && r.body.code === 'ASSIGNEE_COMPLETION_ONLY',
-        `sub CANNOT write ${label} -> 403 ASSIGNEE_COMPLETION_ONLY`, r.status + ' ' + JSON.stringify(r.body));
+      const okStatus = r.status === 403 && r.body.code === 'ASSIGNEE_COMPLETION_ONLY'
+        && Array.isArray(r.body.fields) && r.body.fields.includes(field);
+      ok(okStatus, `sub CANNOT write ${label} -> 403 ASSIGNEE_COMPLETION_ONLY (fields includes ${field})`, r.status + ' ' + JSON.stringify(r.body));
     }
     // spot-check the row is genuinely untouched by the refusals above
     {

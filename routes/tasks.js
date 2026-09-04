@@ -1228,6 +1228,10 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       chgNum('complete_percentage', finalCompletePercentage, oldTask.complete_percentage);
       if (startDateInput != null && formattedStartDate && ymdOf(formattedStartDate) !== ymdOf(oldTask.start_date)) violated.push('start_date');
       if (hasDurationDays && parsedDurationDays != null && Number(parsedDurationDays) !== Number(oldTask.duration_days || 0)) violated.push('duration_days');
+      // end_date is DERIVED from start + duration in the UPDATE (never taken from
+      // req.body), so it can't actually be written by a non-owner — but gate it
+      // explicitly too, for a clean 403 and defense-in-depth if it's ever wired in.
+      if (typeof req.body.end_date !== 'undefined' && req.body.end_date !== null && ymdOf(req.body.end_date) && ymdOf(req.body.end_date) !== ymdOf(oldTask.end_date)) violated.push('end_date');
       // content fields
       chgStr('task_name', task_name, oldTask.task_name);
       chgStr('priority', finalPriority, oldTask.priority);
