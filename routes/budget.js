@@ -3,7 +3,7 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureAllowanceColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
 const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, isSameAccount } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
 const { requireOwnsJob } = require("../utils/ownership");
@@ -396,10 +396,11 @@ router.get("/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.
     await ensureOwnerTypeColumns(connection);
     await ensureSubCostColumn(connection);
     await ensureInHouseColumn(connection);
+    await ensureAllowanceColumn(connection);
     await ensureBudgetPercentColumns(connection);
     const [rows] = await connection.query(
       `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id,
-              subcontractor_id, in_house, foreman_percent, paid_amount,
+              subcontractor_id, in_house, is_allowance, foreman_percent, paid_amount,
               contingency, overhead_percent, gl_percent
        FROM division_lineitems
        WHERE job_id = ? AND owner_type = ?
@@ -483,10 +484,11 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, requireOw
     await ensureOwnerTypeColumns(connection);
     await ensureSubCostColumn(connection);
     await ensureInHouseColumn(connection);
+    await ensureAllowanceColumn(connection);
     await ensureBudgetPercentColumns(connection);
     const params = [];
     let sql = `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id, contingency,
-                     overhead_percent, gl_percent, subcontractor_id, in_house, foreman_percent, paid_amount
+                     overhead_percent, gl_percent, subcontractor_id, in_house, is_allowance, foreman_percent, paid_amount
                FROM division_lineitems
                WHERE division_id = ?`;
     params.push(divisionId);
@@ -591,6 +593,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
       await ensureOwnerTypeColumns(connection);
       await ensureSubCostColumn(connection);
       await ensureInHouseColumn(connection);
+      await ensureAllowanceColumn(connection);
       await ensureBudgetPercentColumns(connection);
       if (await isBudgetLocked(connection, job_id, ownerType)) {
         // The inner finally releases the connection.
@@ -608,6 +611,8 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           sub_cost: it.sub_cost ?? null,
           contingency: it.contingency ?? null,
           in_house: it.in_house ? 1 : 0,
+          // Allowance flag — explicit per-line checkbox, never inferred.
+          is_allowance: it.is_allowance ? 1 : 0,
           overhead_percent: it.overhead_percent ?? 0,
           gl_percent: it.gl_percent ?? 0,
           // in-house and a subcontractor are mutually exclusive
@@ -632,7 +637,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           const updateSql = `UPDATE division_lineitems
             SET csi_number = ?, lineitem_description = ?, amount = ?, sub_cost = ?, contingency = ?,
                 overhead_percent = ?, gl_percent = ?,
-                subcontractor_id = ?, in_house = ?, foreman_percent = ?, paid_amount = ?
+                subcontractor_id = ?, in_house = ?, is_allowance = ?, foreman_percent = ?, paid_amount = ?
             WHERE id = ? AND division_id = ? AND job_id = ? AND owner_type = ?`;
 
           const updateValues = [
@@ -645,6 +650,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.gl_percent,
             normalized.subcontractor_id,
             normalized.in_house,
+            normalized.is_allowance,
             normalized.foreman_percent,
             normalized.paid_amount,
             normalized.id,
@@ -762,9 +768,9 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           const insertSql = `INSERT INTO division_lineitems
             (division_id, job_id, owner_type, csi_number, lineitem_description, amount, sub_cost, contingency,
              overhead_percent, gl_percent,
-             subcontractor_id, in_house, foreman_percent, paid_amount,
+             subcontractor_id, in_house, is_allowance, foreman_percent, paid_amount,
              created_at, created_by)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
 
           const insertValues = [
             Number(divisionId),
@@ -779,6 +785,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.gl_percent,
             normalized.subcontractor_id,
             normalized.in_house,
+            normalized.is_allowance,
             normalized.foreman_percent,
             normalized.paid_amount,
             created_by ?? null,
