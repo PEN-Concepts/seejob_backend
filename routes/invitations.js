@@ -2813,8 +2813,10 @@ router.get('/check-licenses', auth.authenticateToken, async (req, res) => {
     }
 
     // Only contact CSLB for licenses not checked within the last 24 hours.
-    // Recently-checked ones are served from the database — the nightly cron
-    // keeps them fresh. This caps CSLB traffic regardless of user count.
+    // Recently-checked ones are served from the database. This on-demand refresh
+    // is now the PRIMARY freshness path (the background cron runs monthly, not
+    // nightly), so anything a user actually views is at most 24h stale. The 24h
+    // cutoff also caps CSLB traffic regardless of user count.
     const DAY_MS = 24 * 60 * 60 * 1000;
     const cutoff = Date.now() - DAY_MS;
     const stale = contractors.filter(c => !c.cslb_checked_at || new Date(c.cslb_checked_at).getTime() < cutoff);
