@@ -2488,6 +2488,7 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
          js.skip_saturday        AS skip_saturday,
          js.skip_sunday          AS skip_sunday,
          gsp.percent  AS percent,
+         COALESCE(t.complete_percentage, 0) AS task_percent,
          (SELECT GROUP_CONCAT(au.name ORDER BY ta.id SEPARATOR '\n')
             FROM task_assignees ta JOIN \`user\` au ON au.id = ta.user_id
            WHERE ta.task_id = t.id) AS assignee_list
@@ -2556,7 +2557,10 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
         assignee_name: assignees[0] || "",           // primary (back-compat)
         type: isSchedule ? "schedule" : "task",
         schedule_item_id: scheduleItemId,
-        percent: isSchedule ? Number(r.percent || 0) : null,
+        // Every row carries a percent now (Poul: one rule for the whole screen —
+        // no task/trade split). A Gantt trade's % comes from gantt_stage_progress;
+        // a plain task's % is its own complete_percentage.
+        percent: isSchedule ? Number(r.percent || 0) : Number(r.task_percent || 0),
         status: Number(r.status) || 0,
         completed: Number(r.status) === 1 || Number(r.assignee_completed) === 1,
         date: ymd(r.start_date),
@@ -2605,6 +2609,7 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
          COALESCE(t.assignee_completed,0) AS assignee_completed,
          j.name AS job_name, u.name AS user_name, tm.team_name AS team_name,
          NULL AS schedule_item_id, NULL AS percent,
+         COALESCE(t.complete_percentage, 0) AS task_percent,
          (SELECT GROUP_CONCAT(au.name ORDER BY ta.id SEPARATOR '\n')
             FROM task_assignees ta JOIN \`user\` au ON au.id = ta.user_id
            WHERE ta.task_id = t.id) AS assignee_list

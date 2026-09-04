@@ -37,7 +37,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
 
     await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT, category INT, created_by INT NULL)");
     await conn.query("CREATE TABLE job (id INT PRIMARY KEY, created_by INT NULL, name VARCHAR(150), status INT DEFAULT 1)");
-    await conn.query("CREATE TABLE tasks (id INT PRIMARY KEY, job_id INT NULL, user_id INT NULL, team_id INT NULL, created_by INT NULL, task_type VARCHAR(20), task_name VARCHAR(150), status INT NULL, start_date DATE NULL, end_date DATE NULL, duration_days INT NULL, is_calendar_task INT NULL, assignee_completed INT NULL, archived_at DATETIME NULL)");
+    await conn.query("CREATE TABLE tasks (id INT PRIMARY KEY, job_id INT NULL, user_id INT NULL, team_id INT NULL, created_by INT NULL, task_type VARCHAR(20), task_name VARCHAR(150), status INT NULL, start_date DATE NULL, end_date DATE NULL, duration_days INT NULL, complete_percentage INT NULL, is_calendar_task INT NULL, assignee_completed INT NULL, archived_at DATETIME NULL)");
     await conn.query("CREATE TABLE task_assignees (id INT PRIMARY KEY AUTO_INCREMENT, task_id INT, user_id INT)");
     await conn.query("CREATE TABLE teams (id INT PRIMARY KEY, team_name VARCHAR(120))");
     await conn.query("CREATE TABLE team_user (id INT PRIMARY KEY AUTO_INCREMENT, team_id INT, user_id INT)");
@@ -69,7 +69,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query("INSERT INTO job_schedule_items (id,schedule_id,name,duration_days,computed_start_date,computed_end_date,task_id) VALUES (302,11,'Roofing',2,'2026-09-08','2026-09-09',202)");
 
     // Plain single-day task (no schedule item) on Wed 09-09.
-    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,status,start_date,duration_days,is_calendar_task,assignee_completed) VALUES (203,1900,900,900,'job','Inspection',0,'2026-09-09',1,0,0)");
+    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,status,start_date,duration_days,complete_percentage,is_calendar_task,assignee_completed) VALUES (203,1900,900,900,'job','Inspection',0,'2026-09-09',1,40,0,0)");
 
     const express = require('express');
     app = express(); app.use(express.json());
@@ -100,6 +100,8 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const insp = byTitle('Inspection');
     ok(insp.length === 1 && insp[0].date === '2026-09-09', 'Inspection shows once on 09-09', JSON.stringify(insp.map((x) => x.date)));
     ok(insp[0] && insp[0].day_total === 1 && insp[0].type === 'task', 'Inspection is single-day task (day_total 1)', JSON.stringify(insp[0]));
+    // Every row carries a percent now — a plain task exposes its complete_percentage.
+    ok(insp[0] && insp[0].percent === 40, 'plain task carries its complete_percentage (40) — one rule for the screen', JSON.stringify(insp[0] && insp[0].percent));
 
   } catch (err) {
     ok(false, 'suite threw', String(err && err.stack ? err.stack.split('\n').slice(0, 6).join(' | ') : err));
