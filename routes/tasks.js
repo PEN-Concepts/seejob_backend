@@ -1881,6 +1881,59 @@ router.delete('/delete-image/:imageId', auth.authenticateToken, denyExpiredFreeW
 });
 
 
+// Dedicated task PERCENT setter for the Job Schedule dashboard (Poul: one rule
+// for the whole screen — every row carries a percentage, tasks included). Scope
+// is strictly narrow: sets ONLY complete_percentage (and status, since 100% =
+// done / <100% = open), never touching the assignee, dates, or content — so it
+// avoids the /update footgun of nulling user_id on a field-only PUT. Permission
+// matches the percent rule: OWNER / GC / same-account staff only (roles 2–5,14
+// AND ownsTask). A plain assignee (a sub) may NOT set the owner's percentage —
+// their check-off is the separate assignee_completed flag via /complete.
+router.put("/:id/percent", auth.authenticateToken, denyExpiredFreeWrites, async (req, res) => {
+  const taskId = req.params.id;
+  const actorId = Number(req.user.id);
+  const actorRole = Number(req.user.role);
+  const raw = req.body ? req.body.percent : undefined;
+  if (raw === undefined || raw === null || isNaN(Number(raw))) {
+    return res.status(400).json({ success: false, message: "percent (0-100) is required" });
+  }
+  const pct = Math.max(0, Math.min(100, Math.round(Number(raw))));
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    const [[task]] = await connection.query(
+      "SELECT id, created_by FROM tasks WHERE id = ? LIMIT 1",
+      [taskId]
+    );
+    if (!task) {
+      return res.status(404).json({ success: false, message: "Task not found" });
+    }
+    const ownsTask = await isSameAccount(actorId, task.created_by, connection);
+    const canActAsGC = [2, 3, 4, 5, 14].includes(actorRole) && ownsTask;
+    if (!canActAsGC) {
+      return res.status(403).json({
+        code: "PERCENT_OWNER_ONLY",
+        success: false,
+        message: "Only the job owner or an employee on the account can set percent complete.",
+      });
+    }
+    // 100% = done (status 1); anything less re-opens it (status 0). complete_
+    // percentage is the number the box shows; status keeps the rest of the app
+    // (Task Manager / Job views, which filter on status) consistent.
+    const status = pct >= 100 ? 1 : 0;
+    await connection.query(
+      "UPDATE tasks SET complete_percentage = ?, status = ? WHERE id = ?",
+      [pct, status, taskId]
+    );
+    return res.json({ success: true, percent: pct, status });
+  } catch (err) {
+    logger.error("task percent set error: " + err.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 // Dedicated task check-off. This is the ONE write an expired free-trial user is
 // allowed, so it intentionally does NOT use denyExpiredFreeWrites. Scope is
 // strictly narrow: the assignee (or the leader of an assigned team) toggling
