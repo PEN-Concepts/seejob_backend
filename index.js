@@ -8,7 +8,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
-const { ensureOwnerTypeColumns, ensureMaterialsExtraColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureJobColorLockedColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatFilesColumns, ensureInvoiceDocumentSchema, ensureChatBackfill, ensureChatMergeConvertedLeadChats } = require("./services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureMaterialsExtraColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureJobColorLockedColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatFilesColumns, ensureInvoiceDocumentSchema, ensureChatBackfill, ensureChatMergeConvertedLeadChats, purgeShoppingLists } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
 const { repaletteOrphanedColors, reassignActiveDiverse } = require("./services/jobColorPalette");
 const userRoute = require("./routes/users");
@@ -227,6 +227,13 @@ const startServer = async (retries = 5, delay = 5000) => {
                     const r = await reassignActiveDiverse(migrationConn, { apply: true });
                     if (r.changed > 0) logger.info(`reassignActiveDiverse: de-clustered ${r.changed} job(s) across ${r.accountsTouched} account(s)`);
                 } catch (e) { logger.error('reassignActiveDiverse failed:', e); }
+                // Remove retired legacy "shopping" checklist sections + their items
+                // (idempotent; deletes 0 once clean). Logs counts + owner ids so any
+                // non-Poul owner surfaces rather than silently vanishing.
+                try {
+                    const s = await purgeShoppingLists(migrationConn);
+                    if (s.sections > 0) logger.info(`purgeShoppingLists: removed ${s.sections} shopping section(s) + ${s.items} item(s); owner_user_ids=[${s.owners.join(',')}]`);
+                } catch (e) { logger.error('purgeShoppingLists failed:', e); }
             } catch (err) {
                 logger.error('boot migrations failed:', err);
             } finally {

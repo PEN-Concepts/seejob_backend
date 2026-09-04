@@ -1516,7 +1516,32 @@ async function ensureChatMergeConvertedLeadChats(connection) {
   chatMergeDone = true;
 }
 
+// One-time cleanup (idempotent): the checklist "shopping" type was retired long
+// ago — creation is rejected and reads collapse to 'task' — but legacy shopping
+// sections and their items may still sit in the DB and render as read-only pages.
+// With no live customer data (every row is Poul's test data), remove them
+// outright: items first (FK-safe), then the sections. Idempotent — after the
+// first run there are no shopping rows, so it deletes 0. Returns counts + the
+// distinct owner_user_ids removed so the boot log is auditable (if an owner id
+// that isn't Poul's ever appears, the no-users assumption was wrong).
+async function purgeShoppingLists(connection) {
+  const [secRows] = await connection.query(
+    "SELECT id, owner_user_id FROM checklist_sections WHERE type = 'shopping'"
+  );
+  if (!secRows.length) return { sections: 0, items: 0, owners: [] };
+  const ids = secRows.map((r) => r.id);
+  const owners = [...new Set(secRows.map((r) => Number(r.owner_user_id)).filter(Boolean))];
+  const [itemDel] = await connection.query(
+    "DELETE FROM check_list WHERE section_id IN (?)", [ids]
+  );
+  const [secDel] = await connection.query(
+    "DELETE FROM checklist_sections WHERE type = 'shopping'"
+  );
+  return { sections: secDel.affectedRows || 0, items: itemDel.affectedRows || 0, owners };
+}
+
 module.exports = {
+  purgeShoppingLists,
   ensureChatTables,
   ensureChatGroupType,
   ensureChatReactionsTable,
