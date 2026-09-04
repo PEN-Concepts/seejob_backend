@@ -1046,7 +1046,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     // Fetch OLD task before update — pull team_id too so we can enforce
     // team-leader-only completion and propagate team membership correctly.
     const [[oldTask]] = await connection.query(
-      "SELECT id, user_id, team_id, created_by, duration_days, assignee_completed, status, task_name, description, job_id, start_date, end_date, time, is_appointment_task, complete_percentage FROM tasks WHERE id=?",
+      "SELECT id, user_id, team_id, created_by, duration_days, assignee_completed, status, task_name, description, job_id, start_date, end_date, time, is_appointment_task, is_calendar_task, priority, is_urgent, status_note, task_type, complete_percentage FROM tasks WHERE id=?",
       [req.params.id]
     );
 
@@ -1083,25 +1083,10 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
         message: "You can only edit tasks that belong to your account.",
       });
     }
-    if (
-      !ownsTask &&
-      isAssignee &&
-      newUser &&
-      Number(newUser) !== Number(oldUser)
-    ) {
-      const [contactRows] = await connection.query(
-        "SELECT 1 FROM contact WHERE request_by = ? AND request_to = ? AND status = 'Accept' LIMIT 1",
-        [actorId, newUser]
-      );
-      if (!contactRows.length) {
-        await connection.rollback();
-        return res.status(403).json({
-          code: "NOT_YOUR_CONTACT",
-          message:
-            "You can only re-assign this task to someone in your own contacts.",
-        });
-      }
-    }
+    // (Removed) A non-owning assignee could previously re-assign a task to one of
+    // their own contacts. Poul's rule now forbids ANY re-assignment by a non-owner
+    // (commercial: a sub who can reassign inside the job never needs their own paid
+    // account). The whitelist gate below rejects any user_id change by a non-owner.
 
     // Employees (foreman) may be allowed to complete tasks on behalf of their GC/creator.
     // Determine manager (creator) for this user.
@@ -1215,17 +1200,20 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       ? null
       : Math.max(0, Math.min(100, Number(complete_percentage)));
 
-    // ── FIELD-SCOPED gate (does NOT gate the whole route) ──────────────────────
-    // A caller who passes only the assignee branch (ownsTask === false) keeps
-    // every existing capability — content edits, re-assign to own contacts,
-    // assignee_completed — but may NOT write the two owner-only field groups:
-    //  • complete_percentage — the GC's number; it drives invoice draw amounts.
-    //  • start_date / duration_days (→ end_date, which is derived from them) —
-    //    a change here fires the schedule cascade (recomputeSchedule) and rewrites
-    //    dates on every dependent task in the job's schedule, a schedule-integrity
-    //    hole for a cross-account primary assignee.
-    // We reject only a real CHANGE (a full-object PUT that merely echoes the
-    // unchanged value is fine), and return a DISTINCT code so the FE can explain.
+    // ── WHITELIST gate for a non-owning assignee (does NOT gate the whole route) ──
+    // Poul's rule: a sub (or any non-owning assignee) may ONLY check off their own
+    // work — nothing else. So a caller who passes only the assignee branch
+    // (ownsTask === false) may CHANGE only two fields, both part of their own
+    // completion:
+    //   • assignee_completed  — their "I did the work" checkoff
+    //   • completion_response — the one written reply attached to that checkoff
+    // EVERY other field is blocked by DEFAULT (whitelist, not blacklist), so a
+    // field added later stays blocked automatically. This covers percent (the GC's
+    // billing number), the schedule-cascade dates, all content fields, the
+    // calendar/appointment flags, status, AND user_id (no re-assignment — a sub who
+    // could reassign inside the job would never need their own paid account). We
+    // reject only a REAL change (a full-object PUT echoing unchanged values passes),
+    // and return a DISTINCT code + the offending fields so the FE can explain.
     if (!ownsTask) {
       const ymdOf = (v) => {
         if (!v) return null;
@@ -1233,24 +1221,37 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
         const m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})/);
         return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
       };
-      const pctChanged = finalCompletePercentage !== null
-        && Number(finalCompletePercentage) !== Number(oldTask.complete_percentage || 0);
-      if (pctChanged) {
-        await connection.rollback();
-        return res.status(403).json({
-          code: "PERCENT_OWNER_ONLY",
-          message: "Only the job owner or an employee on the account can set percent complete.",
-        });
+      const violated = [];
+      const chgStr = (f, nv, ov) => { if (nv !== null && typeof nv !== 'undefined' && String(nv) !== String(ov == null ? '' : ov)) violated.push(f); };
+      const chgNum = (f, nv, ov) => { if (nv !== null && typeof nv !== 'undefined' && Number(nv) !== Number(ov || 0)) violated.push(f); };
+      // percentage + schedule dates
+      chgNum('complete_percentage', finalCompletePercentage, oldTask.complete_percentage);
+      if (startDateInput != null && formattedStartDate && ymdOf(formattedStartDate) !== ymdOf(oldTask.start_date)) violated.push('start_date');
+      if (hasDurationDays && parsedDurationDays != null && Number(parsedDurationDays) !== Number(oldTask.duration_days || 0)) violated.push('duration_days');
+      // content fields
+      chgStr('task_name', task_name, oldTask.task_name);
+      chgStr('priority', finalPriority, oldTask.priority);
+      chgStr('description', description, oldTask.description);
+      if (typeof time !== 'undefined' && time !== null && formattedTime && ymdOf(formattedTime) !== ymdOf(oldTask.time)) violated.push('time');
+      if (typeof req.body.is_urgent !== 'undefined') {
+        const nvUrgent = (req.body.is_urgent === 1 || req.body.is_urgent === true || req.body.is_urgent === '1') ? 1 : 0;
+        if (nvUrgent !== Number(oldTask.is_urgent || 0)) violated.push('is_urgent');
       }
-      const startChanged = startDateInput != null && formattedStartDate
-        && ymdOf(formattedStartDate) !== ymdOf(oldTask.start_date);
-      const durChanged = hasDurationDays && parsedDurationDays != null
-        && Number(parsedDurationDays) !== Number(oldTask.duration_days || 0);
-      if (startChanged || durChanged) {
+      if (typeof status_note !== 'undefined') chgStr('status_note', status_note, oldTask.status_note);
+      chgNum('is_calendar_task', is_calendar_task, oldTask.is_calendar_task);
+      chgNum('is_appointment_task', is_appointment_task, oldTask.is_appointment_task);
+      chgStr('task_type', task_type, oldTask.task_type);
+      // status: any change is owner-only (status=1 is also caught earlier).
+      if (typeof status !== 'undefined') chgNum('status', requestedStatus, oldTask.status);
+      // re-assignment: a non-owner may NOT change the assignee at all (commercial).
+      if (Object.prototype.hasOwnProperty.call(req.body, 'assignees') || Object.prototype.hasOwnProperty.call(req.body, 'user_id'))
+        chgNum('user_id', newUser, oldTask.user_id);
+      if (violated.length) {
         await connection.rollback();
         return res.status(403).json({
-          code: "SCHEDULE_OWNER_ONLY",
-          message: "Only the job owner or an employee on the account can change schedule dates.",
+          code: "ASSIGNEE_COMPLETION_ONLY",
+          message: "As an assignee you can only check off your own work; you cannot edit or re-assign this task.",
+          fields: [...new Set(violated)],
         });
       }
     }
