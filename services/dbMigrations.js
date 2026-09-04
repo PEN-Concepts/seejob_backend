@@ -168,6 +168,17 @@ async function ensureBudgetPercentColumns(connection) {
       await connection.query(`ALTER TABLE division_lineitems ADD COLUMN ${col} DECIMAL(7,3) NOT NULL DEFAULT 0`);
     }
   }
+  // profit_percent: split out of the old combined "Overhead & profit" field. Kept
+  // NULLABLE (NOT default 0) ON PURPOSE — a legacy budget that predates the split
+  // has profit_percent = NULL, which lets the FE tell "never split" (show the
+  // one-time re-split prompt, and DON'T fire the zero-profit warning) apart from a
+  // user who deliberately set profit to 0. No existing value is ever touched: a
+  // legacy overhead_percent stays as Overhead, profit is NULL, and every contract
+  // total is preserved exactly (a NULL profit contributes nothing to the total).
+  const [pcol] = await connection.query(`SHOW COLUMNS FROM division_lineitems LIKE 'profit_percent'`);
+  if (!pcol.length) {
+    await connection.query(`ALTER TABLE division_lineitems ADD COLUMN profit_percent DECIMAL(7,3) NULL DEFAULT NULL`);
+  }
   budgetPercentEnsured = true;
 }
 
