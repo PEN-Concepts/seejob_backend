@@ -4,9 +4,12 @@ const pool = require('../config/connection');
 const { checkAllLicenses, ensureCslbColumns } = require('../services/cslbChecker');
 const logger = require('../common/logger');
 
-// Runs every weekday at 2:00 AM Pacific — checks all contractor licenses and updates cslb_status
-cron.schedule('0 2 * * 1-5', async () => {
-  logger.info('[LicenseCheck] Starting nightly CSLB license check...');
+// Runs MONTHLY on the 1st at 2:00 AM Pacific — checks all contractor licenses
+// and updates cslb_status. (Was weekday-nightly; licence data changes slowly and
+// the Contacts "check licenses" endpoint refreshes anything >24h old on demand,
+// so user-facing data stays fresh without a nightly background sweep.)
+cron.schedule('0 2 1 * *', async () => {
+  logger.info('[LicenseCheck] Starting monthly CSLB license check...');
   let connection;
   try {
     connection = await pool.getConnection();
