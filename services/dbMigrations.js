@@ -1516,7 +1516,51 @@ async function ensureChatMergeConvertedLeadChats(connection) {
   chatMergeDone = true;
 }
 
+// One-time cleanup (idempotent): the checklist "shopping" type was retired long
+// ago — creation is rejected and reads collapse to 'task' — but legacy shopping
+// sections and their items may still sit in the DB and render as read-only pages.
+// With no live customer data (every row is Poul's test data), remove them
+// outright: items first (FK-safe), then the sections. Idempotent — after the
+// first run there are no shopping rows, so it deletes 0. Returns counts + the
+// distinct owner_user_ids removed so the boot log is auditable (if an owner id
+// that isn't Poul's ever appears, the no-users assumption was wrong).
+async function purgeShoppingLists(connection) {
+  const [secRows] = await connection.query(
+    "SELECT id, owner_user_id FROM checklist_sections WHERE type = 'shopping'"
+  );
+  if (!secRows.length) return { sections: 0, items: 0, owners: [], aborted: false, foreign: [] };
+  const ids = secRows.map((r) => r.id);
+  const owners = [...new Set(secRows.map((r) => Number(r.owner_user_id)).filter(Boolean))];
+
+  // GUARD (check FIRST, before deleting): every shopping section must belong to
+  // Poul's account. Resolve each owner to its account owner and require that
+  // owner's email be in OWNER_EXEMPT_EMAILS. If ANY is foreign, the "no users"
+  // assumption is wrong — ABORT, delete nothing, and let the boot log say why.
+  // (Not throwing: the deploy must not fail; the purge simply skips.)
+  const { OWNER_EXEMPT_EMAILS, resolveOwnerId } = require("../utils/access");
+  const foreign = [];
+  for (const oid of owners) {
+    let accountOwnerId = oid;
+    try { accountOwnerId = await resolveOwnerId(oid, connection); } catch (e) { /* fall back to self */ }
+    const [[u]] = await connection.query("SELECT email FROM `user` WHERE id = ? LIMIT 1", [accountOwnerId]);
+    const email = String(u && u.email ? u.email : "").trim().toLowerCase();
+    if (!OWNER_EXEMPT_EMAILS.has(email)) foreign.push({ owner_user_id: oid, account_owner_id: accountOwnerId, email });
+  }
+  if (foreign.length) {
+    return { sections: 0, items: 0, owners, aborted: true, foreign };
+  }
+
+  const [itemDel] = await connection.query(
+    "DELETE FROM check_list WHERE section_id IN (?)", [ids]
+  );
+  const [secDel] = await connection.query(
+    "DELETE FROM checklist_sections WHERE type = 'shopping'"
+  );
+  return { sections: secDel.affectedRows || 0, items: itemDel.affectedRows || 0, owners, aborted: false, foreign: [] };
+}
+
 module.exports = {
+  purgeShoppingLists,
   ensureChatTables,
   ensureChatGroupType,
   ensureChatReactionsTable,

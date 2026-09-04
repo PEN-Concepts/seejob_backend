@@ -8,7 +8,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
-const { ensureOwnerTypeColumns, ensureMaterialsExtraColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureJobColorLockedColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatFilesColumns, ensureInvoiceDocumentSchema, ensureChatBackfill, ensureChatMergeConvertedLeadChats } = require("./services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureMaterialsExtraColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureJobColorLockedColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatFilesColumns, ensureInvoiceDocumentSchema, ensureChatBackfill, ensureChatMergeConvertedLeadChats, purgeShoppingLists } = require("./services/dbMigrations");
 const { getCurrentDateTime } = require("./common/timdate")
 const { repaletteOrphanedColors, reassignActiveDiverse } = require("./services/jobColorPalette");
 const userRoute = require("./routes/users");
@@ -227,6 +227,32 @@ const startServer = async (retries = 5, delay = 5000) => {
                     const r = await reassignActiveDiverse(migrationConn, { apply: true });
                     if (r.changed > 0) logger.info(`reassignActiveDiverse: de-clustered ${r.changed} job(s) across ${r.accountsTouched} account(s)`);
                 } catch (e) { logger.error('reassignActiveDiverse failed:', e); }
+                // Remove retired legacy "shopping" checklist sections + their items
+                // (idempotent; deletes 0 once clean). ABORTS without deleting if any
+                // section belongs to an account that isn't Poul's (the no-users guard).
+                try {
+                    const s = await purgeShoppingLists(migrationConn);
+                    if (s.aborted) logger.error(`purgeShoppingLists: ABORTED — deleted NOTHING; foreign owner(s) found (no-users assumption wrong): ${JSON.stringify(s.foreign)}`);
+                    else if (s.sections > 0) logger.info(`purgeShoppingLists: removed ${s.sections} shopping section(s) + ${s.items} item(s); owner_user_ids=[${s.owners.join(',')}]`);
+                } catch (e) { logger.error('purgeShoppingLists failed:', e); }
+                // On-hold leak audit (informational): on-hold/archived schedules whose
+                // tasks still carry a start_date leak onto the Job Schedule today
+                // (query filters t.start_date, not js.status). Task 3's job_schedules
+                // join closes it; this records whether a bug actually shipped live.
+                try {
+                    const [leak] = await migrationConn.query(
+                        `SELECT js.id AS schedule_id, js.status, j.id AS job_id, j.name AS job_name, COUNT(t.id) AS dated_tasks
+                           FROM job_schedules js
+                           JOIN job j ON j.id = js.job_id
+                           JOIN job_schedule_items jsi ON jsi.schedule_id = js.id
+                           JOIN tasks t ON t.id = jsi.task_id
+                          WHERE js.status IN ('on_hold','archived')
+                            AND t.start_date IS NOT NULL AND t.archived_at IS NULL AND LOWER(t.task_type) = 'job'
+                          GROUP BY js.id, js.status, j.id, j.name`
+                    );
+                    if (leak.length) logger.warn(`[on-hold-leak] LIVE — ${leak.length} on-hold/archived schedule(s) leaking dated tasks onto Job Schedule: ${leak.map(r => `${r.job_name}#${r.job_id}[${r.status}](${r.dated_tasks})`).join(', ')}`);
+                    else logger.info('[on-hold-leak] none — no on-hold/archived schedule has dated tasks leaking');
+                } catch (e) { logger.error('[on-hold-leak] check failed:', e); }
             } catch (err) {
                 logger.error('boot migrations failed:', err);
             } finally {
