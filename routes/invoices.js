@@ -34,8 +34,14 @@ function computeTotals(items, taxRate) {
     subtotal = round2(subtotal + amount);
     return { description: String(it.description == null ? "" : it.description), qty, rate, amount, sort: idx };
   });
-  const tax_amount = round2(subtotal * num(taxRate) / 100);
-  const total = round2(subtotal + tax_amount);
+  // SeeJobRun invoices charge NO tax (B4): labor isn't taxable and this isn't a
+  // retail resale tool. Tax is forced to zero regardless of any tax_rate sent;
+  // the tax_rate/tax_amount columns stay (always 0) rather than being torn out.
+  // NOTE (do not build): a few states tax contractor-supplied MATERIALS
+  // differently. If SeeJobRun ever sells into one, a materials-tax line comes
+  // back here.
+  const tax_amount = 0;
+  const total = subtotal;
   return { items: norm, subtotal, tax_amount, total };
 }
 /** The invoice "from" block — the account owner's company profile (live). */
@@ -83,8 +89,9 @@ function publicInvoicePayload(inv, jobNumber) {
     id: inv.id, display_number: displayNumber(jobNumber, inv.invoice_seq),
     status: inv.status || "Draft",
     issued_date: inv.issued_date || (inv.created_at ? String(inv.created_at).slice(0, 10) : null),
-    due_date: inv.due_date, tax_rate: num(inv.tax_rate),
-    subtotal: num(inv.subtotal), tax_amount: num(inv.tax_amount), total: num(inv.total),
+    due_date: inv.due_date,
+    // No tax on the client-facing payload (B4) — tax_rate/tax_amount omitted.
+    subtotal: num(inv.subtotal), total: num(inv.total),
     notes: inv.notes || "", payment_instructions: inv.payment_instructions || "",
     sent_at: inv.sent_at || null, viewed_at: inv.viewed_at || null, paid_at: inv.paid_at || null,
   };
