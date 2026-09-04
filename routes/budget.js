@@ -400,7 +400,7 @@ router.get("/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.
     const [rows] = await connection.query(
       `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id,
               subcontractor_id, in_house, foreman_percent, paid_amount,
-              contingency, overhead_percent, gl_percent
+              contingency, overhead_percent, profit_percent, gl_percent
        FROM division_lineitems
        WHERE job_id = ? AND owner_type = ?
        ORDER BY division_id ASC, id ASC`,
@@ -427,7 +427,7 @@ router.post("/contingency", auth.authenticateToken, blockExpiredOwnRecord((r) =>
   // Build the SET for whichever of the three summary-card percentages were sent
   // (backward compatible — older callers send only `contingency`). Each stored
   // on every line item of the job, mirroring the original contingency design.
-  const cols = { contingency: 'contingency', overhead_percent: 'overhead_percent', gl_percent: 'gl_percent' };
+  const cols = { contingency: 'contingency', overhead_percent: 'overhead_percent', profit_percent: 'profit_percent', gl_percent: 'gl_percent' };
   const setParts = [];
   const setVals = [];
   const applied = {};
@@ -486,7 +486,7 @@ router.get("/divisions/:divisionId/lineitems", auth.authenticateToken, requireOw
     await ensureBudgetPercentColumns(connection);
     const params = [];
     let sql = `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id, contingency,
-                     overhead_percent, gl_percent, subcontractor_id, in_house, foreman_percent, paid_amount
+                     overhead_percent, profit_percent, gl_percent, subcontractor_id, in_house, foreman_percent, paid_amount
                FROM division_lineitems
                WHERE division_id = ?`;
     params.push(divisionId);
@@ -609,6 +609,9 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           contingency: it.contingency ?? null,
           in_house: it.in_house ? 1 : 0,
           overhead_percent: it.overhead_percent ?? 0,
+          // NULL preserved for a legacy (never-split) budget; an explicit number
+          // (including 0) once the owner sets Profit %.
+          profit_percent: (it.profit_percent === undefined || it.profit_percent === null || it.profit_percent === '') ? null : Number(it.profit_percent),
           gl_percent: it.gl_percent ?? 0,
           // in-house and a subcontractor are mutually exclusive
           subcontractor_id: it.in_house ? null : (it.subcontractor_id ?? null),
@@ -631,7 +634,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
 
           const updateSql = `UPDATE division_lineitems
             SET csi_number = ?, lineitem_description = ?, amount = ?, sub_cost = ?, contingency = ?,
-                overhead_percent = ?, gl_percent = ?,
+                overhead_percent = ?, profit_percent = ?, gl_percent = ?,
                 subcontractor_id = ?, in_house = ?, foreman_percent = ?, paid_amount = ?
             WHERE id = ? AND division_id = ? AND job_id = ? AND owner_type = ?`;
 
@@ -642,6 +645,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.sub_cost,
             normalized.contingency,
             normalized.overhead_percent,
+            normalized.profit_percent,
             normalized.gl_percent,
             normalized.subcontractor_id,
             normalized.in_house,
@@ -761,10 +765,10 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
         } else {
           const insertSql = `INSERT INTO division_lineitems
             (division_id, job_id, owner_type, csi_number, lineitem_description, amount, sub_cost, contingency,
-             overhead_percent, gl_percent,
+             overhead_percent, profit_percent, gl_percent,
              subcontractor_id, in_house, foreman_percent, paid_amount,
              created_at, created_by)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
 
           const insertValues = [
             Number(divisionId),
@@ -776,6 +780,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.sub_cost,
             normalized.contingency,
             normalized.overhead_percent,
+            normalized.profit_percent,
             normalized.gl_percent,
             normalized.subcontractor_id,
             normalized.in_house,
