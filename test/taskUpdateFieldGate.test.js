@@ -1,16 +1,15 @@
-/* Field-scoped ownership gate on PUT /jobtask/update/:id  (task 5).
+/* WHITELIST gate on PUT /jobtask/update/:id  (sub-permission tighten, task 13).
  *
- * Proves, against real MySQL (mysql-memory-server) + supertest, that a caller who
- * passes ONLY the assignee branch (a cross-account PRIMARY assignee — a sub) can
- * NO LONGER write the owner-only fields, while keeping every other capability:
- *   - PUT {complete_percentage} by the sub-assignee  -> 403 PERCENT_OWNER_ONLY, row unchanged
- *   - PUT {start_date}          by the sub-assignee  -> 403 SCHEDULE_OWNER_ONLY, row unchanged
- *   - PUT {task_name}           by the sub-assignee  -> allowed (content edit), name changed
- *   - PUT {complete_percentage} by the OWNER         -> allowed, percent changed
- *   - a full-object PUT that ECHOES the unchanged percent/date by the sub -> allowed (no false reject)
+ * Proves, against real MySQL (mysql-memory-server) + supertest, that a non-owning
+ * PRIMARY assignee (a cross-account sub) may change ONLY their own completion —
+ * `assignee_completed` and `completion_response` — and NOTHING else. Every other
+ * field is refused with 403 ASSIGNEE_COMPLETION_ONLY and the row stays unchanged,
+ * while the OWNER can still write everything. This is a pure sub check-off box,
+ * not wired to the owner's status tick or the percentage.
  *
  *   G(900) owner GC (owns the job + created the task)
  *   S(910) cross-company sub — the task's PRIMARY assignee (tasks.user_id = 910)
+ *   X(920) another user (re-assignment target the sub must not be able to set)
  *
  * Run: NODE_PATH=<backend>/node_modules node test/taskUpdateFieldGate.test.js
  */
@@ -48,46 +47,80 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
 
     await conn.query(`INSERT INTO \`user\` (id,name,email,role,category,business,created_by,created_at) VALUES
       (900,'Owner GC','g@x.com',14,2,'Acme Builders',NULL, NOW() - INTERVAL 200 DAY),
-      (910,'Cross Sub','s@x.com',14,2,'Bravo Framing',NULL, NOW() - INTERVAL 200 DAY)`);
-    await conn.query("INSERT INTO subscriptions (user_id,status) VALUES (900,'active'),(910,'active')");
+      (910,'Cross Sub','s@x.com',14,2,'Bravo Framing',NULL, NOW() - INTERVAL 200 DAY),
+      (920,'Other','x@x.com',14,2,'Charlie',NULL, NOW() - INTERVAL 200 DAY)`);
+    await conn.query("INSERT INTO subscriptions (user_id,status) VALUES (900,'active'),(910,'active'),(920,'active')");
     await conn.query("INSERT INTO job (id,created_by,name,status) VALUES (1900,900,'G job',1)");
     // Task on G's job whose PRIMARY assignee (tasks.user_id) is the cross-company sub S.
-    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,status,complete_percentage,start_date,duration_days,created_at) VALUES (2900,1900,910,900,'job','Framing',0,20,'2026-09-10',3, NOW())");
+    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,description,priority,status,complete_percentage,start_date,end_date,duration_days,is_urgent,assignee_completed,created_at) VALUES (2900,1900,910,900,'job','Framing','desc','low',0,20,'2026-09-10','2026-09-12',3,0,0, NOW())");
 
     const express = require('express');
     app = express();
     app.use(express.json());
     app.use('/api/jobtask', require('../routes/tasks'));
     const tok = (id) => 'Bearer ' + jwt.sign({ id, role: 14, category: 2, email: id + '@x.com', working_id: id }, process.env.ACCESS_TOKEN);
-    const pctOf = async () => { const [[r]] = await conn.query('SELECT complete_percentage, start_date, task_name FROM tasks WHERE id=2900'); return r; };
+    const row = async () => { const [[r]] = await conn.query('SELECT * FROM tasks WHERE id=2900'); return r; };
+    const subPut = (body) => request(app).put('/api/jobtask/update/2900').set('Authorization', tok(910)).send(body);
 
-    // 1) sub-assignee cannot write percent
-    const r1 = await request(app).put('/api/jobtask/update/2900').set('Authorization', tok(910)).send({ complete_percentage: 50 });
-    let row = await pctOf();
-    ok(r1.status === 403 && r1.body.code === 'PERCENT_OWNER_ONLY', '1: sub PUT complete_percentage -> 403 PERCENT_OWNER_ONLY', r1.status + ' ' + JSON.stringify(r1.body));
-    ok(Number(row.complete_percentage) === 20, '1: percent unchanged after refusal (still 20)', row.complete_percentage);
+    // ---- BLOCKED for the sub: every non-completion field -> 403, row unchanged ----
+    // Each carries user_id:910 (real FE edits always echo the primary assignee) so
+    // the only *changed* field is the one under test.
+    const blocked = [
+      ['complete_percentage', { complete_percentage: 50, user_id: 910 }, 'complete_percentage'],
+      ['start_date',          { start_date: '2026-09-01', user_id: 910 }, 'start_date'],
+      ['end_date',            { end_date: '2026-09-25', user_id: 910 }, 'end_date'],
+      ['duration_days',       { duration_days: 9, user_id: 910 }, 'duration_days'],
+      ['task_name',           { task_name: 'Hacked', user_id: 910 }, 'task_name'],
+      ['priority',            { priority: 'high', user_id: 910 }, 'priority'],
+      ['description',         { description: 'changed', user_id: 910 }, 'description'],
+      ['is_urgent',           { is_urgent: 1, user_id: 910 }, 'is_urgent'],
+      ['status_note',         { status_note: 'note', user_id: 910 }, 'status_note'],
+      ['is_calendar_task',    { is_calendar_task: 1, user_id: 910 }, 'is_calendar_task'],
+    ];
+    for (const [label, body, field] of blocked) {
+      const r = await subPut(body);
+      const okStatus = r.status === 403 && r.body.code === 'ASSIGNEE_COMPLETION_ONLY'
+        && Array.isArray(r.body.fields) && r.body.fields.includes(field);
+      ok(okStatus, `sub CANNOT write ${label} -> 403 ASSIGNEE_COMPLETION_ONLY (fields includes ${field})`, r.status + ' ' + JSON.stringify(r.body));
+    }
+    // spot-check the row is genuinely untouched by the refusals above
+    {
+      const t = await row();
+      ok(Number(t.complete_percentage) === 20, 'percent still 20 after all refusals', t.complete_percentage);
+      ok(t.task_name === 'Framing', 'task_name still "Framing" after all refusals', t.task_name);
+    }
 
-    // 2) sub-assignee cannot write dates
-    const r2 = await request(app).put('/api/jobtask/update/2900').set('Authorization', tok(910)).send({ start_date: '2026-09-01' });
-    row = await pctOf();
-    ok(r2.status === 403 && r2.body.code === 'SCHEDULE_OWNER_ONLY', '2: sub PUT start_date -> 403 SCHEDULE_OWNER_ONLY', r2.status + ' ' + JSON.stringify(r2.body));
-    ok(String(row.start_date).slice(0, 10) === '2026-09-10', '2: start_date unchanged after refusal', String(row.start_date));
+    // sub cannot re-assign the task to someone else
+    const rReassign = await subPut({ user_id: 920 });
+    ok(rReassign.status === 403 && rReassign.body.code === 'ASSIGNEE_COMPLETION_ONLY',
+      'sub CANNOT re-assign (user_id -> 920) -> 403 ASSIGNEE_COMPLETION_ONLY', rReassign.status + ' ' + JSON.stringify(rReassign.body));
+    ok(Number((await row()).user_id) === 910, 'primary assignee unchanged (still 910)', (await row()).user_id);
 
-    // 3) sub-assignee CAN still edit a content field (task_name). Real FE edits
-    //    include user_id, so keep the sub as the primary assignee across the PUT.
-    const r3 = await request(app).put('/api/jobtask/update/2900').set('Authorization', tok(910)).send({ task_name: 'Framing v2', user_id: 910 });
-    row = await pctOf();
-    ok(r3.status === 200, '3: sub PUT task_name -> 200 (content edit allowed)', r3.status + ' ' + JSON.stringify(r3.body));
-    ok(row.task_name === 'Framing v2', '3: task_name changed by sub', row.task_name);
+    // ---- ALLOWED for the sub: completion_response, then assignee_completed ----
+    const rC = await subPut({ completion_response: 'Done, sealed the deck.', user_id: 910 });
+    ok(rC.status === 200, 'sub CAN write completion_response -> 200', rC.status + ' ' + JSON.stringify(rC.body));
+    ok((await row()).completion_response === 'Done, sealed the deck.', 'completion_response saved', (await row()).completion_response);
 
-    // 4) a full-object echo of the UNCHANGED percent/date by the sub is NOT falsely refused
-    const r4 = await request(app).put('/api/jobtask/update/2900').set('Authorization', tok(910)).send({ task_name: 'Framing v3', user_id: 910, complete_percentage: 20, start_date: '2026-09-10' });
-    ok(r4.status === 200, '4: sub full-object PUT echoing unchanged percent+date -> 200 (no false reject)', r4.status + ' ' + JSON.stringify(r4.body));
+    const rD = await subPut({ assignee_completed: 1, user_id: 910 });
+    ok(rD.status === 200, 'sub CAN write assignee_completed -> 200', rD.status + ' ' + JSON.stringify(rD.body));
+    {
+      const t = await row();
+      ok(Number(t.assignee_completed) === 1, 'assignee_completed set to 1', t.assignee_completed);
+      ok(Number(t.status) !== 1, 'sub checkoff did NOT tick the owner status', t.status);
+      ok(Number(t.complete_percentage) === 20, 'sub checkoff did NOT move the percentage (still 20)', t.complete_percentage);
+    }
 
-    // 5) the OWNER can still write percent
-    const r5 = await request(app).put('/api/jobtask/update/2900').set('Authorization', tok(900)).send({ complete_percentage: 60 });
-    row = await pctOf();
-    ok(r5.status === 200 && Number(row.complete_percentage) === 60, '5: owner PUT complete_percentage -> 200 and percent = 60', r5.status + ' pct=' + row.complete_percentage);
+    // ---- unchanged echo (full-object PUT repeating current values) is NOT refused ----
+    const rE = await subPut({ user_id: 910, task_name: 'Framing', priority: 'low', description: 'desc', complete_percentage: 20, start_date: '2026-09-10' });
+    ok(rE.status === 200, 'sub full-object PUT echoing unchanged values -> 200 (no false reject)', rE.status + ' ' + JSON.stringify(rE.body));
+
+    // ---- OWNER can still write everything ----
+    const rO = await request(app).put('/api/jobtask/update/2900').set('Authorization', tok(900)).send({ complete_percentage: 60, task_name: 'Framing v2', user_id: 910 });
+    {
+      const t = await row();
+      ok(rO.status === 200 && Number(t.complete_percentage) === 60 && t.task_name === 'Framing v2',
+        'owner CAN write percent + name -> 200', rO.status + ' pct=' + t.complete_percentage + ' name=' + t.task_name);
+    }
 
   } catch (err) {
     ok(false, 'suite threw', String(err && err.stack ? err.stack.split('\n').slice(0, 6).join(' | ') : err));
