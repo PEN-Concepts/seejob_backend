@@ -135,6 +135,26 @@ async function ensureInHouseColumn(connection) {
   inHouseEnsured = true;
 }
 
+// Job Budget: `is_allowance` = this line is an ALLOWANCE (a budgeted figure whose
+// actual cost is settled later). Purely a per-line flag set by an explicit
+// checkbox — never inferred from the line's name. Drives the allowance column's
+// row tint + over/unspent language on the FE. Additive, idempotent; runs before a
+// budget save/load. NOTE: contingency is a job-level percentage, NOT an allowance,
+// and never uses this flag.
+let allowanceEnsured = false;
+async function ensureAllowanceColumn(connection) {
+  if (allowanceEnsured) return;
+  const [cols] = await connection.query(
+    `SHOW COLUMNS FROM division_lineitems LIKE 'is_allowance'`
+  );
+  if (!cols.length) {
+    await connection.query(
+      `ALTER TABLE division_lineitems ADD COLUMN is_allowance TINYINT NOT NULL DEFAULT 0`
+    );
+  }
+  allowanceEnsured = true;
+}
+
 // Job Budget summary-card percentages, stored per line item like `contingency`
 // (same value across a job's rows, updated by job_id). overhead_percent (O&P,
 // calc off Building Cost) + gl_percent (General liability, calc off Client
@@ -1602,6 +1622,7 @@ module.exports = {
   ensureMaterialsExtraColumns,
   ensureSubCostColumn,
   ensureInHouseColumn,
+  ensureAllowanceColumn,
   ensureBudgetPercentColumns,
   ensurePaymentsTables,
   ensureBudgetLockTables,
