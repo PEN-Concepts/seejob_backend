@@ -1046,7 +1046,7 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     // Fetch OLD task before update — pull team_id too so we can enforce
     // team-leader-only completion and propagate team membership correctly.
     const [[oldTask]] = await connection.query(
-      "SELECT id, user_id, team_id, created_by, duration_days, assignee_completed, status, task_name, description, job_id, start_date, end_date, time, is_appointment_task FROM tasks WHERE id=?",
+      "SELECT id, user_id, team_id, created_by, duration_days, assignee_completed, status, task_name, description, job_id, start_date, end_date, time, is_appointment_task, complete_percentage FROM tasks WHERE id=?",
       [req.params.id]
     );
 
@@ -1214,6 +1214,46 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     const finalCompletePercentage = (complete_percentage === null || typeof complete_percentage === 'undefined')
       ? null
       : Math.max(0, Math.min(100, Number(complete_percentage)));
+
+    // ── FIELD-SCOPED gate (does NOT gate the whole route) ──────────────────────
+    // A caller who passes only the assignee branch (ownsTask === false) keeps
+    // every existing capability — content edits, re-assign to own contacts,
+    // assignee_completed — but may NOT write the two owner-only field groups:
+    //  • complete_percentage — the GC's number; it drives invoice draw amounts.
+    //  • start_date / duration_days (→ end_date, which is derived from them) —
+    //    a change here fires the schedule cascade (recomputeSchedule) and rewrites
+    //    dates on every dependent task in the job's schedule, a schedule-integrity
+    //    hole for a cross-account primary assignee.
+    // We reject only a real CHANGE (a full-object PUT that merely echoes the
+    // unchanged value is fine), and return a DISTINCT code so the FE can explain.
+    if (!ownsTask) {
+      const ymdOf = (v) => {
+        if (!v) return null;
+        if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+        const m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})/);
+        return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+      };
+      const pctChanged = finalCompletePercentage !== null
+        && Number(finalCompletePercentage) !== Number(oldTask.complete_percentage || 0);
+      if (pctChanged) {
+        await connection.rollback();
+        return res.status(403).json({
+          code: "PERCENT_OWNER_ONLY",
+          message: "Only the job owner or an employee on the account can set percent complete.",
+        });
+      }
+      const startChanged = startDateInput != null && formattedStartDate
+        && ymdOf(formattedStartDate) !== ymdOf(oldTask.start_date);
+      const durChanged = hasDurationDays && parsedDurationDays != null
+        && Number(parsedDurationDays) !== Number(oldTask.duration_days || 0);
+      if (startChanged || durChanged) {
+        await connection.rollback();
+        return res.status(403).json({
+          code: "SCHEDULE_OWNER_ONLY",
+          message: "Only the job owner or an employee on the account can change schedule dates.",
+        });
+      }
+    }
 
     // Sanitize job_id and only update it if explicitly present in the body
     const hasJobId = Object.prototype.hasOwnProperty.call(req.body, 'job_id');
