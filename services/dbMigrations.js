@@ -1528,16 +1528,35 @@ async function purgeShoppingLists(connection) {
   const [secRows] = await connection.query(
     "SELECT id, owner_user_id FROM checklist_sections WHERE type = 'shopping'"
   );
-  if (!secRows.length) return { sections: 0, items: 0, owners: [] };
+  if (!secRows.length) return { sections: 0, items: 0, owners: [], aborted: false, foreign: [] };
   const ids = secRows.map((r) => r.id);
   const owners = [...new Set(secRows.map((r) => Number(r.owner_user_id)).filter(Boolean))];
+
+  // GUARD (check FIRST, before deleting): every shopping section must belong to
+  // Poul's account. Resolve each owner to its account owner and require that
+  // owner's email be in OWNER_EXEMPT_EMAILS. If ANY is foreign, the "no users"
+  // assumption is wrong — ABORT, delete nothing, and let the boot log say why.
+  // (Not throwing: the deploy must not fail; the purge simply skips.)
+  const { OWNER_EXEMPT_EMAILS, resolveOwnerId } = require("../utils/access");
+  const foreign = [];
+  for (const oid of owners) {
+    let accountOwnerId = oid;
+    try { accountOwnerId = await resolveOwnerId(oid, connection); } catch (e) { /* fall back to self */ }
+    const [[u]] = await connection.query("SELECT email FROM `user` WHERE id = ? LIMIT 1", [accountOwnerId]);
+    const email = String(u && u.email ? u.email : "").trim().toLowerCase();
+    if (!OWNER_EXEMPT_EMAILS.has(email)) foreign.push({ owner_user_id: oid, account_owner_id: accountOwnerId, email });
+  }
+  if (foreign.length) {
+    return { sections: 0, items: 0, owners, aborted: true, foreign };
+  }
+
   const [itemDel] = await connection.query(
     "DELETE FROM check_list WHERE section_id IN (?)", [ids]
   );
   const [secDel] = await connection.query(
     "DELETE FROM checklist_sections WHERE type = 'shopping'"
   );
-  return { sections: secDel.affectedRows || 0, items: itemDel.affectedRows || 0, owners };
+  return { sections: secDel.affectedRows || 0, items: itemDel.affectedRows || 0, owners, aborted: false, foreign: [] };
 }
 
 module.exports = {
