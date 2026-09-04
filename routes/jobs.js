@@ -2458,12 +2458,22 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
     // and the full multi-assignee list (for the "+N" marker). Assignee list uses a
     // newline separator (names never contain newlines); falls back to the primary
     // user / team when the join table is empty (pre-multi-assignee rows).
+    // A multi-day Gantt trade is stored as ONE row whose dates live on the
+    // job_schedule_items record (computed_start/end + duration). We FAN IT OUT in
+    // JS below to one cell per WORKING day it occupies (respecting the schedule's
+    // skip_saturday/skip_sunday). So the SQL uses an OVERLAP filter, not a
+    // start-date-in-window filter, to also catch a trade that began before the
+    // window and runs into it. The js join is also our ON-HOLD gate: a trade whose
+    // parent schedule is on_hold/archived must not appear (plain tasks, jsi.id
+    // NULL, are unaffected). Non-Gantt tasks carry their own start/end/duration.
     const [rows] = await connection.query(
       `SELECT
          t.id,
          t.task_name,
          t.job_id,
          t.start_date,
+         t.end_date,
+         t.duration_days AS task_duration_days,
          t.is_calendar_task,
          COALESCE(t.status, 0)            AS status,
          COALESCE(t.assignee_completed,0) AS assignee_completed,
@@ -2471,7 +2481,14 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
          u.name       AS user_name,
          tm.team_name AS team_name,
          jsi.id       AS schedule_item_id,
+         jsi.duration_days       AS item_duration_days,
+         jsi.computed_start_date AS item_start_date,
+         jsi.computed_end_date   AS item_end_date,
+         jsi.pinned_start_date   AS item_pinned_date,
+         js.skip_saturday        AS skip_saturday,
+         js.skip_sunday          AS skip_sunday,
          gsp.percent  AS percent,
+         COALESCE(t.complete_percentage, 0) AS task_percent,
          (SELECT GROUP_CONCAT(au.name ORDER BY ta.id SEPARATOR '\n')
             FROM task_assignees ta JOIN \`user\` au ON au.id = ta.user_id
            WHERE ta.task_id = t.id) AS assignee_list
@@ -2480,15 +2497,48 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
        LEFT JOIN \`user\` u ON u.id = t.user_id
        LEFT JOIN teams tm  ON tm.id = t.team_id
        LEFT JOIN job_schedule_items jsi ON jsi.task_id = t.id
+       LEFT JOIN job_schedules js ON js.id = jsi.schedule_id
        LEFT JOIN gantt_stage_progress gsp ON gsp.schedule_item_id = jsi.id
        WHERE LOWER(t.task_type) = 'job'
          AND t.archived_at IS NULL
          AND t.start_date IS NOT NULL
-         AND DATE(t.start_date) BETWEEN ? AND ?
+         AND (jsi.id IS NULL OR js.status NOT IN ('on_hold','archived'))
+         AND (
+           DATE(COALESCE(jsi.computed_start_date, jsi.pinned_start_date, t.start_date)) <= ?
+           AND DATE(COALESCE(jsi.computed_end_date, t.end_date, t.start_date)) >= ?
+         )
          AND t.job_id IN (?)
        ORDER BY t.start_date ASC, t.is_calendar_task DESC, t.id ASC`,
-      [start, end, jobIds]
+      [end, start, jobIds]
     );
+
+    // ── working-day helpers for multi-day fan-out ─────────────────────────────
+    const ymd = (v) => v instanceof Date
+      ? `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, "0")}-${String(v.getDate()).padStart(2, "0")}`
+      : (v ? String(v).slice(0, 10) : null);
+    const addDays = (s, n) => {
+      const [y, m, d] = s.split("-").map(Number);
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      dt.setUTCDate(dt.getUTCDate() + n);
+      return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}-${String(dt.getUTCDate()).padStart(2, "0")}`;
+    };
+    const dowOf = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d)).getUTCDay(); };
+    // The ordered WORKING days an item occupies, from startYmd forward, skipping
+    // Sat/Sun per the schedule's flags. A non-Gantt task passes skip=false → plain
+    // calendar days. Guard caps the walk (~10 years) against a bad duration.
+    const workingDays = (startYmd, durationDays, skipSat, skipSun) => {
+      const out = [];
+      if (!startYmd) return out;
+      let cur = startYmd, guard = 0;
+      const target = Math.max(1, Number(durationDays || 1));
+      while (out.length < target && guard < 3660) {
+        const wd = dowOf(cur);
+        if (!((wd === 6 && skipSat) || (wd === 0 && skipSun))) out.push(cur);
+        cur = addDays(cur, 1);
+        guard++;
+      }
+      return out;
+    };
 
     const mapRow = (r) => {
       const list = String(r.assignee_list || "")
@@ -2507,16 +2557,47 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
         assignee_name: assignees[0] || "",           // primary (back-compat)
         type: isSchedule ? "schedule" : "task",
         schedule_item_id: scheduleItemId,
-        percent: isSchedule ? Number(r.percent || 0) : null,
+        // Every row carries a percent now (Poul: one rule for the whole screen —
+        // no task/trade split). A Gantt trade's % comes from gantt_stage_progress;
+        // a plain task's % is its own complete_percentage.
+        percent: isSchedule ? Number(r.percent || 0) : Number(r.task_percent || 0),
         status: Number(r.status) || 0,
         completed: Number(r.status) === 1 || Number(r.assignee_completed) === 1,
-        date:
-          r.start_date instanceof Date
-            ? `${r.start_date.getFullYear()}-${String(r.start_date.getMonth() + 1).padStart(2, "0")}-${String(r.start_date.getDate()).padStart(2, "0")}`
-            : String(r.start_date).slice(0, 10),
+        date: ymd(r.start_date),
       };
     };
-    const items = rows.map(mapRow);
+
+    // Fan a multi-day item out to one cell per WORKING day within [start, end],
+    // tagging each with day_index / day_total (the FE renders "DAY N OF M" and
+    // hides the chip when day_total <= 1). Gantt trades take their dates + weekend
+    // flags from the schedule; a plain task uses its own start/end/duration.
+    const fanOut = (r) => {
+      const base = mapRow(r);
+      const isSchedule = base.schedule_item_id != null;
+      const skipSat = isSchedule && Number(r.skip_saturday) === 1;
+      const skipSun = isSchedule && Number(r.skip_sunday) === 1;
+      const itemStart = isSchedule
+        ? ymd(r.item_start_date || r.item_pinned_date || r.start_date)
+        : ymd(r.start_date);
+      const duration = isSchedule
+        ? Number(r.item_duration_days || 1)
+        : Number(r.task_duration_days || 1);
+      const days = workingDays(itemStart, duration, skipSat, skipSun);
+      const total = days.length || 1;
+      const cells = [];
+      days.forEach((d, i) => {
+        if (d < start || d > end) return;
+        cells.push({ ...base, date: d, day_index: i + 1, day_total: total });
+      });
+      // Item overlapped the window per SQL but no working day landed inside it
+      // (e.g. a weekend-only window with weekends skipped): show it once on its
+      // own start if that is in range, so nothing silently disappears.
+      if (!cells.length && base.date && base.date >= start && base.date <= end) {
+        cells.push({ ...base, date: base.date, day_index: 1, day_total: total });
+      }
+      return cells;
+    };
+    const items = rows.flatMap(fanOut);
 
     // CARRIED OVER: incomplete TASKS (never Gantt schedule items — those have a
     // percent, and the Gantt owns their dates) dated BEFORE today, in the same
@@ -2528,6 +2609,7 @@ router.get("/job-schedule", auth.authenticateToken, async (req, res) => {
          COALESCE(t.assignee_completed,0) AS assignee_completed,
          j.name AS job_name, u.name AS user_name, tm.team_name AS team_name,
          NULL AS schedule_item_id, NULL AS percent,
+         COALESCE(t.complete_percentage, 0) AS task_percent,
          (SELECT GROUP_CONCAT(au.name ORDER BY ta.id SEPARATOR '\n')
             FROM task_assignees ta JOIN \`user\` au ON au.id = ta.user_id
            WHERE ta.task_id = t.id) AS assignee_list
