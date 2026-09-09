@@ -29,8 +29,29 @@ const Joi = require('joi');
 const auth = require('../services/authentication');
 const logger = require('../common/logger');
 const { isSameAccount, getAccessMode } = require('../utils/access');
+const { isFullAccess } = require('../services/notepadAccess');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 const { requireNotepadMyTasks } = require('../services/featureFlags');
+
+/**
+ * 3a — MY TASKS IS A FULL-ACCESS PAGE.
+ *
+ * Off-list users do not get it: they see the work delegated to them inline in
+ * their own job notepad (3b), which is one place instead of two. So this is a
+ * 403 and not an empty list — an empty list would look like a bug to someone
+ * who has nine tasks waiting for them somewhere else.
+ *
+ * ROLE gate, never a plan gate. Nothing here consults the subscription.
+ */
+async function requireFullAccess(connection, uid, res) {
+  if (await isFullAccess(connection, uid)) return true;
+  res.status(403).json({
+    success: false,
+    code: 'MY_TASKS_NOT_AVAILABLE',
+    message: 'My Tasks is not part of your access. Your assigned work is in your job notepad.',
+  });
+  return false;
+}
 
 async function withConn(fn) {
   const connection = await pool.getConnection();
@@ -74,6 +95,7 @@ router.get('/my-tasks', auth.authenticateToken, requireNotepadMyTasks, async (re
   try {
     await withConn(async (connection) => {
       await ensureNotepadSchema(connection);
+      if (!(await requireFullAccess(connection, uid, res))) return;
 
       const [rows] = await connection.query(
         `SELECT

@@ -419,6 +419,31 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const strangerStar = await request(app).put(`/api/tasks/${delTaskId}/star`).set('Authorization', OUTSIDER).send({ starred: true });
     ok(strangerStar.status === 403, 'a user from another account cannot star the task', String(strangerStar.status));
 
+
+    // ── 13. 3a — My Tasks is a FULL-ACCESS page ──────────────────────────────
+    // BILL (802) was revoked at step 10, so he is off-list now. He must not get
+    // an EMPTY My Tasks; he must not get the page at all. His delegated work
+    // lives in his own job notepad (3b), which is why this is 403 and not 200.
+    const offListMyTasks = await request(app).get('/api/tasks/my-tasks').set('Authorization', BILL);
+    ok(offListMyTasks.status === 403, '3a: off-list user gets 403 on /my-tasks, not an empty list', String(offListMyTasks.status));
+    ok(offListMyTasks.body.code === 'MY_TASKS_NOT_AVAILABLE', '3a: the refusal names itself, so the client can route rather than guess', JSON.stringify(offListMyTasks.body));
+
+    // ...but the note, photo and star endpoints stay OPEN to him, because 3b
+    // needs exactly those three from inside his own notepad.
+    const offListNote = await request(app).post(`/api/tasks/${delTaskId}/notes`).set('Authorization', BILL).send({ body: 'still allowed' });
+    ok(offListNote.status !== 403, '3a: losing the PAGE does not lose note/photo/star — 3b needs them', String(offListNote.status));
+
+    // The owner is implicitly on the list and can never be locked out.
+    const ownerMyTasks = await request(app).get('/api/tasks/my-tasks').set('Authorization', OWNER);
+    ok(ownerMyTasks.status === 200, '3a: the account owner always has My Tasks', String(ownerMyTasks.status));
+
+    // ── 14. 3i — the 80-character cap is enforced SERVER-SIDE ────────────────
+    // The client countdown is a courtesy; this is the rule. A client with the
+    // countdown patched out, or any direct API call, still cannot get past it.
+    const tooLong = await request(app).post('/api/checklists/create').set('Authorization', OWNER).send({ type: 'task', name: 'x'.repeat(81), section_id: companyPadId });
+    ok(tooLong.status === 400, '3i: an 81-character task name is refused by the server', String(tooLong.status));
+    const atLimit = await request(app).post('/api/checklists/create').set('Authorization', OWNER).send({ type: 'task', name: 'y'.repeat(80), section_id: companyPadId });
+    ok(atLimit.status === 200 || atLimit.status === 201, '3i: exactly 80 characters is accepted — the cap is inclusive', String(atLimit.status));
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);
