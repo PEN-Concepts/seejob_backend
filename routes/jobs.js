@@ -656,6 +656,7 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
       `
         SELECT
           j.id, j.name, j.address, j.city, j.state, j.zipcode,
+          j.job_address, j.job_city, j.job_state, j.job_zipcode,
           j.contract_status, j.type, j.status, j.color
         FROM job j
         WHERE ${jobsWhere}
@@ -707,10 +708,13 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
         status: j.status,
         color: j.color || null,
         contract_status: normalize(j.contract_status),
-        address: normalize(j.address),
-        city: normalize(j.city),
-        state: normalize(j.state),
-        zipcode: normalize(j.zipcode),
+        // Prefer the JOB SITE address — that is the one a field user recognises
+        // in a picker, and the one the notepad shows. Falls back to the mailing
+        // address when the site one was never filled in.
+        address: normalize(j.job_address) || normalize(j.address),
+        city: normalize(j.job_city) || normalize(j.city),
+        state: normalize(j.job_state) || normalize(j.state),
+        zipcode: normalize(j.job_zipcode) || normalize(j.zipcode),
       });
     }
 
