@@ -204,6 +204,37 @@ async function ensureNotepadSchema(connection) {
     await addIndex(connection, 'ALTER TABLE tasks ADD INDEX idx_tasks_starred (starred_at)');
   });
 
+  // ── §5 "Link the notepad to the owner/client in the background. Do not
+  // surface that in the UI yet." The client is derivable from the joined job,
+  // but derivable is not linked: a job's client can change, and a lead pad has
+  // no job at all. Store it, populate it, surface nothing.
+  await run('checklist_sections.client_user_id', async () => {
+    await addColumn(connection, 'checklist_sections', 'client_user_id', 'INT NULL DEFAULT NULL');
+    await addColumn(connection, 'checklist_sections', 'owner_contact_id', 'INT NULL DEFAULT NULL');
+  });
+
+  // ── Migration-policy rule 9: "Destructive jobs log what they did, in a place
+  // the owner can read." A file on the EC2 box and a raw table are not that.
+  // This is the one table the owner-facing Activity view reads, so every gated
+  // job — armed or dry-run — lands somewhere reachable from the UI.
+  await run('destructive_job_log', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS destructive_job_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        account_owner_id INT NULL,
+        kind VARCHAR(32) NOT NULL,
+        actor_user_id INT NULL,
+        summary VARCHAR(500) NOT NULL,
+        detail MEDIUMTEXT NULL,
+        rows_affected INT NOT NULL DEFAULT 0,
+        dry_run TINYINT NOT NULL DEFAULT 1,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_djl_account (account_owner_id, created_at),
+        KEY idx_djl_kind (kind, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
+
   if (allOk) ensured = true;
 }
 

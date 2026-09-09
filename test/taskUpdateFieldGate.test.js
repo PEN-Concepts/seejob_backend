@@ -48,7 +48,8 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query(`INSERT INTO \`user\` (id,name,email,role,category,business,created_by,created_at) VALUES
       (900,'Owner GC','g@x.com',14,2,'Acme Builders',NULL, NOW() - INTERVAL 200 DAY),
       (910,'Cross Sub','s@x.com',14,2,'Bravo Framing',NULL, NOW() - INTERVAL 200 DAY),
-      (920,'Other','x@x.com',14,2,'Charlie',NULL, NOW() - INTERVAL 200 DAY)`);
+      (920,'Other','x@x.com',14,2,'Charlie',NULL, NOW() - INTERVAL 200 DAY),
+      (930,'Ellie Employee','e@x.com',2,1,NULL,900, NOW() - INTERVAL 200 DAY)`);
     await conn.query("INSERT INTO subscriptions (user_id,status) VALUES (900,'active'),(910,'active'),(920,'active')");
     await conn.query("INSERT INTO job (id,created_by,name,status) VALUES (1900,900,'G job',1)");
     // Task on G's job whose PRIMARY assignee (tasks.user_id) is the cross-company sub S.
@@ -132,6 +133,45 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       ok(rO.status === 200 && Number(t.complete_percentage) === 60 && t.task_name === 'Framing v2',
         'owner CAN write percent + name -> 200', rO.status + ' pct=' + t.complete_percentage + ' name=' + t.task_name);
     }
+
+    // ---- EMPLOYEE assignee is completion-only too (CCP §10, owner ruling) ----
+    // E(930) is an employee of the owner, so isSameAccount granted ownsTask and
+    // the whitelist gate never fired for them: a sub could not rename a task
+    // assigned to them but an employee could. "Assigned tasks are photo and
+    // notes only for EVERYONE."
+    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,priority,status,complete_percentage,start_date,end_date,duration_days,is_urgent,assignee_completed,created_at) VALUES (2901,1900,930,900,'job','Sheetrock','low',0,10,'2026-09-10','2026-09-12',3,0,0, NOW())");
+    const empTok = 'Bearer ' + jwt.sign({ id: 930, role: 2, category: 1, email: 'e@x.com', working_id: 900 }, process.env.ACCESS_TOKEN);
+    const empPut = (body) => request(app).put('/api/jobtask/update/2901').set('Authorization', empTok).send(body);
+    const row2901 = async () => { const [[r]] = await conn.query('SELECT * FROM tasks WHERE id=2901'); return r; };
+
+    const rEmpName = await empPut({ task_name: 'Renamed by employee', user_id: 930 });
+    ok(rEmpName.status === 403 && rEmpName.body.code === 'ASSIGNEE_COMPLETION_ONLY',
+      'EMPLOYEE assignee CANNOT rename a task assigned to them -> 403', rEmpName.status + ' ' + JSON.stringify(rEmpName.body));
+    ok((await row2901()).task_name === 'Sheetrock', 'title unchanged after the employee refusal', (await row2901()).task_name);
+
+    const rEmpReassign = await empPut({ user_id: 920 });
+    ok(rEmpReassign.status === 403 && rEmpReassign.body.code === 'ASSIGNEE_COMPLETION_ONLY',
+      'EMPLOYEE assignee CANNOT re-assign their task -> 403', rEmpReassign.status + ' ' + JSON.stringify(rEmpReassign.body));
+
+    const rEmpPct = await empPut({ complete_percentage: 90, user_id: 930 });
+    ok(rEmpPct.status === 403 && rEmpPct.body.code === 'ASSIGNEE_COMPLETION_ONLY',
+      'EMPLOYEE assignee CANNOT move the percentage -> 403', rEmpPct.status + ' ' + JSON.stringify(rEmpPct.body));
+
+    // …but their own check-off still works, and the owner's numbers stay put.
+    const rEmpDone = await empPut({ assignee_completed: 1, user_id: 930 });
+    ok(rEmpDone.status === 200, 'EMPLOYEE assignee CAN still check off their own work -> 200', rEmpDone.status + ' ' + JSON.stringify(rEmpDone.body));
+    {
+      const t = await row2901();
+      ok(Number(t.assignee_completed) === 1, 'employee check-off recorded');
+      ok(Number(t.status) === 0, "employee check-off did NOT tick the owner's status");
+      ok(Number(t.complete_percentage) === 10, 'employee check-off did NOT move the percentage');
+    }
+
+    // A task the employee CREATED themselves stays fully editable ("own task
+    // shows edit and delete").
+    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,priority,status,start_date,end_date,duration_days,is_urgent,assignee_completed,created_at) VALUES (2902,1900,930,930,'job','My own task','low',0,'2026-09-10','2026-09-12',3,0,0, NOW())");
+    const rOwn = await request(app).put('/api/jobtask/update/2902').set('Authorization', empTok).send({ task_name: 'My own task renamed', user_id: 930 });
+    ok(rOwn.status === 200, 'employee CAN rename a task they created themselves -> 200', rOwn.status + ' ' + JSON.stringify(rOwn.body));
 
   } catch (err) {
     ok(false, 'suite threw', String(err && err.stack ? err.stack.split('\n').slice(0, 6).join(' | ') : err));

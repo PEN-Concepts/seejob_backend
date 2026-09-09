@@ -28,6 +28,7 @@ const { getTimeStamp } = require('../common/timdate');
 const { getAccessMode, isSameAccount } = require('../utils/access');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 const { isFullAccess, getSectionAccess } = require('../services/notepadAccess');
+const { requireNotepadMyTasks } = require('../services/featureFlags');
 const notify = require('../services/notify');
 
 const delegateSchema = Joi.object({
@@ -51,7 +52,7 @@ function toMySQLDateTime(date) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
-router.post('/items/:id/delegate', auth.authenticateToken, async (req, res) => {
+router.post('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const itemId = Number(req.params.id);
   if (!itemId) return res.status(400).json({ success: false, message: 'Invalid item id' });
@@ -199,7 +200,7 @@ router.post('/items/:id/delegate', auth.authenticateToken, async (req, res) => {
 });
 
 /** Undo a delegation link (the task itself is left alone). */
-router.delete('/items/:id/delegate', auth.authenticateToken, async (req, res) => {
+router.delete('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const itemId = Number(req.params.id);
   let connection;

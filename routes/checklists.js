@@ -10,7 +10,7 @@ const logger = require('../common/logger');
 const { getAccessMode, isSameAccount } = require('../utils/access');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
-const { getSectionAccess, ensureAutoNotepads } = require('../services/notepadAccess');
+const { getSectionAccess } = require('../services/notepadAccess');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 
 // Minimal HTML escaper for the shared-snapshot email body.
@@ -1185,6 +1185,36 @@ router.put('/update/:id', auth.authenticateToken, async (req, res) => {
       const [result] = await connection.query(sql, values);
       if (result.affectedRows === 0) {
         return res.status(404).json({ success: false, message: 'Checklist item not found' });
+      }
+
+      // Starring a DELEGATED notepad row must move that task to the top of the
+      // assignee's My Tasks list (owner's rule). The two stars are stored in
+      // different places — the notepad row uses check_list.priority, My Tasks
+      // uses tasks.starred_at for its ORDER — so the link has to be made
+      // explicitly. It previously only happened at delegate time, via the
+      // Delegate sheet's priority checkbox; starring the row afterwards changed
+      // nothing on the assignee's side. Propagate here so both platforms and
+      // both entry points behave the same.
+      if (payload.priority !== undefined) {
+        try {
+          await ensureNotepadSchema(connection);
+          const [[link]] = await connection.query(
+            'SELECT delegated_task_id FROM check_list WHERE id = ? LIMIT 1',
+            [id],
+          );
+          if (link && link.delegated_task_id) {
+            const starred = String(payload.priority).toLowerCase() === 'high';
+            // A FRESH timestamp on every star is what puts it at the top of its
+            // group; NULL on un-star drops it back into date order.
+            await connection.query(
+              'UPDATE tasks SET starred_at = ?, priority = ? WHERE id = ?',
+              [starred ? new Date() : null, starred ? 'high' : 'low', link.delegated_task_id],
+            );
+          }
+        } catch (e) {
+          // Never fail the notepad edit over the mirror; log and move on.
+          logger.error('star propagation to delegated task failed: ' + e.message);
+        }
       }
 
       // (Auto-clear/"Keep" removed) — completed items now just sink to the bottom

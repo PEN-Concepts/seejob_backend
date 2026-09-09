@@ -21,14 +21,15 @@ const auth = require('../services/authentication');
 const logger = require('../common/logger');
 const { getAccessMode } = require('../utils/access');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
+const { requireNotepadMyTasks, publicFlags, mergeArmed, clientInviteArmed } = require('../services/featureFlags');
 const notify = require('../services/notify');
+const { logDestructiveJob } = require('../services/destructiveLog');
 const mailer = require('../services/mailer');
 const {
   accountOwnerOf,
   isAccountOwner,
   isFullAccess,
   listAllowlist,
-  ensureAutoNotepads,
   getSectionAccess,
   isShareable,
 } = require('../services/notepadAccess');
@@ -40,8 +41,8 @@ const CATEGORY_EMPLOYEE = 1;
 const CATEGORY_CONTRACTOR = 2;
 const CATEGORY_CLIENT = 3;
 
-/** §8/§14: the merge is built but disarmed. Only an explicit env flag runs it. */
-const MERGE_ARMED = String(process.env.NOTEPAD_MERGE_ARMED || '') === '1';
+// §8: the merge is built but disarmed. Read live (not cached at require time)
+// so flipping the env only needs a restart, and the tests can toggle it.
 
 async function withConn(fn) {
   const connection = await pool.getConnection();
@@ -77,12 +78,17 @@ function firstNameOf(full) {
 //   - per-USER card order (§4)
 //   - per-row author (§7) and delegation state (§3)
 // ───────────────────────────────────────────────────────────────────────────
-router.get('/hub', auth.authenticateToken, async (req, res) => {
+router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   try {
     await withConn(async (connection) => {
       await ensureNotepadSchema(connection);
-      await ensureAutoNotepads(connection, uid);
+      // NOTE: no back-fill here. Creating a job or lead creates its notepad
+      // (the forward path, in routes/jobs.js and routes/leads.js). Back-filling
+      // PRE-EXISTING jobs used to happen right here, on every page load, which
+      // meant a page view silently bulk-inserted one row per job and per lead on
+      // the account. That is now a one-off the owner approves:
+      //   node scripts/backfillNotepads.js --report
 
       const owner = await accountOwnerOf(connection, uid);
       const full = await isFullAccess(connection, uid);
@@ -223,7 +229,7 @@ router.get('/hub', auth.authenticateToken, async (req, res) => {
 // §6  The allowlist.
 // ───────────────────────────────────────────────────────────────────────────
 
-router.get('/access', auth.authenticateToken, async (req, res) => {
+router.get('/access', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   try {
     await withConn(async (connection) => {
@@ -246,7 +252,7 @@ router.get('/access', auth.authenticateToken, async (req, res) => {
  * Who the owner can add. Employees and Family only — a client or a
  * subcontractor is never given company-wide notepad access.
  */
-router.get('/access/candidates', auth.authenticateToken, async (req, res) => {
+router.get('/access/candidates', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   try {
     await withConn(async (connection) => {
@@ -286,7 +292,7 @@ router.get('/access/candidates', auth.authenticateToken, async (req, res) => {
  * §8 step 1 — the count the owner sees BEFORE anything moves.
  * Read-only. Moves nothing, enqueues nothing.
  */
-router.post('/access/preview', auth.authenticateToken, async (req, res) => {
+router.post('/access/preview', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const target = Number(req.body && req.body.user_id);
   if (!target) return res.status(400).json({ success: false, message: 'user_id is required' });
@@ -311,7 +317,7 @@ router.post('/access/preview', auth.authenticateToken, async (req, res) => {
  * §6 grant + §8 step 1 commit. Grants full access and ENQUEUES the merge.
  * The merge itself does NOT run here — it runs on the employee's Continue.
  */
-router.post('/access/grant', auth.authenticateToken, async (req, res) => {
+router.post('/access/grant', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const target = Number(req.body && req.body.user_id);
   if (!target) return res.status(400).json({ success: false, message: 'user_id is required' });
@@ -386,7 +392,7 @@ router.post('/access/grant', auth.authenticateToken, async (req, res) => {
  * created_by is untouched, so authorship survives). Their private job pads are
  * re-created empty on their next read — there is no un-merge.
  */
-router.delete('/access/:userId', auth.authenticateToken, async (req, res) => {
+router.delete('/access/:userId', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const target = Number(req.params.userId);
   if (!target) return res.status(400).json({ success: false, message: 'Invalid user id' });
@@ -442,7 +448,7 @@ async function previewMerge(connection, ownerId, employeeId) {
   return { count: notepads.reduce((a, b) => a + b.items, 0), notepads };
 }
 
-router.get('/access/merge/pending', auth.authenticateToken, async (req, res) => {
+router.get('/access/merge/pending', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   try {
     await withConn(async (connection) => {
@@ -479,7 +485,7 @@ router.get('/access/merge/pending', auth.authenticateToken, async (req, res) => 
  * notepad_merge_log row with dry_run=1, and returns the counts — moving
  * nothing and leaving the queue entry pending.
  */
-router.post('/access/merge/confirm', auth.authenticateToken, async (req, res) => {
+router.post('/access/merge/confirm', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   try {
     await withConn(async (connection) => {
@@ -516,11 +522,23 @@ router.post('/access/merge/confirm', auth.authenticateToken, async (req, res) =>
           `INSERT INTO notepad_merge_log
              (owner_user_id, employee_user_id, from_section_id, to_section_id, rows_moved, item_ids, dry_run)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [ownerId, uid, p.from_section_id, p.to_section_id, p.item_ids.length, p.item_ids.join(','), MERGE_ARMED ? 0 : 1],
+          [ownerId, uid, p.from_section_id, p.to_section_id, p.item_ids.length, p.item_ids.join(','), mergeArmed() ? 0 : 1],
         );
       }
 
-      if (!MERGE_ARMED) {
+      await logDestructiveJob(connection, {
+        kind: 'notepad_merge',
+        accountOwnerId: ownerId,
+        actorId: uid,
+        summary: mergeArmed()
+          ? `Merged ${total} item(s) from private job notepads into the company notepads across ${plan.length} notepad(s).`
+          : `WOULD merge ${total} item(s) from private job notepads into the company notepads across ${plan.length} notepad(s). Merge is switched off.`,
+        detail: JSON.stringify(plan.map((p) => ({ notepad: p.title, rows: p.item_ids.length, item_ids: p.item_ids }))),
+        rowsAffected: total,
+        dryRun: mergeArmed() ? 0 : 1,
+      });
+
+      if (!mergeArmed()) {
         logger.info(
           `[notepad-merge DRY RUN] employee=${uid} owner=${ownerId} would move ${total} row(s) across ${plan.length} notepad(s). Set NOTEPAD_MERGE_ARMED=1 to arm.`,
         );
@@ -589,7 +607,7 @@ const orderSchema = Joi.object({
   order: Joi.array().items(Joi.number().integer().positive()).min(1).required(),
 });
 
-router.put('/sections/order', auth.authenticateToken, async (req, res) => {
+router.put('/sections/order', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const { error, value } = orderSchema.validate(req.body || {});
   if (error) return res.status(400).json({ success: false, message: error.details[0].message });
@@ -621,7 +639,7 @@ router.put('/sections/order', auth.authenticateToken, async (req, res) => {
 // §9  Per-notepad live share — hand-made pads only.
 // ───────────────────────────────────────────────────────────────────────────
 
-router.get('/sections/:id/share-candidates', auth.authenticateToken, async (req, res) => {
+router.get('/sections/:id/share-candidates', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const sectionId = Number(req.params.id);
   try {
@@ -688,7 +706,7 @@ const liveShareSchema = Joi.object({
   confirm_email: Joi.boolean().optional(),
 }).or('user_id', 'email');
 
-router.post('/sections/:id/live-share', auth.authenticateToken, async (req, res) => {
+router.post('/sections/:id/live-share', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const sectionId = Number(req.params.id);
   const { error, value } = liveShareSchema.validate(req.body || {});
@@ -752,17 +770,44 @@ router.post('/sections/:id/live-share', auth.authenticateToken, async (req, res)
         [sectionId, targetId || 0, invitedEmail, isClient, uid],
       );
 
+      let emailSent = false;
       if (invitedEmail) {
-        try {
-          const title = access.section.title || 'a notepad';
-          await mailer.sendMail({
-            to: invitedEmail,
-            subject: `You've been given access to "${title}" on See Job Run`,
-            text: `You have been given access to the list "${title}" on See Job Run. Sign in with this email address to see it.`,
-            html: `<p>You have been given access to the list <strong>${String(title).replace(/</g, '&lt;')}</strong> on See Job Run.</p><p>Sign in with this email address to see it. It stays live — anything the sender changes, you see.</p>`,
+        const title = access.section.title || 'a notepad';
+        // DISARMED BY DEFAULT, like the merge. The share is RECORDED either way,
+        // so the client gets access the moment they sign in — but nothing leaves
+        // the building until the owner has armed it and watched it fire once.
+        // "Nothing reaches a client without Poul's review" (§15) is the rule;
+        // this makes it true of the transport, not just the confirmation dialog.
+        if (!clientInviteArmed()) {
+          logger.info(
+            `[notepad-client-invite DRY RUN] section=${sectionId} to=${invitedEmail} — share recorded, NO email sent. Set NOTEPAD_CLIENT_INVITE_ARMED=1 to arm.`,
+          );
+          await logDestructiveJob(connection, {
+            kind: 'client_invite',
+            actorId: uid,
+            summary: `Would email an invitation to ${invitedEmail} for notepad "${title}"`,
+            detail: JSON.stringify({ section_id: sectionId, to: invitedEmail }),
+            dryRun: 1,
           });
-        } catch (e) {
-          logger.error('notepad client invite email failed: ' + e.message);
+        } else {
+          try {
+            await mailer.sendMail({
+              to: invitedEmail,
+              subject: `You've been given access to "${title}" on See Job Run`,
+              text: `You have been given access to the list "${title}" on See Job Run. Sign in with this email address to see it.`,
+              html: `<p>You have been given access to the list <strong>${String(title).replace(/</g, '&lt;')}</strong> on See Job Run.</p><p>Sign in with this email address to see it. It stays live — anything the sender changes, you see.</p>`,
+            });
+            emailSent = true;
+            await logDestructiveJob(connection, {
+              kind: 'client_invite',
+              actorId: uid,
+              summary: `Emailed an invitation to ${invitedEmail} for notepad "${title}"`,
+              detail: JSON.stringify({ section_id: sectionId, to: invitedEmail }),
+              dryRun: 0,
+            });
+          } catch (e) {
+            logger.error('notepad client invite email failed: ' + e.message);
+          }
         }
       } else if (targetId) {
         try {
@@ -777,7 +822,14 @@ router.post('/sections/:id/live-share', auth.authenticateToken, async (req, res)
         }
       }
 
-      res.json({ success: true, shared: true, emailed: !!invitedEmail });
+      res.json({
+        success: true,
+        shared: true,
+        // Distinguish "an email went out" from "we recorded it but the sender is
+        // switched off", so the UI can say which actually happened.
+        emailed: emailSent,
+        email_pending: !!invitedEmail && !emailSent,
+      });
     });
   } catch (err) {
     logger.error('notepad live share error: ' + err.message);
@@ -785,7 +837,7 @@ router.post('/sections/:id/live-share', auth.authenticateToken, async (req, res)
   }
 });
 
-router.delete('/sections/:id/live-share/:userId', auth.authenticateToken, async (req, res) => {
+router.delete('/sections/:id/live-share/:userId', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const sectionId = Number(req.params.id);
   const target = Number(req.params.userId);
@@ -803,6 +855,68 @@ router.delete('/sections/:id/live-share/:userId', auth.authenticateToken, async 
     });
   } catch (err) {
     logger.error('notepad live share revoke error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Feature flags. Deliberately NOT gated: the client has to be able to ask
+// whether the rebuild is switched on, and a 404 here would be indistinguishable
+// from an old backend that predates the flag. Both answers mean the same thing
+// to the client (fall back), but this one is explicit.
+// ───────────────────────────────────────────────────────────────────────────
+router.get('/feature-flags', auth.authenticateToken, (req, res) => {
+  res.json({ success: true, flags: publicFlags() });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Migration-policy rule 9 — the owner-readable activity log.
+//
+// Every gated job (merge, purge, client invite, back-fill) writes a row to
+// destructive_job_log, armed or dry-run. This serves it back to the ACCOUNT
+// OWNER so he can read what happened, or what would have happened, without a
+// shell or a database client. Owner-only: it is a record of things done to his
+// data, and nobody else's business.
+// ───────────────────────────────────────────────────────────────────────────
+router.get('/admin/activity', auth.authenticateToken, async (req, res) => {
+  const uid = Number(res.locals.id);
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      if (!(await isAccountOwner(connection, uid))) {
+        return res.status(403).json({
+          success: false,
+          code: 'ACTIVITY_OWNER_ONLY',
+          message: 'Only the account owner can read the activity log.',
+        });
+      }
+      const [rows] = await connection.query(
+        `SELECT l.id, l.kind, l.summary, l.detail, l.rows_affected, l.dry_run, l.created_at,
+                u.name AS actor_name
+           FROM destructive_job_log l
+           LEFT JOIN \`user\` u ON u.id = l.actor_user_id
+          WHERE l.account_owner_id = ? OR l.account_owner_id IS NULL
+          ORDER BY l.id DESC
+          LIMIT 200`,
+        [uid],
+      );
+      res.json({
+        success: true,
+        data: rows.map((r) => ({
+          id: Number(r.id),
+          kind: r.kind,
+          summary: r.summary,
+          detail: r.detail,
+          rows_affected: Number(r.rows_affected || 0),
+          // The UI leans on this: a dry run must never read like it happened.
+          happened: Number(r.dry_run) === 0,
+          actor_name: r.actor_name || null,
+          created_at: r.created_at,
+        })),
+      });
+    });
+  } catch (err) {
+    logger.error('activity log read error: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

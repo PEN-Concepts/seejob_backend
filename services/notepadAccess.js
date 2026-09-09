@@ -151,25 +151,86 @@ async function ensureAutoNotepads(connection, userId) {
  * Called from routes/jobs.js and routes/leads.js. Never throws into the caller:
  * a notepad is not worth failing a job create over.
  */
+/**
+ * §5 "Link the notepad to the owner/client in the background."
+ *
+ * Resolve the client behind a job or lead. Stored on the section rather than
+ * derived on read: a job's client can be reassigned, and a lead pad has no job
+ * to derive from at all, so "derivable" is not the same as "linked". Nothing
+ * surfaces it in the UI yet — that is the spec's instruction, and the column is
+ * there so the client-portal work has something to join on later.
+ */
+async function resolveClientFor(connection, kind, recordId) {
+  try {
+    if (kind === 'job') {
+      const [[j]] = await connection.query('SELECT client_id FROM `job` WHERE id = ? LIMIT 1', [Number(recordId)]);
+      return j && j.client_id ? Number(j.client_id) : null;
+    }
+    // Leads carry the prospective client on the lead row; column names have
+    // varied, so probe rather than assume, and fail to null.
+    const [cols] = await connection.query("SHOW COLUMNS FROM leads LIKE 'client_id'");
+    if (!cols.length) return null;
+    const [[l]] = await connection.query('SELECT client_id FROM leads WHERE id = ? LIMIT 1', [Number(recordId)]);
+    return l && l.client_id ? Number(l.client_id) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function createAutoNotepadFor(connection, kind, recordId, creatorUserId, title) {
   try {
     await ensureNotepadSchema(connection);
     const owner = await accountOwnerOf(connection, creatorUserId);
     const jobId = kind === 'job' ? Number(recordId) : null;
     const leadId = kind === 'lead' ? Number(recordId) : null;
+    const clientId = await resolveClientFor(connection, kind, recordId);
     const [existing] = await connection.query(
       `SELECT id FROM checklist_sections
         WHERE owner_user_id = ? AND origin = 'auto' AND scope = 'company'
           AND ${jobId ? 'job_id = ?' : 'lead_id = ?'} LIMIT 1`,
       [owner, jobId || leadId],
     );
-    if (existing.length) return Number(existing[0].id);
+    if (existing.length) {
+      // Keep the background link current if the client was set after creation.
+      if (clientId) {
+        await connection.query(
+          'UPDATE checklist_sections SET client_user_id = ? WHERE id = ? AND (client_user_id IS NULL OR client_user_id <> ?)',
+          [clientId, existing[0].id, clientId],
+        );
+      }
+      return Number(existing[0].id);
+    }
     const [r] = await connection.query(
       `INSERT INTO checklist_sections
-         (owner_user_id, shared_with_user_id, type, title, sort_order, job_id, lead_id, origin, scope, account_owner_id)
-       VALUES (?, NULL, 'task', ?, 0, ?, ?, 'auto', 'company', ?)`,
-      [owner, String(title || '').trim() || 'Notepad', jobId, leadId, owner],
+         (owner_user_id, shared_with_user_id, type, title, sort_order, job_id, lead_id, origin, scope, account_owner_id, client_user_id, owner_contact_id)
+       VALUES (?, NULL, 'task', ?, 0, ?, ?, 'auto', 'company', ?, ?, ?)`,
+      [owner, String(title || '').trim() || 'Notepad', jobId, leadId, owner, clientId, owner],
     );
+
+    // §7: an OFF-LIST member gets their own private pad for this job/lead. This
+    // is bounded (the members of one account, once, at an explicit user action)
+    // — unlike the old page-load back-fill it replaces, which ran on every read.
+    try {
+      const members = await accountMemberIds(connection, owner);
+      for (const m of members) {
+        if (m === owner) continue;
+        if (await isFullAccess(connection, m)) continue; // shares the company pad
+        await connection.query(
+          `INSERT INTO checklist_sections
+             (owner_user_id, shared_with_user_id, type, title, sort_order, job_id, lead_id, origin, scope, account_owner_id, client_user_id)
+           SELECT ?, NULL, 'task', ?, 0, ?, ?, 'auto', 'private', ?, ?
+            WHERE NOT EXISTS (
+              SELECT 1 FROM checklist_sections s
+               WHERE s.owner_user_id = ? AND s.origin='auto' AND s.scope='private'
+                 AND ${jobId ? 's.job_id = ?' : 's.lead_id = ?'})`,
+          [m, String(title || '').trim() || 'Notepad', jobId, leadId, owner, clientId, m, jobId || leadId],
+        );
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('createAutoNotepadFor private pads:', e && e.message);
+    }
+
     return Number(r.insertId);
   } catch (e) {
     // eslint-disable-next-line no-console

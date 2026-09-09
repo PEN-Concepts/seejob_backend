@@ -27,6 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const pool = require('../config/connection');
+const { logDestructiveJob } = require('../services/destructiveLog');
 
 const args = process.argv.slice(2);
 const EXECUTE = args.includes('--execute');
@@ -111,6 +112,15 @@ function ymd(d) {
 
       const dest = path.join(__dirname, '..', 'TASKS-PENDING-DELETION.md');
       fs.writeFileSync(dest, out.join('\n'), 'utf8');
+      // Rule 9: also land it where the owner can read it, without a shell.
+      await logDestructiveJob(connection, {
+        kind: 'task_purge',
+        accountOwnerId: ACCOUNT || null,
+        summary: `WOULD delete ${count} task(s) from the retired Task Manager job list. Nothing was deleted.`,
+        detail: JSON.stringify(rows.map((r) => ({ id: r.id, job: r.job_name, title: r.title }))),
+        rowsAffected: count,
+        dryRun: 1,
+      });
       console.log(`REPORT ONLY — nothing deleted.`);
       console.log(`Affected tasks: ${count}`);
       console.log(`Written to: ${dest}`);
@@ -165,6 +175,14 @@ function ymd(d) {
 
       const tail = `\ndeleted rows: ${res.affectedRows}\n`;
       fs.appendFileSync(logPath, tail, 'utf8');
+      await logDestructiveJob(connection, {
+        kind: 'task_purge',
+        accountOwnerId: ACCOUNT || null,
+        summary: `Deleted ${res.affectedRows} task(s) from the retired Task Manager job list.`,
+        detail: JSON.stringify({ ids, log: logPath }),
+        rowsAffected: res.affectedRows,
+        dryRun: 0,
+      });
       console.log(`DELETED ${res.affectedRows} task(s).`);
       console.log(`ids: ${ids.join(',')}`);
       console.log(`log: ${logPath}`);

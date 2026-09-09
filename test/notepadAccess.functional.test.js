@@ -28,6 +28,9 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
   let db, pool, conn;
   try {
     process.env.ACCESS_TOKEN = 'test_secret';
+    // The rebuild ships behind a flag (migration policy rule 6). Turn it ON for
+    // the suite; a separate case below proves the OFF state 404s.
+    process.env.NOTEPAD_MYTASKS_ENABLED = '1';
     // Explicitly DISARMED — the merge must dry-run. This is the gate the CCP
     // requires, asserted rather than assumed.
     delete process.env.NOTEPAD_MERGE_ARMED;
@@ -108,14 +111,57 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const tok = (id) => 'Bearer ' + jwt.sign({ id }, process.env.ACCESS_TOKEN);
     const OWNER = tok(800), JOSH = tok(801), BILL = tok(802), OUTSIDER = tok(810);
 
-    // ── 1. auto pads (§5) ────────────────────────────────────────────────────
+    // ── 0. the feature FLAG gates the server, not just the UI (rule 6) ───────
+    {
+      delete process.env.NOTEPAD_MYTASKS_ENABLED;
+      const offHub = await request(app).get('/api/checklists/hub').set('Authorization', OWNER);
+      ok(offHub.status === 404 && offHub.body.code === 'FEATURE_DISABLED',
+        'flag OFF: GET /hub 404 FEATURE_DISABLED (server-side, not a hidden button)', offHub.status + ' ' + JSON.stringify(offHub.body));
+      const offTasks = await request(app).get('/api/tasks/my-tasks').set('Authorization', OWNER);
+      ok(offTasks.status === 404 && offTasks.body.code === 'FEATURE_DISABLED', 'flag OFF: GET /tasks/my-tasks 404', String(offTasks.status));
+      const offFlags = await request(app).get('/api/checklists/feature-flags').set('Authorization', OWNER);
+      ok(offFlags.status === 200 && offFlags.body.flags.notepad_mytasks === false,
+        'the flag endpoint itself stays reachable and reports OFF', JSON.stringify(offFlags.body));
+      process.env.NOTEPAD_MYTASKS_ENABLED = '1';
+    }
+
+    // ── 1. the back-fill is NOT a page-load side effect (audit item 3) ───────
+    const firstHub = await request(app).get('/api/checklists/hub').set('Authorization', OWNER);
+    ok(firstHub.status === 200, 'owner: GET /hub 200', String(firstHub.status));
+    ok((firstHub.body?.data || []).every((p) => p.origin !== 'auto'),
+      'opening Notepads does NOT bulk-create notepads for pre-existing jobs',
+      JSON.stringify((firstHub.body?.data || []).map((p) => p.title)));
+
+    // …it is a one-off that counts first and waits for approval.
+    const { execFileSync } = require('child_process');
+    const path = require('path');
+    const runBackfill = (extraArgs, env) =>
+      execFileSync(process.execPath, ['scripts/backfillNotepads.js', ...extraArgs], {
+        cwd: path.join(__dirname, '..'), env: { ...process.env, ...(env || {}) }, encoding: 'utf8',
+      });
+
+    const report = runBackfill(['--report']);
+    ok(/GRAND TOTAL notepads that would be created: [1-9]/.test(report),
+      'back-fill REPORT shows a count and writes nothing', report.split('\n').slice(-4).join(' | '));
+    const [stillNone] = await conn.query("SELECT id FROM checklist_sections WHERE origin='auto'");
+    ok(stillNone.length === 0, 'report mode created nothing');
+
+    let refused = '';
+    try { runBackfill(['--apply'], { NOTEPAD_BACKFILL_ARMED: '' }); }
+    catch (e) { refused = String(e.stderr || e.stdout || ''); }
+    ok(/REFUSING TO RUN/.test(refused), '--apply without the env flag REFUSES', refused.slice(0, 120));
+
+    runBackfill(['--apply'], { NOTEPAD_BACKFILL_ARMED: '1' });
+
     const ownerHub = await request(app).get('/api/checklists/hub').set('Authorization', OWNER);
-    ok(ownerHub.status === 200, 'owner: GET /hub 200', String(ownerHub.status));
     const ownerPads = ownerHub.body?.data || [];
     const jobPad = ownerPads.find((p) => Number(p.job_id) === 900);
     const leadPad = ownerPads.find((p) => Number(p.lead_id) === 950);
-    ok(!!jobPad, 'auto pad created for the existing JOB (back-fill)', JSON.stringify(ownerPads.map((p) => p.title)));
-    ok(!!leadPad, 'auto pad created for the existing LEAD (back-fill)');
+    ok(!!jobPad, 'approved back-fill created the JOB notepad', JSON.stringify(ownerPads.map((p) => p.title)));
+    ok(!!leadPad, 'approved back-fill created the LEAD notepad');
+    const [bfLog] = await conn.query("SELECT dry_run, rows_affected FROM destructive_job_log WHERE kind='notepad_backfill' ORDER BY id ASC");
+    ok(bfLog.length === 2 && Number(bfLog[0].dry_run) === 1 && Number(bfLog[1].dry_run) === 0,
+      'both the report and the apply are recorded where the owner can read them', JSON.stringify(bfLog));
     ok(jobPad && jobPad.address === '12 Maple St, Ojai, CA 93023', 'job pad address is read LIVE from the job record', jobPad && jobPad.address);
     ok(leadPad && leadPad.kind === 'lead', 'lead pad reports kind=lead (drives the blue border)');
     ok(jobPad && jobPad.shareable === false, 'auto job pad is NOT shareable (no share icon)');
@@ -219,6 +265,26 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok(checkedItem && checkedItem.delegate_state === 'done', 'assignee check-off flips the PILL to the done state', JSON.stringify(checkedItem && checkedItem.delegate_state));
     ok(checkedItem && checkedItem.delegated_first_name === 'Joshua', 'the pill shows the assignee\'s FIRST name');
     ok(checkedItem && checkedItem.status !== 'completed', 'assignee check-off does NOT tick the boss\'s box');
+
+    // Owner rule: starring a DELEGATED notepad row moves that task to the top
+    // of the assignee's My Tasks. The two stars live in different columns, so
+    // the notepad star has to propagate to tasks.starred_at explicitly.
+    {
+      const before = (await conn.query('SELECT starred_at FROM tasks WHERE id = ?', [delTaskId]))[0][0];
+      ok(before.starred_at == null, "delegated task starts unstarred");
+      const starIt = await request(app).put('/api/checklists/update/' + companyItemId).set('Authorization', OWNER).send({ priority: 'high' });
+      ok(starIt.status === 200, 'owner stars the notepad row');
+      const after = (await conn.query('SELECT starred_at, priority FROM tasks WHERE id = ?', [delTaskId]))[0][0];
+      ok(after.starred_at != null, "starring the NOTEPAD row sets starred_at on the DELEGATED task", JSON.stringify(after));
+      const top = (await request(app).get('/api/tasks/my-tasks').set('Authorization', JOSH)).body.data
+        .find((g) => Number(g.job_id) === 900);
+      ok(top && Number(top.tasks[0].id) === Number(delTaskId),
+        "…so it sits at the top of the assignee's group", top && JSON.stringify(top.tasks.map((t) => t.id)));
+      const unstar = await request(app).put('/api/checklists/update/' + companyItemId).set('Authorization', OWNER).send({ priority: 'low' });
+      ok(unstar.status === 200, "owner un-stars the notepad row");
+      const cleared = (await conn.query('SELECT starred_at FROM tasks WHERE id = ?', [delTaskId]))[0][0];
+      ok(cleared.starred_at == null, "un-starring clears starred_at on the delegated task");
+    }
 
     // ── 7. share rules (§9) ──────────────────────────────────────────────────
     const mkManual = await request(app).post('/api/checklists/sections').set('Authorization', OWNER).send({ type: 'task', title: 'Shopping' });

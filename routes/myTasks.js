@@ -30,6 +30,7 @@ const auth = require('../services/authentication');
 const logger = require('../common/logger');
 const { isSameAccount, getAccessMode } = require('../utils/access');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
+const { requireNotepadMyTasks } = require('../services/featureFlags');
 
 async function withConn(fn) {
   const connection = await pool.getConnection();
@@ -68,7 +69,7 @@ async function relationTo(connection, taskId, uid) {
 // ───────────────────────────────────────────────────────────────────────────
 // GET /my-tasks — the whole page in one read.
 // ───────────────────────────────────────────────────────────────────────────
-router.get('/my-tasks', auth.authenticateToken, async (req, res) => {
+router.get('/my-tasks', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   try {
     await withConn(async (connection) => {
@@ -94,18 +95,29 @@ router.get('/my-tasks', auth.authenticateToken, async (req, res) => {
          WHERE t.user_id = ?
             OR EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?)
          ORDER BY
-            (t.starred_at IS NULL) ASC,   -- starred block first
-            t.starred_at DESC,            -- newest star at the very top
+            -- Starring sorts a task to the top of ITS OWN GROUP, never to the
+            -- top of the page: the row order below is applied WITHIN each job
+            -- bucket, and the buckets themselves are ordered separately (see
+            -- the grouping step). A starred Lynes task rises above the other
+            -- Lynes tasks; it does not jump above another job's header.
+            (t.starred_at IS NULL) ASC,   -- starred block first, within the group
+            t.starred_at DESC,            -- newest star at the top of that block
             t.start_date ASC, t.id DESC`,
         [uid, uid],
       );
 
-      // Group: one "MY TASKS" bucket for tasks with no job, then one per job.
-      // (Nothing NEW can land in the no-job bucket — a job is mandatory. It
-      // exists so legacy job-less rows stay visible. See QUESTIONS #8/#17.)
+      // Groups: one per JOB. There is deliberately no personal bucket here —
+      // PERSONAL on the page is the existing daily-tasks feature, which has its
+      // own table and its own entry bar, and this endpoint never touches it.
+      // Keeping them separate is what lets §0c hold untouched: no job-less
+      // `tasks` row is ever created.
+      //
+      // The no-job bucket below therefore renders ONLY when legacy job-less rows
+      // already exist, is labelled so it cannot be confused with PERSONAL, and
+      // has no entry bar. It should empty out over time and then disappear.
       const groups = [];
       const byJob = new Map();
-      const noJob = { job_id: null, job_name: 'MY TASKS', address: '', color: null, tasks: [] };
+      const noJob = { job_id: null, job_name: 'NO JOB (older tasks)', address: '', color: null, legacy: true, tasks: [] };
 
       for (const r of rows) {
         const t = {
@@ -143,8 +155,16 @@ router.get('/my-tasks', auth.authenticateToken, async (req, res) => {
         byJob.get(key).tasks.push(t);
       }
 
+      // Legacy bucket first when it has anything in it, then the job groups in a
+      // STABLE alphabetical order — deliberately NOT influenced by starring. If
+      // group order tracked the star sort, starring one Lynes task would yank
+      // the whole Lynes header above the others. Stars move a task inside its
+      // own group only.
       if (noJob.tasks.length) groups.push(noJob);
-      for (const g of byJob.values()) groups.push(g);
+      const jobGroups = [...byJob.values()].sort((a, b) =>
+        String(a.job_name || '').localeCompare(String(b.job_name || ''), undefined, { sensitivity: 'base' }),
+      );
+      for (const g of jobGroups) groups.push(g);
 
       res.json({ success: true, data: groups });
     });
@@ -158,7 +178,7 @@ router.get('/my-tasks', auth.authenticateToken, async (req, res) => {
 // §10 the notes thread. Two-way: the sender writes when delegating, the
 // assignee replies. Author and date per note.
 // ───────────────────────────────────────────────────────────────────────────
-router.get('/:id/notes', auth.authenticateToken, async (req, res) => {
+router.get('/:id/notes', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const taskId = Number(req.params.id);
   if (!taskId) return res.status(400).json({ success: false, message: 'Invalid task id' });
@@ -186,7 +206,7 @@ router.get('/:id/notes', auth.authenticateToken, async (req, res) => {
 
 const noteSchema = Joi.object({ body: Joi.string().trim().min(1).max(4000).required() });
 
-router.post('/:id/notes', auth.authenticateToken, async (req, res) => {
+router.post('/:id/notes', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const taskId = Number(req.params.id);
   const { error, value } = noteSchema.validate(req.body || {});
@@ -220,7 +240,7 @@ router.post('/:id/notes', auth.authenticateToken, async (req, res) => {
 });
 
 /** Default rule: you may delete YOUR OWN note, never someone else's. */
-router.delete('/notes/:noteId', auth.authenticateToken, async (req, res) => {
+router.delete('/notes/:noteId', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const noteId = Number(req.params.noteId);
   try {
@@ -249,7 +269,7 @@ router.delete('/notes/:noteId', auth.authenticateToken, async (req, res) => {
 // assignee may star their own view's task. Starring writes only starred_at
 // (and the matching priority label); it never touches status or percent.
 // ───────────────────────────────────────────────────────────────────────────
-router.put('/:id/star', auth.authenticateToken, async (req, res) => {
+router.put('/:id/star', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
   const uid = Number(res.locals.id);
   const taskId = Number(req.params.id);
   const on = !(req.body && (req.body.starred === false || req.body.starred === 0 || req.body.starred === '0'));
