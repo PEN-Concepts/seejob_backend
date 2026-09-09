@@ -53,20 +53,39 @@ async function addIndex(connection, sql) {
 async function ensureNotepadSchema(connection) {
   if (ensured) return;
 
+  // Each step runs in isolation. A step that fails must not abort the others:
+  // on a partial or legacy schema (or a test harness that only creates the
+  // tables it needs) `SHOW COLUMNS FROM tasks` throws, and without this the
+  // allowlist tables would silently never get created either. We only cache the
+  // "done" flag when EVERY step succeeded, so a genuinely missing table is
+  // retried on the next request rather than skipped forever.
+  let allOk = true;
+  const run = async (label, fn) => {
+    try {
+      await fn();
+    } catch (e) {
+      allOk = false;
+      // eslint-disable-next-line no-console
+      console.error(`notepadSchema[${label}]:`, e && e.message);
+    }
+  };
+
   // ── §6 the global allowlist. TWO STATES ONLY: a row exists (full access) or
   // it does not (own notepads only). There is deliberately no "level" column —
   // adding one would create the middle tier the spec forbids.
-  await connection.query(`
-    CREATE TABLE IF NOT EXISTS notepad_access (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      owner_user_id INT NOT NULL,
-      user_id INT NOT NULL,
-      granted_by INT NULL,
-      granted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_np_access (owner_user_id, user_id),
-      KEY idx_np_access_user (user_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  `);
+  await run('notepad_access', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS notepad_access (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        owner_user_id INT NOT NULL,
+        user_id INT NOT NULL,
+        granted_by INT NULL,
+        granted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_np_access (owner_user_id, user_id),
+        KEY idx_np_access_user (user_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
 
   // ── §5/§7 what kind of pad this is.
   //   origin 'auto'   = created by the system for a job/lead. Never shareable (§9).
@@ -75,101 +94,117 @@ async function ensureNotepadSchema(connection) {
   //   scope  'private'= one person's own pad.
   // account_owner_id is the resolved account (see QUESTIONS #1) so a company pad
   // can be found without walking back through the creator every time.
-  await addColumn(connection, 'checklist_sections', 'lead_id', 'INT NULL DEFAULT NULL');
-  await addColumn(connection, 'checklist_sections', 'origin', "VARCHAR(8) NOT NULL DEFAULT 'manual'");
-  await addColumn(connection, 'checklist_sections', 'scope', "VARCHAR(8) NOT NULL DEFAULT 'private'");
-  await addColumn(connection, 'checklist_sections', 'account_owner_id', 'INT NULL DEFAULT NULL');
-  await addIndex(
-    connection,
-    'ALTER TABLE checklist_sections ADD INDEX idx_cs_auto (account_owner_id, origin, scope, job_id, lead_id)',
-  );
+  await run('checklist_sections columns', async () => {
+    await addColumn(connection, 'checklist_sections', 'lead_id', 'INT NULL DEFAULT NULL');
+    await addColumn(connection, 'checklist_sections', 'origin', "VARCHAR(8) NOT NULL DEFAULT 'manual'");
+    await addColumn(connection, 'checklist_sections', 'scope', "VARCHAR(8) NOT NULL DEFAULT 'private'");
+    await addColumn(connection, 'checklist_sections', 'account_owner_id', 'INT NULL DEFAULT NULL');
+    await addIndex(
+      connection,
+      'ALTER TABLE checklist_sections ADD INDEX idx_cs_auto (account_owner_id, origin, scope, job_id, lead_id)',
+    );
+  });
 
   // ── §9 per-notepad live share. A row grants LIVE access (not a snapshot) to
   // one person. invited_email carries a not-yet-joined client so the invite can
   // be resent; user_id is 0 until they join.
-  await connection.query(`
-    CREATE TABLE IF NOT EXISTS checklist_section_shares (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      section_id INT NOT NULL,
-      user_id INT NOT NULL DEFAULT 0,
-      invited_email VARCHAR(255) NULL,
-      is_client TINYINT NOT NULL DEFAULT 0,
-      created_by INT NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY uniq_sec_share (section_id, user_id, invited_email),
-      KEY idx_sec_share_user (user_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  `);
+  await run('checklist_section_shares', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS checklist_section_shares (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        section_id INT NOT NULL,
+        user_id INT NOT NULL DEFAULT 0,
+        invited_email VARCHAR(255) NULL,
+        is_client TINYINT NOT NULL DEFAULT 0,
+        created_by INT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_sec_share (section_id, user_id, invited_email),
+        KEY idx_sec_share_user (user_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
 
   // ── §4 per-user card order. Saved ON DROP, so it survives navigation, an app
   // restart, and a different device under the same login.
-  await connection.query(`
-    CREATE TABLE IF NOT EXISTS checklist_section_order (
-      user_id INT NOT NULL,
-      section_id INT NOT NULL,
-      sort_order INT NOT NULL DEFAULT 0,
-      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      PRIMARY KEY (user_id, section_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  `);
+  await run('checklist_section_order', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS checklist_section_order (
+        user_id INT NOT NULL,
+        section_id INT NOT NULL,
+        sort_order INT NOT NULL DEFAULT 0,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        PRIMARY KEY (user_id, section_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
 
   // ── §8 step 2. The owner's grant only ENQUEUES; the employee's Continue runs
   // it. status: pending -> done | cancelled.
-  await connection.query(`
-    CREATE TABLE IF NOT EXISTS notepad_merge_queue (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      owner_user_id INT NOT NULL,
-      employee_user_id INT NOT NULL,
-      item_count INT NOT NULL DEFAULT 0,
-      status VARCHAR(12) NOT NULL DEFAULT 'pending',
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      confirmed_at DATETIME NULL,
-      KEY idx_merge_pending (employee_user_id, status)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  `);
+  await run('notepad_merge_queue', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS notepad_merge_queue (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        owner_user_id INT NOT NULL,
+        employee_user_id INT NOT NULL,
+        item_count INT NOT NULL DEFAULT 0,
+        status VARCHAR(12) NOT NULL DEFAULT 'pending',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        confirmed_at DATETIME NULL,
+        KEY idx_merge_pending (employee_user_id, status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
 
   // ── §8 "Log every merge: who, how many rows, which notepads." dry_run=1 rows
   // are the gated build's output — they record what WOULD have moved.
-  await connection.query(`
-    CREATE TABLE IF NOT EXISTS notepad_merge_log (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      owner_user_id INT NOT NULL,
-      employee_user_id INT NOT NULL,
-      from_section_id INT NULL,
-      to_section_id INT NULL,
-      rows_moved INT NOT NULL DEFAULT 0,
-      item_ids TEXT NULL,
-      dry_run TINYINT NOT NULL DEFAULT 0,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      KEY idx_merge_log_owner (owner_user_id, created_at)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  `);
+  await run('notepad_merge_log', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS notepad_merge_log (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        owner_user_id INT NOT NULL,
+        employee_user_id INT NOT NULL,
+        from_section_id INT NULL,
+        to_section_id INT NULL,
+        rows_moved INT NOT NULL DEFAULT 0,
+        item_ids TEXT NULL,
+        dry_run TINYINT NOT NULL DEFAULT 0,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_merge_log_owner (owner_user_id, created_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
 
   // ── §3 the delegation link. delegated_task_id points at the tasks row the
   // notepad item became; delegated_to is the assignee whose FIRST NAME the green
   // pill shows. Both NULL = state (a) "not delegated".
-  await addColumn(connection, 'check_list', 'delegated_task_id', 'INT NULL DEFAULT NULL');
-  await addColumn(connection, 'check_list', 'delegated_to', 'INT NULL DEFAULT NULL');
-  await addIndex(connection, 'ALTER TABLE check_list ADD INDEX idx_cl_delegated (delegated_task_id)');
+  await run('check_list delegation columns', async () => {
+    await addColumn(connection, 'check_list', 'delegated_task_id', 'INT NULL DEFAULT NULL');
+    await addColumn(connection, 'check_list', 'delegated_to', 'INT NULL DEFAULT NULL');
+    await addIndex(connection, 'ALTER TABLE check_list ADD INDEX idx_cl_delegated (delegated_task_id)');
+  });
 
   // ── §10 the two-way note thread. Author + date per note, both directions.
-  await connection.query(`
-    CREATE TABLE IF NOT EXISTS task_notes (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      task_id INT NOT NULL,
-      user_id INT NOT NULL,
-      body TEXT NOT NULL,
-      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      KEY idx_task_notes_task (task_id, id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  `);
+  await run('task_notes', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS task_notes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        task_id INT NOT NULL,
+        user_id INT NOT NULL,
+        body TEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_task_notes_task (task_id, id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
 
   // ── §10 star ORDER. A boolean cannot express "newest star goes to the very
   // top"; a timestamp can.
-  await addColumn(connection, 'tasks', 'starred_at', 'DATETIME NULL DEFAULT NULL');
-  await addIndex(connection, 'ALTER TABLE tasks ADD INDEX idx_tasks_starred (starred_at)');
+  await run('tasks.starred_at', async () => {
+    await addColumn(connection, 'tasks', 'starred_at', 'DATETIME NULL DEFAULT NULL');
+    await addIndex(connection, 'ALTER TABLE tasks ADD INDEX idx_tasks_starred (starred_at)');
+  });
 
-  ensured = true;
+  if (allOk) ensured = true;
 }
 
 /** Test seam — lets a suite re-run the migration against a fresh database. */
