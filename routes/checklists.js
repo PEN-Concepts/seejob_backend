@@ -10,6 +10,8 @@ const logger = require('../common/logger');
 const { getAccessMode, isSameAccount } = require('../utils/access');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
+const { getSectionAccess, ensureAutoNotepads } = require('../services/notepadAccess');
+const { ensureNotepadSchema } = require('../services/notepadSchema');
 
 // Minimal HTML escaper for the shared-snapshot email body.
 function escapeHtml(s) {
@@ -152,21 +154,29 @@ const FILED_ELIGIBLE_SQL = `(
    return Number(row?.max_sort_order || 0) + 1;
  }
 
+ // A section the caller may READ and ADD to. Three ways in (CCP §6/§7/§9):
+ //   owner  — their own pad
+ //   full   — on the global allowlist, and it's a COMPANY pad on their account
+ //   share  — a live per-notepad share (they may check off and add, nothing more)
+ // Anything else returns null, which every caller turns into a 403/404.
  async function getAccessibleSection(connection, sectionId, userId) {
-  // Single-owner: a section is only accessible to its owner (share removed).
-  const [[row]] = await connection.query(
-    `SELECT id, owner_user_id, shared_with_user_id, type, title, sort_order, created_at, updated_at
-     FROM checklist_sections
-     WHERE id = ?
-       AND owner_user_id = ?`,
-    [sectionId, userId],
-  );
-  return row || null;
+  const access = await getSectionAccess(connection, sectionId, userId);
+  if (!access) return null;
+  return { ...access.section, _role: access.role };
+}
+
+ // Owner-or-full-access: the two roles that may RENAME, RE-JOB, REORDER or
+ // DELETE a whole pad. A share recipient never can.
+ async function getManageableSection(connection, sectionId, userId) {
+  const access = await getSectionAccess(connection, sectionId, userId);
+  if (!access || access.role === 'share') return null;
+  return { ...access.section, _role: access.role };
 }
 
 async function getOwnedSection(connection, sectionId, userId) {
+  await ensureNotepadSchema(connection);
   const [[row]] = await connection.query(
-    `SELECT id, owner_user_id, shared_with_user_id, type, title, sort_order, created_at, updated_at
+    `SELECT id, owner_user_id, shared_with_user_id, type, title, sort_order, origin, scope, created_at, updated_at
      FROM checklist_sections
      WHERE id = ? AND owner_user_id = ?
      LIMIT 1`,
@@ -220,6 +230,7 @@ async function getAccessibleChecklistItem(connection, id, userId, extraFields = 
       c.section_id,
       c.assign_to,
       c.name,
+      c.created_by,
       c.calendar_task_id,
       c.appointment_id,
       c.type,
@@ -229,16 +240,39 @@ async function getAccessibleChecklistItem(connection, id, userId, extraFields = 
     FROM check_list c
     LEFT JOIN checklist_sections s ON s.id = c.section_id
     WHERE c.id = ?
-      AND (
-        (c.section_id IS NOT NULL AND s.owner_user_id = ?)
-        OR
-        (c.section_id IS NULL AND c.created_by = ?)
-      )
     LIMIT 1`,
-    [id, userId, userId],
+    [id],
   );
-  return row || null;
+  if (!row) return null;
+
+  // A row with no section is a legacy personal item: creator only.
+  if (row.section_id == null) {
+    return Number(row.created_by) === Number(userId) ? { ...row, _role: 'owner' } : null;
+  }
+
+  // Otherwise the SECTION decides who may touch the row (company pads and
+  // live-shared pads both reach here).
+  const access = await getSectionAccess(connection, row.section_id, userId);
+  if (!access) return null;
+  return { ...row, _role: access.role };
 }
+
+/**
+ * The "editing your own typing" default rule, in one place:
+ *   you MAY edit or delete an item YOU created;
+ *   you may NEVER edit or delete one added by someone else.
+ * Applies on My Tasks (the typo case) and in a shared notepad alike.
+ */
+function mayModifyItem(row, userId) {
+  return Number(row.created_by) === Number(userId);
+}
+
+/**
+ * Fields a NON-author may still write. Checking a box is a signal about the
+ * work, not an edit of someone else's words — a share recipient and a
+ * full-access colleague can both do it. Everything else is author-only.
+ */
+const NON_AUTHOR_WRITABLE = new Set(['status', 'assignee_completed']);
 
 const createChecklistSchema = Joi.object({
   name: Joi.string().allow('', null).max(255).required(),
@@ -607,7 +641,7 @@ router.put('/sections/:id', auth.authenticateToken, async (req, res) => {
         return res.status(403).json({ success: false, message: 'Your plan does not allow modifying Clipboard.' });
       }
 
-      const section = await getOwnedSection(connection, id, signedin_user);
+      const section = await getManageableSection(connection, id, signedin_user);
       if (!section) {
         return res.status(404).json({ success: false, message: 'Checklist section not found' });
       }
@@ -677,7 +711,7 @@ router.delete('/sections/:id', auth.authenticateToken, async (req, res) => {
         return res.status(403).json({ success: false, message: 'Your plan does not allow modifying Clipboard.' });
       }
 
-      const section = await getOwnedSection(connection, id, signedin_user);
+      const section = await getManageableSection(connection, id, signedin_user);
       if (!section) {
         return res.status(404).json({ success: false, message: 'Checklist section not found' });
       }
@@ -734,6 +768,16 @@ router.post('/sections/:id/share', auth.authenticateToken, async (req, res) => {
       const section = await getOwnedSection(connection, id, signedin_user);
       if (!section) {
         return res.status(404).json({ success: false, message: 'Checklist section not found' });
+      }
+      // CCP §9: the share affordance exists ONLY on hand-made notepads, NEVER on
+      // an auto-created job or lead pad. That is enforced here as well as in the
+      // UI, so a crafted request can't email a client a job's private list.
+      if (String(section.origin || 'manual') !== 'manual') {
+        return res.status(403).json({
+          success: false,
+          code: 'NOTEPAD_AUTO_NOT_SHAREABLE',
+          message: 'Job and lead notepads cannot be shared.',
+        });
       }
 
       // Point-in-time item list. Live items only (a snapshot of the current pad).
@@ -1023,6 +1067,22 @@ router.put('/update/:id', auth.authenticateToken, async (req, res) => {
         return res.status(404).json({ success: false, message: 'Checklist item not found' });
       }
 
+      // Default rule (CCP): you may edit an item YOU created; never one added by
+      // someone else. Checking it off is the exception — that is a signal about
+      // the work, not an edit of another person's words. Enforced on the request
+      // so a shared-notepad recipient can't rewrite the owner's rows by hand.
+      if (!mayModifyItem(existingRow, signedin_user)) {
+        const touched = Object.keys(payload).filter((k) => !NON_AUTHOR_WRITABLE.has(k));
+        if (touched.length) {
+          return res.status(403).json({
+            success: false,
+            code: 'ITEM_AUTHOR_ONLY',
+            message: "You can only edit an item you added yourself.",
+            fields: touched,
+          });
+        }
+      }
+
       const fields = [];
       const values = [];
 
@@ -1301,6 +1361,16 @@ router.delete('/delete/:id', auth.authenticateToken, async (req, res) => {
       if (!row) {
         await connection.rollback();
         return res.status(404).json({ success: false, message: 'Checklist item not found' });
+      }
+
+      // Same default rule as the update path: delete your own typing only.
+      if (!mayModifyItem(row, signedin_user)) {
+        await connection.rollback();
+        return res.status(403).json({
+          success: false,
+          code: 'ITEM_AUTHOR_ONLY',
+          message: 'You can only delete an item you added yourself.',
+        });
       }
 
       const linkedTaskId = Number(row.calendar_task_id || 0) || null;

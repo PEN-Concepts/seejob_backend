@@ -27,6 +27,7 @@ const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
 const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, requireLevel } = require("../utils/access");
 const { requireOwnsJob, ownsJob } = require("../utils/ownership");
+const { createAutoNotepadFor } = require("../services/notepadAccess");
 // Cross-account guard: the job/lead the request targets must belong to the
 // caller's account. getJobId(req) locates the id (param/query/body); optional
 // getOwnerType(req) yields 'job'|'lead'. 404 if missing, 403 if another account's.
@@ -858,6 +859,15 @@ const [result] = await connection.execute(
       }
     } catch (contactErr) {
       logger.error("Auto client contact failed on job create:", contactErr);
+    }
+
+    // CCP §5: creating a JOB auto-creates its company notepad, named after the
+    // job. The address is NOT copied — every notepad read JOINs the job record,
+    // so fixing a typo on the job updates every notepad and Maps link.
+    try {
+      await createAutoNotepadFor(connection, "job", result.insertId, req.user.id, name);
+    } catch (npErr) {
+      logger.error("Auto notepad create failed on job create:", npErr);
     }
 
     res.status(201).json({

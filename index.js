@@ -9,6 +9,7 @@ const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
 const { ensureOwnerTypeColumns, ensureMaterialsExtraColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureJobColorLockedColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatFilesColumns, ensureInvoiceDocumentSchema, ensureChatBackfill, ensureChatMergeConvertedLeadChats, purgeShoppingLists } = require("./services/dbMigrations");
+const { ensureNotepadSchema } = require("./services/notepadSchema");
 const { getCurrentDateTime } = require("./common/timdate")
 const { repaletteOrphanedColors, reassignActiveDiverse } = require("./services/jobColorPalette");
 const userRoute = require("./routes/users");
@@ -34,6 +35,13 @@ const budget = require("./routes/budget");
 const invoices = require("./routes/invoices");
 const payments = require("./routes/payments");
 const checklists = require("./routes/checklists");
+// Notepad-as-boss-task-manager (CCP 2026-09-08). Mounted BEFORE checklists so
+// /hub, /access/* and /sections/order win over its /sections/:id wildcards.
+const notepadHub = require("./routes/notepadHub");
+const notepadDelegate = require("./routes/notepadDelegate");
+// My Tasks (the assignee's page). Mounted BEFORE tasks so /my-tasks and
+// /:id/notes win over its /:id wildcard.
+const myTasks = require("./routes/myTasks");
 const adminContact = require("./routes/admin_contactRequest");
 const cookieParser = require("cookie-parser");
 const calendar = require("./routes/calendar");
@@ -110,6 +118,7 @@ app.use(`${api}/teams`, teaam);
 app.use(`${api}/time_card`, time_card);
 app.use(`${api}/quote`, quote);
 app.use(`${api}/safety_course`, safety);
+app.use(`${api}/tasks`, myTasks);
 app.use(`${api}/tasks`, tasks);
 app.use(`${api}/leads`, leads);
 app.use(`${api}/chat`, chatRoute);
@@ -120,6 +129,8 @@ app.use(`${api}/clockin`, clockin);
 app.use(`${api}/budget`, budget);
 app.use(`${api}/invoices`, invoices);
 app.use(`${api}/payments`, payments);
+app.use(`${api}/checklists`, notepadHub);
+app.use(`${api}/checklists`, notepadDelegate);
 app.use(`${api}/checklists`, checklists);
 app.use(`${api}/admin_contactRequest`, adminContact);
 app.use(`${api}/calendar`, calendar);
@@ -202,6 +213,10 @@ const startServer = async (retries = 5, delay = 5000) => {
                 await ensurePaymentReceiptsTable(migrationConn);
                 await ensureTaskManagerColumns(migrationConn);
                 await ensureTaskAssigneesTable(migrationConn);
+                // Notepad-as-boss-task-manager schema (CCP 2026-09-08): allowlist,
+                // company/private auto pads, per-notepad share, per-user card order,
+                // merge queue + log, task notes, task star order.
+                await ensureNotepadSchema(migrationConn);
                 await ensureUserTokenVersionColumn(migrationConn);
                 await ensureDeviceTokenUnique(migrationConn);
                 await ensureChatTables(migrationConn);

@@ -1250,6 +1250,16 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       // re-assignment: a non-owner may NOT change the assignee at all (commercial).
       if (Object.prototype.hasOwnProperty.call(req.body, 'assignees') || Object.prototype.hasOwnProperty.call(req.body, 'user_id'))
         chgNum('user_id', newUser, oldTask.user_id);
+      // job move: also owner-only. Was missing from the whitelist, so a non-owning
+      // assignee could relocate a task onto a different job — the one hole left in
+      // "an assignee can only check off their own work" (CCP §10: assigned tasks
+      // get photo and notes, nothing else).
+      if (Object.prototype.hasOwnProperty.call(req.body, 'job_id')) {
+        const nvJob = (job_id === '' || job_id === 'null' || job_id === 'undefined' || Number(job_id) === 0 || isNaN(Number(job_id)))
+          ? null
+          : Number(job_id);
+        if (Number(nvJob || 0) !== Number(oldTask.job_id || 0)) violated.push('job_id');
+      }
       if (violated.length) {
         await connection.rollback();
         return res.status(403).json({
