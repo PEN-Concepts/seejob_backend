@@ -274,8 +274,17 @@ function mayModifyItem(row, userId) {
  */
 const NON_AUTHOR_WRITABLE = new Set(['status', 'assignee_completed']);
 
+/**
+ * 3i: a notepad task name is capped at 80 characters, server-side. The client
+ * shows a live countdown and stops at 80; this is the enforcement that
+ * matters, because a client cap is a courtesy and not a rule. Rows already in
+ * the table that are longer than 80 are left alone — the cap applies to what
+ * is written from here on, not retroactively.
+ */
+const NAME_MAX = 80;
+
 const createChecklistSchema = Joi.object({
-  name: Joi.string().allow('', null).max(255).required(),
+  name: Joi.string().allow('', null).max(NAME_MAX).required(),
   photo: Joi.string().allow('', null).max(255).optional(),
   // assign_to may hold either a user id or a team id (no separate column).
   assign_to: Joi.number().allow(null).optional(),
@@ -293,7 +302,7 @@ const createChecklistSchema = Joi.object({
 });
 
 const updateChecklistSchema = Joi.object({
-  name: Joi.string().allow('', null).max(255).optional(),
+  name: Joi.string().allow('', null).max(NAME_MAX).optional(),
   assign_to: Joi.number().allow(null).optional(),
   job_id: Joi.number().allow(null).optional(),
   lead_id: Joi.number().allow(null).optional(),
