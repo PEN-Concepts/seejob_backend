@@ -134,12 +134,15 @@ router.get('/my-tasks', auth.authenticateToken, requireNotepadMyTasks, async (re
       // Keeping them separate is what lets §0c hold untouched: no job-less
       // `tasks` row is ever created.
       //
-      // The no-job bucket below therefore renders ONLY when legacy job-less rows
-      // already exist, is labelled so it cannot be confused with PERSONAL, and
-      // has no entry bar. It should empty out over time and then disappear.
+      // 3c/3d: the bucket is now called NO JOB ASSIGNED, matching the notepad
+      // card of the same name. 'Personal' is retired: two names for the same
+      // idea was the confusion, and one of them implied a separate feature.
+      //
+      // It still renders ONLY when job-less rows exist, and has no entry bar
+      // (3f). It should empty out over time and then disappear.
       const groups = [];
       const byJob = new Map();
-      const noJob = { job_id: null, job_name: 'NO JOB (older tasks)', address: '', color: null, legacy: true, tasks: [] };
+      const noJob = { job_id: null, job_name: 'NO JOB ASSIGNED', address: '', color: null, legacy: true, tasks: [] };
 
       for (const r of rows) {
         const t = {

@@ -128,9 +128,20 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // ── 1. the back-fill is NOT a page-load side effect (audit item 3) ───────
     const firstHub = await request(app).get('/api/checklists/hub').set('Authorization', OWNER);
     ok(firstHub.status === 200, 'owner: GET /hub 200', String(firstHub.status));
-    ok((firstHub.body?.data || []).every((p) => p.origin !== 'auto'),
+    // 3c changed what 'creates nothing' means: the hub now makes ONE pad, the
+    // user's 'No Job Assigned' card. That is a single idempotent insert, not the
+    // O(jobs) back-fill this assertion exists to prevent, so the check narrows
+    // to "no auto pad with a job or lead behind it" rather than loosening.
+    const autoPads = (firstHub.body?.data || []).filter((p) => p.origin === 'auto');
+    ok(autoPads.every((p) => p.job_id == null && p.lead_id == null),
       'opening Notepads does NOT bulk-create notepads for pre-existing jobs',
-      JSON.stringify((firstHub.body?.data || []).map((p) => p.title)));
+      JSON.stringify(autoPads.map((p) => p.title)));
+    ok(autoPads.length === 1 && autoPads[0].title === 'No Job Assigned',
+      "3c: opening Notepads DOES create the one 'No Job Assigned' pad",
+      JSON.stringify(autoPads.map((p) => p.title)));
+    ok(Number(autoPads[0].sort_order) === -1,
+      '3d: it sorts first by default — and is draggable, because a per-user order overrides it',
+      String(autoPads[0] && autoPads[0].sort_order));
 
     // …it is a one-off that counts first and waits for approval.
     const { execFileSync } = require('child_process');
@@ -143,7 +154,9 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const report = runBackfill(['--report']);
     ok(/GRAND TOTAL notepads that would be created: [1-9]/.test(report),
       'back-fill REPORT shows a count and writes nothing', report.split('\n').slice(-4).join(' | '));
-    const [stillNone] = await conn.query("SELECT id FROM checklist_sections WHERE origin='auto'");
+    // Same narrowing: the report must not create JOB or LEAD pads. The
+    // 'No Job Assigned' pad above is expected to already exist.
+    const [stillNone] = await conn.query("SELECT id FROM checklist_sections WHERE origin='auto' AND (job_id IS NOT NULL OR lead_id IS NOT NULL)");
     ok(stillNone.length === 0, 'report mode created nothing');
 
     let refused = '';
@@ -444,6 +457,42 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok(tooLong.status === 400, '3i: an 81-character task name is refused by the server', String(tooLong.status));
     const atLimit = await request(app).post('/api/checklists/create').set('Authorization', OWNER).send({ type: 'task', name: 'y'.repeat(80), section_id: companyPadId });
     ok(atLimit.status === 200 || atLimit.status === 201, '3i: exactly 80 characters is accepted — the cap is inclusive', String(atLimit.status));
+
+    // ── 15. 3b — delegated work follows the PERSON into their own notepad ────
+    // BILL (802) is off-list and has no My Tasks page, so his own notepad is the
+    // only place his assigned work can appear. Delegate a company row to him and
+    // it must show up in HIS hub, filed under his pad for the same job.
+    const forBill = await request(app).post('/api/checklists/create').set('Authorization', OWNER).send({ type: 'task', name: 'Haul the debris', section_id: companyPadId });
+    const forBillId = Number(forBill.body?.data?.id || 0);
+    const forBillDel = await request(app).post(`/api/checklists/items/${forBillId}/delegate`).set('Authorization', OWNER).send({ job_id: 900, assignee_id: 802 });
+    ok(forBillDel.status === 201, '3b: the owner delegates a company row to the off-list user', JSON.stringify(forBillDel.body));
+
+    const bill3bHub = await request(app).get('/api/checklists/hub').set('Authorization', BILL);
+    ok(bill3bHub.status === 200, '3b: off-list user can still open Notepads', String(bill3bHub.status));
+    const billRows = (bill3bHub.body?.data || []).flatMap((pad) => pad.items || []);
+    const mine = billRows.find((r) => Number(r.id) === forBillId);
+    ok(!!mine, '3b: the row delegated TO him appears in HIS notepad', JSON.stringify(billRows.map((r) => r.name)));
+    ok(mine && mine.delegated_to_me === true, '3b: it is marked as delegated to him, so the UI can strip the wrong controls');
+    ok(mine && mine.can_edit === false && mine.can_delete === false && mine.can_delegate === false,
+      '3b: check off, note and photo only — no edit, no delete, no delegate',
+      JSON.stringify({ e: mine && mine.can_edit, d: mine && mine.can_delete, g: mine && mine.can_delegate }));
+
+    // The important negative: he must NOT pick up the rest of the company pad.
+    // 'Order windows' is on the same pad and is not his.
+    ok(!billRows.some((r) => r.name === 'Order windows'),
+      '3b: he sees ONLY what was delegated to him, not the rest of the company pad',
+      JSON.stringify(billRows.map((r) => r.name)));
+
+    // ...and it is filed under a pad HE owns, never the company pad itself.
+    const hostPad = (bill3bHub.body?.data || []).find((pad) => (pad.items || []).some((r) => Number(r.id) === forBillId));
+    ok(hostPad && Number(hostPad.owner_user_id) === 802,
+      '3b: the row is re-homed into a pad he owns — the company pad stays invisible',
+      JSON.stringify(hostPad && { id: hostPad.id, owner: hostPad.owner_user_id, title: hostPad.title }));
+
+    // 3c: his 'No Job Assigned' pad exists too, and is the fallback landing spot.
+    ok((bill3bHub.body?.data || []).some((pad) => pad.title === 'No Job Assigned'),
+      "3c: every user gets a 'No Job Assigned' pad, off-list included",
+      JSON.stringify((bill3bHub.body?.data || []).map((pad) => pad.title)));
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);

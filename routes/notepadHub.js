@@ -32,6 +32,7 @@ const {
   listAllowlist,
   getSectionAccess,
   isShareable,
+  ensureNoJobNotepad,
 } = require('../services/notepadAccess');
 
 // Contact categories (utils/access.js documents the model):
@@ -92,6 +93,12 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
 
       const owner = await accountOwnerOf(connection, uid);
       const full = await isFullAccess(connection, uid);
+
+      // 3c: every user has a 'No Job Assigned' pad. One idempotent insert, not
+      // the O(jobs) back-fill the note above retired — cheap enough to sit on
+      // a page read, which is the only way "every user gets one" is true for
+      // accounts that existed before this shipped.
+      await ensureNoJobNotepad(connection, uid);
 
       // Visibility, expressed once in SQL so a direct API call obeys exactly the
       // same rule the UI does.
@@ -158,6 +165,41 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
         items = rows;
       }
 
+      // ── 3b — DELEGATED WORK FOLLOWS THE PERSON, NOT THE NOTEPAD ──────────
+      //
+      // An off-list user has no My Tasks page (3a), so this is the ONLY place
+      // their assigned work appears. The row itself lives in a company pad
+      // they cannot see, so we fetch it separately and re-home it into their
+      // own private pad for the same job.
+      //
+      // Strictly `c.delegated_to = uid`. Never a row delegated to anyone else,
+      // and never an undelegated row from a pad they have no business reading —
+      // this must not become a side door into the company's notepads.
+      let borrowed = [];
+      if (!full) {
+        const [rows] = await connection.query(
+          `SELECT
+              c.id, c.section_id, c.name, c.photo, c.priority, c.due_date, c.status,
+              c.assignee_completed, c.created_by, c.delegated_task_id, c.delegated_to,
+              u.name AS created_by_name,
+              du.name AS delegated_to_name,
+              t.assignee_completed AS task_assignee_completed,
+              t.status AS task_status,
+              s.job_id AS src_job_id, s.lead_id AS src_lead_id
+            FROM check_list c
+            JOIN checklist_sections s ON s.id = c.section_id
+            LEFT JOIN \`user\` u  ON u.id  = c.created_by
+            LEFT JOIN \`user\` du ON du.id = c.delegated_to
+            LEFT JOIN tasks t     ON t.id  = c.delegated_task_id
+           WHERE c.delegated_to = ?
+             AND COALESCE(s.account_owner_id, s.owner_user_id) = ?
+             AND s.owner_user_id <> ?
+           ORDER BY (c.status = 'completed') ASC, (c.priority = 'high') DESC, c.id DESC`,
+          [uid, owner, uid],
+        );
+        borrowed = rows;
+      }
+
       const bySection = new Map();
       for (const it of items) {
         const key = Number(it.section_id);
@@ -177,6 +219,44 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           is_self_assigned: it.delegated_to != null && Number(it.delegated_to) === uid,
           can_edit: Number(it.created_by) === uid, // default rule: your own typing only
         });
+      }
+
+      // 3b: place each borrowed row in the caller's own pad for the same job or
+      // lead. If they have none — the private pad was never created, or the row
+      // came from a pad with no job behind it — it lands in their
+      // 'No Job Assigned' pad, which 3c guarantees exists. Nothing is dropped:
+      // a task you cannot see is worse than one filed in the wrong place.
+      if (borrowed.length) {
+        const padForJob = new Map();
+        const padForLead = new Map();
+        let noJobPadId = null;
+        for (const sec of sections) {
+          if (Number(sec.owner_user_id) !== uid) continue;
+          if (sec.job_id != null) padForJob.set(Number(sec.job_id), Number(sec.id));
+          else if (sec.lead_id != null) padForLead.set(Number(sec.lead_id), Number(sec.id));
+          else if (noJobPadId == null) noJobPadId = Number(sec.id);
+        }
+        for (const it of borrowed) {
+          const target =
+            (it.src_job_id != null && padForJob.get(Number(it.src_job_id))) ||
+            (it.src_lead_id != null && padForLead.get(Number(it.src_lead_id))) ||
+            noJobPadId;
+          if (!target) continue;
+          if (!bySection.has(target)) bySection.set(target, []);
+          bySection.get(target).push({
+            ...it,
+            section_id: target,
+            delegate_state: Number(it.task_assignee_completed) === 1 ? 'done' : 'delegated',
+            delegated_first_name: firstNameOf(it.delegated_to_name),
+            is_self_assigned: false,
+            // 3b: check off, note and photo. Nothing else. They did not write
+            // these words and they are not the boss of this task.
+            can_edit: false,
+            can_delete: false,
+            can_delegate: false,
+            delegated_to_me: true,
+          });
+        }
       }
 
       const data = sections.map((s) => {

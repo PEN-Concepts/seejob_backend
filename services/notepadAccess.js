@@ -24,6 +24,13 @@
 const { resolveOwnerId } = require('../utils/access');
 const { ensureNotepadSchema } = require('./notepadSchema');
 
+/**
+ * 3c — the one name for a notepad with no job behind it. Exported so the
+ * retirement of 'Personal' is a single edit and not a search-and-replace: any
+ * code that needs the label imports it rather than typing it again.
+ */
+const NO_JOB_TITLE = 'No Job Assigned';
+
 /** The account this user belongs to. Employees resolve to their GC. */
 async function accountOwnerOf(connection, userId) {
   return Number(await resolveOwnerId(Number(userId), connection));
@@ -91,6 +98,37 @@ async function listAllowlist(connection, ownerId) {
 }
 
 /**
+ * 3c — THE 'NO JOB ASSIGNED' PAD, one per user, replacing 'Personal'.
+ *
+ * Every user gets one, owner included, and it is always theirs privately —
+ * there is no company version, because the whole point is the work that has no
+ * job behind it yet.
+ *
+ * sort_order -1 puts it first on a page the user has never dragged. It is not
+ * pinned: the moment they reorder anything, checklist_section_order supplies a
+ * per-user value and COALESCE prefers it, so the card moves like any other (3d).
+ *
+ * Deliberately its own function rather than part of ensureAutoNotepads. This is
+ * ONE idempotent insert per user, so it is cheap enough to run on a page read;
+ * the job and lead back-fill next to it is O(jobs) and is not.
+ */
+async function ensureNoJobNotepad(connection, userId) {
+  const uid = Number(userId);
+  const owner = await accountOwnerOf(connection, uid);
+  await connection.query(
+    `INSERT INTO checklist_sections
+        (owner_user_id, shared_with_user_id, type, title, sort_order, job_id, lead_id, origin, scope, account_owner_id)
+     SELECT ?, NULL, 'task', ?, -1, NULL, NULL, 'auto', 'private', ?
+       FROM DUAL
+      WHERE NOT EXISTS (
+        SELECT 1 FROM checklist_sections s
+         WHERE s.owner_user_id = ? AND s.origin = 'auto' AND s.job_id IS NULL AND s.lead_id IS NULL
+      )`,
+    [uid, NO_JOB_TITLE, owner, uid],
+  );
+}
+
+/**
  * §5 — every job and lead on the account gets a notepad, named after it, with
  * the address READ LIVE (never copied: see the reads in routes/checklists.js,
  * which JOIN job/leads on every request).
@@ -116,6 +154,8 @@ async function ensureAutoNotepads(connection, userId) {
   const members = await accountMemberIds(connection, owner);
   if (!members.length) return;
   const memberList = members.join(',');
+
+  await ensureNoJobNotepad(connection, uid);
 
   // JOBS. `job.created_by` is any member of the account.
   await connection.query(
@@ -310,6 +350,8 @@ module.exports = {
   accountMemberIds,
   listAllowlist,
   ensureAutoNotepads,
+  ensureNoJobNotepad,
+  NO_JOB_TITLE,
   createAutoNotepadFor,
   repointNotepadLeadToJob,
   getSectionAccess,
