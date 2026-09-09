@@ -4,7 +4,7 @@ const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
 const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureAllowanceColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
-const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, isSameAccount } = require("../utils/access");
+const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, isSameAccount, getAccessMode } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
 const { requireOwnsJob } = require("../utils/ownership");
 
@@ -87,7 +87,27 @@ async function getActivePlanFeatures(connection, userId) {
     [billingUserId]
   );
 
-  if (!subRows.length) return [];
+  if (!subRows.length) {
+    // No subscription row: owner-exempt accounts, internal roles and TRIAL users
+    // are treated as a top-tier paying customer (full feature set). This copy
+    // returned [] unconditionally, so a trial was refused with
+    // FEATURE_NOT_AVAILABLE. Its twin in routes/jobs.js already handled trials
+    // correctly; this one was never updated to match — which is the whole
+    // pattern this fix is closing. expired_free still gets nothing.
+    let mode = "paid";
+    try {
+      mode = await getAccessMode(userId);
+    } catch (e) {
+      mode = "paid"; // fail open, matching the jobs.js twin
+    }
+    if (mode === "paid" || mode === "trial_active") {
+      const [allRows] = await connection.query(
+        "SELECT DISTINCT feature_key FROM plan_features"
+      );
+      return allRows.map((r) => normalizeFeatureKey(r.feature_key));
+    }
+    return [];
+  }
 
   const planId = subRows[0].plan_id;
   const [featureRows] = await connection.query(
