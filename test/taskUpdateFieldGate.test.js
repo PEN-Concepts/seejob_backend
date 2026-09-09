@@ -96,6 +96,17 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       'sub CANNOT re-assign (user_id -> 920) -> 403 ASSIGNEE_COMPLETION_ONLY', rReassign.status + ' ' + JSON.stringify(rReassign.body));
     ok(Number((await row()).user_id) === 910, 'primary assignee unchanged (still 910)', (await row()).user_id);
 
+    // sub cannot MOVE the task onto a different job. job_id was missing from the
+    // whitelist gate (CCP 2026-09-08) — every other content field was covered,
+    // so a non-owning assignee could relocate the task even though they could
+    // not rename it.
+    const jobBefore = Number((await row()).job_id || 0);
+    const rMove = await subPut({ job_id: jobBefore + 1, user_id: 910 });
+    ok(rMove.status === 403 && rMove.body.code === 'ASSIGNEE_COMPLETION_ONLY'
+      && Array.isArray(rMove.body.fields) && rMove.body.fields.includes('job_id'),
+      'sub CANNOT move the task to another job -> 403 (fields includes job_id)', rMove.status + ' ' + JSON.stringify(rMove.body));
+    ok(Number((await row()).job_id || 0) === jobBefore, 'job_id unchanged after the refusal', (await row()).job_id);
+
     // ---- ALLOWED for the sub: completion_response, then assignee_completed ----
     const rC = await subPut({ completion_response: 'Done, sealed the deck.', user_id: 910 });
     ok(rC.status === 200, 'sub CAN write completion_response -> 200', rC.status + ' ' + JSON.stringify(rC.body));
