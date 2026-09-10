@@ -38,6 +38,9 @@ const photoUpload = multer({
   storage: photoStorage,
   limits: { fileSize: 12 * 1024 * 1024 },
   // Images only. A non-image is rejected silently rather than 500ing.
+  // C25: a TASK takes PICTURES only. Plans and PDFs live on the notepad,
+  // where one link serves every task on the pad instead of the same document
+  // hanging off six rows. A non-image is rejected rather than 500ing.
   fileFilter: (req, file, cb) => cb(null, String(file.mimetype || '').startsWith('image/')),
 });
 const {
@@ -346,6 +349,22 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
         }
       }
 
+      // C25: plan count per section, so the header pill can carry a number.
+      const planCount = new Map();
+      if (sections.length) {
+        const sph = sections.map(() => '?').join(',');
+        try {
+          const [pc] = await connection.query(
+            `SELECT section_id, COUNT(*) AS n FROM checklist_section_files
+              WHERE section_id IN (${sph}) GROUP BY section_id`,
+            sections.map((x) => Number(x.id)),
+          );
+          for (const r of pc) planCount.set(Number(r.section_id), Number(r.n || 0));
+        } catch (e) {
+          logger.error('notepad hub plan-count read failed: ' + e.message);
+        }
+      }
+
       const data = sections.map((s) => {
         const isLead = s.lead_id != null;
         return {
@@ -358,6 +377,7 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           client_shared: Number(s.client_share_count || 0) > 0,
           shared_with_anyone: Number(s.share_count || 0) > 0,
           items: bySection.get(Number(s.id)) || [],
+          plan_count: planCount.get(Number(s.id)) || 0,
         };
       });
 
@@ -1425,6 +1445,134 @@ router.post('/items/:id/job-files', auth.authenticateToken, requireNotepadMyTask
     });
   } catch (err) {
     logger.error('notepad row job-file link error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C25 — PLANS ON THE NOTEPAD
+//
+// A plan set describes the whole job, not one line of it. Attached per task
+// the same PDF ended up hanging off six rows; on the section, one link serves
+// every task on the pad. Tasks keep PHOTOS only.
+//
+// Still a LINK to job_documents, never a copy: plans are versioned in the job
+// Files, and a duplicate here would drift from whatever the job holds.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** The job behind a section, for scoping which documents may be offered. */
+async function sectionJobId(connection, sectionId) {
+  const [[r]] = await connection.query(
+    'SELECT job_id FROM checklist_sections WHERE id = ? LIMIT 1',
+    [Number(sectionId)],
+  );
+  return r && r.job_id ? Number(r.job_id) : null;
+}
+
+router.get('/sections/:id/plans', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const access = await getSectionAccess(connection, req.params.id, uid);
+      if (!access) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+
+      const jobId = await sectionJobId(connection, req.params.id);
+      const [linked] = await connection.query(
+        `SELECT f.id, f.job_document_id, d.name, d.path, d.type
+           FROM checklist_section_files f
+           JOIN job_documents d ON d.id = f.job_document_id
+          WHERE f.section_id = ?
+          ORDER BY f.id ASC`,
+        [Number(req.params.id)],
+      );
+      let available = [];
+      if (jobId) {
+        const [rows] = await connection.query(
+          'SELECT id, name, path, type FROM job_documents WHERE job_id = ? ORDER BY id DESC',
+          [jobId],
+        );
+        available = rows;
+      }
+      res.json({ success: true, linked, available, reason: jobId ? '' : 'NO_JOB' });
+    });
+  } catch (err) {
+    logger.error('notepad section plans read error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+const sectionPlanSchema = Joi.object({
+  document_ids: Joi.array().items(Joi.number().integer().positive()).min(1).max(50).required(),
+});
+
+router.post('/sections/:id/plans', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  const { error, value } = sectionPlanSchema.validate(req.body || {});
+  if (error) return res.status(400).json({ success: false, message: error.details[0].message });
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const access = await getSectionAccess(connection, req.params.id, uid);
+      if (!access) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+
+      const jobId = await sectionJobId(connection, req.params.id);
+      if (!jobId) {
+        return res.status(400).json({ success: false, code: 'NO_JOB', message: 'This notepad has no job to take plans from.' });
+      }
+      // Only documents on THIS job. An id from another job is refused
+      // outright rather than silently dropped.
+      const ph = value.document_ids.map(() => '?').join(',');
+      const [docs] = await connection.query(
+        `SELECT id FROM job_documents WHERE job_id = ? AND id IN (${ph})`,
+        [jobId, ...value.document_ids],
+      );
+      if (docs.length !== value.document_ids.length) {
+        return res.status(403).json({ success: false, message: 'Those files are not on this job.' });
+      }
+      for (const d of docs) {
+        // UNIQUE(section_id, job_document_id) makes re-linking a no-op.
+        await connection.query(
+          'INSERT IGNORE INTO checklist_section_files (section_id, job_document_id, added_by) VALUES (?, ?, ?)',
+          [Number(req.params.id), Number(d.id), uid],
+        );
+      }
+      const [linked] = await connection.query(
+        `SELECT f.id, f.job_document_id, d.name, d.path, d.type
+           FROM checklist_section_files f
+           JOIN job_documents d ON d.id = f.job_document_id
+          WHERE f.section_id = ?
+          ORDER BY f.id ASC`,
+        [Number(req.params.id)],
+      );
+      res.status(201).json({ success: true, linked });
+    });
+  } catch (err) {
+    logger.error('notepad section plan link error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.delete('/sections/plans/:linkId', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const [[link]] = await connection.query(
+        'SELECT id, section_id FROM checklist_section_files WHERE id = ? LIMIT 1',
+        [Number(req.params.linkId)],
+      );
+      if (!link) return res.status(404).json({ success: false, message: 'No such link.' });
+      const access = await getSectionAccess(connection, link.section_id, uid);
+      if (!access) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+      // Unlinking removes the REFERENCE only. The document stays in the job
+      // Files, untouched — this must never delete somebody's plan set.
+      await connection.query('DELETE FROM checklist_section_files WHERE id = ?', [Number(req.params.linkId)]);
+      res.json({ success: true, deleted: true });
+    });
+  } catch (err) {
+    logger.error('notepad section plan unlink error: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

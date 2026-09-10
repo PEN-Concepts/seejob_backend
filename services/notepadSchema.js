@@ -234,6 +234,28 @@ async function ensureNotepadSchema(connection) {
     `),
   );
 
+  // ── C25: PLANS BELONG TO THE NOTEPAD, NOT THE TASK.
+  //
+  // A plan set is about the whole job, not one line of it — attaching it per
+  // task meant the same PDF hanging off six rows. It moves up to the section,
+  // where one link serves every task on the pad.
+  //
+  // Still a LINK to job_documents, never a copy: plans are versioned in the
+  // job Files and a duplicate would drift from whatever the job holds.
+  await run('checklist_section_files', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS checklist_section_files (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        section_id INT NOT NULL,
+        job_document_id INT NOT NULL,
+        added_by INT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_csf (section_id, job_document_id),
+        INDEX idx_csf_section (section_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
+
   // ── C24: an attachment is not always a photograph.
   //
   // A set of plans or a spec PDF belongs on the same row as the pictures —
