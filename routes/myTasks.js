@@ -109,11 +109,17 @@ router.get('/my-tasks', auth.authenticateToken, requireNotepadMyTasks, async (re
                  NULLIF(j.job_city, ''),
                  TRIM(CONCAT_WS(' ', NULLIF(j.job_state, ''), NULLIF(j.job_zipcode, '')))
             )) AS job_address,
+            ld.lead_name AS lead_name,
+            ld.project_street_address AS lead_address,
             (SELECT COUNT(*) FROM task_notes n WHERE n.task_id = t.id)     AS note_count,
             (SELECT COUNT(*) FROM tasks_images i WHERE i.task_id = t.id)   AS photo_count
           FROM tasks t
           LEFT JOIN \`user\` creator ON creator.id = t.created_by
           LEFT JOIN \`job\` j ON j.id = t.job_id AND (t.task_type IS NULL OR t.task_type <> 'lead')
+          -- 4c: a task on a BID uses the same job_id column with task_type
+          -- 'lead'. Without this join it fell into the no-job bucket and the
+          -- assignee could not tell a bid from a signed job at all.
+          LEFT JOIN leads ld ON ld.id = t.job_id AND t.task_type = 'lead'
          WHERE t.user_id = ?
             OR EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = t.id AND ta.user_id = ?)
          ORDER BY
@@ -161,19 +167,24 @@ router.get('/my-tasks', auth.authenticateToken, requireNotepadMyTasks, async (re
           // Own task -> edit + delete. Assigned task -> photo and notes only.
           is_mine: Number(r.created_by) === uid,
           job_id: r.job_id,
-          job_name: r.job_name,
+          job_name: r.job_name || r.lead_name,
         };
-        if (!r.job_id || !r.job_name) {
+        // 4c: a bid groups by its LEAD, flagged so the heading can carry the
+        // LEAD pill. Same shape as a job group in every other respect.
+        const isLead = String(r.task_type || '') === 'lead' && !!r.lead_name;
+        const groupName = isLead ? r.lead_name : r.job_name;
+        if (!r.job_id || !groupName) {
           noJob.tasks.push(t);
           continue;
         }
-        const key = Number(r.job_id);
+        const key = `${isLead ? 'L' : 'J'}${Number(r.job_id)}`;
         if (!byJob.has(key)) {
           byJob.set(key, {
-            job_id: key,
-            job_name: r.job_name,
-            address: r.job_address || '',
-            color: r.job_color || null,
+            job_id: Number(r.job_id),
+            job_name: groupName,
+            address: (isLead ? r.lead_address : r.job_address) || '',
+            color: isLead ? null : r.job_color || null,
+            is_lead: isLead,
             tasks: [],
           });
         }
