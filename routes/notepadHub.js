@@ -291,6 +291,50 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           [uid, owner, uid],
         );
         borrowed = rows;
+
+        // C42: the borrowed rows live in sections this caller cannot see, so
+        // the per-section reads above skipped their photos and notes. Without
+        // this the sub's own photo vanished from the strip the moment they
+        // reopened the sheet, and no paperclip ever appeared on the row.
+        if (borrowed.length) {
+          const bids = borrowed.map((r) => Number(r.id));
+          const bph = bids.map(() => '?').join(',');
+          try {
+            const [imgs] = await connection.query(
+              `SELECT id, item_id, filename, created_at, mime, original_name, job_document_id
+                 FROM checklist_item_images
+                WHERE item_id IN (${bph})
+                ORDER BY id ASC`,
+              bids,
+            );
+            for (const im of imgs) {
+              const k = Number(im.item_id);
+              if (!imagesByItem.has(k)) imagesByItem.set(k, []);
+              imagesByItem.get(k).push({
+                id: Number(im.id),
+                filename: im.filename,
+                created_at: im.created_at,
+                mime: im.mime || null,
+                original_name: im.original_name || null,
+                job_document_id: im.job_document_id == null ? null : Number(im.job_document_id),
+              });
+            }
+          } catch (e) {
+            logger.error('notepad hub borrowed-images read failed: ' + e.message);
+          }
+          try {
+            const [bn] = await connection.query(
+              `SELECT item_id, COUNT(*) AS n FROM checklist_item_notes
+                WHERE item_id IN (${bph}) GROUP BY item_id`,
+              bids,
+            );
+            for (const r of bn) {
+              threadCountByItem.set(Number(r.item_id), (threadCountByItem.get(Number(r.item_id)) || 0) + Number(r.n || 0));
+            }
+          } catch (e) {
+            logger.error('notepad hub borrowed-notes read failed: ' + e.message);
+          }
+        }
       }
 
       const bySection = new Map();
@@ -362,6 +406,12 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
             can_delete: false,
             can_delegate: false,
             delegated_to_me: true,
+            // C42: same two fields the owner's copy of this row carries, read
+            // from the same tables — so the sub and the sender cannot
+            // disagree about whether a photo or a note exists.
+            note: it.note || null,
+            has_note: !!String(it.note || '').trim() || (threadCountByItem.get(Number(it.id)) || 0) > 0,
+            images: imagesByItem.get(Number(it.id)) || [],
           });
         }
       }

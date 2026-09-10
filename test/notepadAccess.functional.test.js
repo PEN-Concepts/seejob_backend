@@ -679,6 +679,24 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const ownerPadsC40 = (await request(app).get("/api/checklists/hub").set("Authorization", OWNER)).body.data || [];
     ok(ownerPadsC40.some((pad) => pad.title === "No Job Assigned"),
       "C40: the owner is unaffected");
+
+    // ── 23. C42 — the note flag reaches BOTH sides of a delegated row ──────
+    // The sub added a note in test 21. The sender must see that on their own
+    // copy of the row, and the sub on their re-homed copy. Same underlying
+    // rows, so the two can never disagree.
+    const ownerSees = (await request(app).get("/api/checklists/hub").set("Authorization", OWNER))
+      .body.data.flatMap((pad) => pad.items || []).find((r) => Number(r.id) === forSubId);
+    ok(ownerSees && ownerSees.has_note === true,
+      "C42: the SENDER sees the flag on their copy of the row",
+      JSON.stringify(ownerSees && { id: ownerSees.id, has_note: ownerSees.has_note }));
+
+    const subSees = (await request(app).get("/api/checklists/hub").set("Authorization", tok(803)))
+      .body.data.flatMap((pad) => pad.items || []).find((r) => Number(r.id) === forSubId);
+    ok(subSees && subSees.has_note === true,
+      "C42: and the SUB sees it on their re-homed copy",
+      JSON.stringify(subSees && { id: subSees.id, has_note: subSees.has_note }));
+    ok(subSees && Array.isArray(subSees.images),
+      "C42: the re-homed row carries its images array — the photo strip reads from it");
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);
