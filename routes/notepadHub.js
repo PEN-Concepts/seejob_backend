@@ -1104,13 +1104,40 @@ module.exports = router;
 /** The section a row belongs to, plus how this caller relates to it. */
 async function itemSectionAccess(connection, itemId, uid) {
   const [[row]] = await connection.query(
-    'SELECT id, section_id, created_by, delegated_to FROM check_list WHERE id = ? LIMIT 1',
+    'SELECT id, section_id, created_by, delegated_to, delegated_task_id FROM check_list WHERE id = ? LIMIT 1',
     [Number(itemId)],
   );
   if (!row) return null;
+
   const access = await getSectionAccess(connection, row.section_id, uid);
-  if (!access) return null;
-  return { row, access };
+  if (access) return { row, access };
+
+  // C19: EVERYONE CONNECTED TO THE ROW CAN JOIN THE CONVERSATION.
+  //
+  // Section access alone was too narrow. A row in a COMPANY pad delegated to
+  // an off-list worker is invisible to them as a section — 3b re-homes it
+  // into their own pad only for display — so the section check said no, and
+  // the person the task actually belongs to could not read or answer the
+  // notes about their own work.
+  //
+  // This widens the CONVERSATION only. The 'assignee' role is narrower than
+  // owner everywhere it is checked, and it does not hand over the section:
+  // they still cannot see the rest of the pad.
+  if (Number(row.delegated_to || 0) === Number(uid)) {
+    return { row, access: { section: null, role: 'assignee' } };
+  }
+
+  // A SECONDARY assignee on the linked task is just as connected to it as
+  // the primary one.
+  if (row.delegated_task_id) {
+    const [m] = await connection.query(
+      'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ? LIMIT 1',
+      [Number(row.delegated_task_id), Number(uid)],
+    );
+    if (m.length) return { row, access: { section: null, role: 'assignee' } };
+  }
+
+  return null;
 }
 
 router.get('/items/:id/photos', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {

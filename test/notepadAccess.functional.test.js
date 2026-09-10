@@ -563,6 +563,33 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const subRow = subHost && (subHost.items || []).find((r) => Number(r.id) === forSubId);
     ok(subRow && subRow.can_edit === false && subRow.can_delete === false && subRow.can_delegate === false,
       '5b: check off, note and photo only — nothing else, exactly as for an employee');
+
+    // ── 19. C19 — the row note thread, and who may join it ─────────────────
+    // forBillId is a COMPANY-pad row delegated to BILL, who is off-list. He
+    // cannot see that section at all, so section access alone would shut him
+    // out of the conversation about his own work.
+    const ownerNoteC19 = await request(app).post(`/api/checklists/items/${forBillId}/notes`).set('Authorization', OWNER).send({ body: 'Gate code is 4417.' });
+    ok(ownerNoteC19.status === 201, 'C19: the owner posts a note on a row', String(ownerNoteC19.status));
+
+    const billNoteC19 = await request(app).post(`/api/checklists/items/${forBillId}/notes`).set('Authorization', BILL).send({ body: 'Got it, on my way.' });
+    ok(billNoteC19.status === 201, 'C19: the ASSIGNEE can join the thread even with no access to the section', String(billNoteC19.status));
+
+    const billReadC19 = await request(app).get(`/api/checklists/items/${forBillId}/notes`).set('Authorization', BILL);
+    ok(billReadC19.status === 200 && (billReadC19.body.data || []).length === 2,
+      'C19: both sides see the same two-way thread', JSON.stringify((billReadC19.body.data || []).map((n) => n.body)));
+    ok((billReadC19.body.data || []).every((n) => n.initials && n.author_name),
+      'C19: every message carries an author and initials for the avatar');
+
+    // The widening is for people CONNECTED to the row, nobody else.
+    const strangerReadC19 = await request(app).get(`/api/checklists/items/${forBillId}/notes`).set('Authorization', OUTSIDER);
+    ok(strangerReadC19.status === 403, 'C19: someone on another account still cannot read the thread', String(strangerReadC19.status));
+    const strangerWriteC19 = await request(app).post(`/api/checklists/items/${forBillId}/notes`).set('Authorization', OUTSIDER).send({ body: 'nope' });
+    ok(strangerWriteC19.status === 403, 'C19: nor post to it', String(strangerWriteC19.status));
+
+    // The paperclip must now light from a ROW note, not just a task thread.
+    const hubAfterNote = await request(app).get('/api/checklists/hub').set('Authorization', OWNER);
+    const notedRow = (hubAfterNote.body?.data || []).flatMap((pad) => pad.items || []).find((r) => Number(r.id) === forBillId);
+    ok(notedRow && notedRow.has_note === true, 'C19: a row note lights the paperclip', JSON.stringify(notedRow && { id: notedRow.id, has_note: notedRow.has_note }));
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);
