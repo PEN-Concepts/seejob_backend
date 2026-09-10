@@ -223,6 +223,17 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
         try {
           // A delegated row can also carry the two-way thread. Either source
           // lights the paperclip.
+          const [rn] = await connection.query(
+            `SELECT c.id AS item_id, COUNT(n.id) AS n
+               FROM check_list c
+               JOIN checklist_item_notes n ON n.item_id = c.id
+              WHERE c.section_id IN (${ph})
+              GROUP BY c.id`,
+            ids,
+          );
+          for (const r of rn) {
+            threadCountByItem.set(Number(r.item_id), (threadCountByItem.get(Number(r.item_id)) || 0) + Number(r.n || 0));
+          }
           const [tn] = await connection.query(
             `SELECT c.id AS item_id, COUNT(n.id) AS n
                FROM check_list c
@@ -1177,6 +1188,113 @@ router.delete('/photos/:imageId', auth.authenticateToken, requireNotepadMyTasks,
     });
   } catch (err) {
     logger.error('notepad item photo delete error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C19 — THE ROW NOTE IS A THREAD
+//
+// One note per row could not be replied to. These endpoints back a chat-style
+// panel: author, initials and timestamp per message.
+//
+// The legacy check_list.note is migrated in on first read rather than by a
+// destructive backfill — nothing already typed is lost, and no migration has
+// to be approved to ship this.
+// ═══════════════════════════════════════════════════════════════════════════
+
+function initialsOf(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  return parts.slice(0, 2).map((x) => x[0].toUpperCase()).join('');
+}
+
+/** Fold a legacy single note into the thread, once, the first time it is read. */
+async function absorbLegacyNote(connection, itemId) {
+  const [[row]] = await connection.query(
+    'SELECT id, note, created_by FROM check_list WHERE id = ? LIMIT 1',
+    [Number(itemId)],
+  );
+  if (!row || !String(row.note || '').trim()) return;
+  const [[existing]] = await connection.query(
+    'SELECT COUNT(*) AS n FROM checklist_item_notes WHERE item_id = ?',
+    [Number(itemId)],
+  );
+  if (Number(existing.n) > 0) return;
+  await connection.query(
+    'INSERT INTO checklist_item_notes (item_id, user_id, body) VALUES (?, ?, ?)',
+    [Number(itemId), row.created_by || null, String(row.note)],
+  );
+}
+
+router.get('/items/:id/notes', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const found = await itemSectionAccess(connection, req.params.id, uid);
+      if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+      await absorbLegacyNote(connection, req.params.id);
+      const [rows] = await connection.query(
+        `SELECT n.id, n.body, n.created_at, n.user_id, u.name AS author_name
+           FROM checklist_item_notes n
+           LEFT JOIN \`user\` u ON u.id = n.user_id
+          WHERE n.item_id = ?
+          ORDER BY n.id ASC`,
+        [Number(req.params.id)],
+      );
+      res.json({
+        success: true,
+        data: rows.map((r) => ({
+          id: Number(r.id),
+          body: r.body,
+          created_at: r.created_at,
+          user_id: r.user_id == null ? null : Number(r.user_id),
+          author_name: r.author_name || 'Someone',
+          initials: initialsOf(r.author_name),
+          is_mine: Number(r.user_id) === uid,
+        })),
+      });
+    });
+  } catch (err) {
+    logger.error('notepad item notes read error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+const itemNoteSchema = Joi.object({ body: Joi.string().trim().min(1).max(4000).required() });
+
+router.post('/items/:id/notes', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  const { error, value } = itemNoteSchema.validate(req.body || {});
+  if (error) return res.status(400).json({ success: false, message: error.details[0].message });
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const found = await itemSectionAccess(connection, req.params.id, uid);
+      if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+      await absorbLegacyNote(connection, req.params.id);
+      const [r] = await connection.query(
+        'INSERT INTO checklist_item_notes (item_id, user_id, body) VALUES (?, ?, ?)',
+        [Number(req.params.id), uid, value.body],
+      );
+      const [[me]] = await connection.query('SELECT name FROM `user` WHERE id = ? LIMIT 1', [uid]);
+      res.status(201).json({
+        success: true,
+        data: {
+          id: Number(r.insertId),
+          body: value.body,
+          created_at: new Date(),
+          user_id: uid,
+          author_name: (me && me.name) || 'You',
+          initials: initialsOf(me && me.name),
+          is_mine: true,
+        },
+      });
+    });
+  } catch (err) {
+    logger.error('notepad item note write error: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

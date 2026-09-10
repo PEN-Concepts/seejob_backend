@@ -212,6 +212,28 @@ async function ensureNotepadSchema(connection) {
     `),
   );
 
+  // ── C19: the row note becomes a THREAD.
+  //
+  // check_list.note was a single TEXT field — one person, one note, no way to
+  // reply. The owner asked for a conversation, so notes get their own table
+  // with an author and a timestamp per message.
+  //
+  // task_notes could not be reused: it is keyed on task_id and a notepad row
+  // that has never been delegated has no task. The old note column stays put
+  // and is migrated in on first read, so nothing already typed is lost.
+  await run('checklist_item_notes', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS checklist_item_notes (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        item_id INT NOT NULL,
+        user_id INT NULL,
+        body TEXT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_cln_item (item_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
+
   // ── §10 the two-way note thread. Author + date per note, both directions.
   await run('task_notes', () =>
     connection.query(`
