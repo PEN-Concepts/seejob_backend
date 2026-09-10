@@ -519,6 +519,24 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     } else {
       ok(true, '3e: skipped — the fixture has fewer than two job pads to reorder');
     }
+
+    // ── 17. 4g — MANAGE ACCESS MUST NEVER ADMIT A CLIENT ────────────────────
+    // This dialog grants access to every company job and lead notepad on the
+    // account, INCLUDING future ones. A client on that list would see every
+    // job, every lead and every other client's work, and could delete tasks.
+    // Clients belong on the per-notepad share dialog and nowhere else.
+    const grantClient = await request(app).post('/api/checklists/access/grant').set('Authorization', OWNER).send({ user_id: 804 });
+    ok(grantClient.status === 403, '4g: a CLIENT id is refused by the server, not just hidden from the picker', String(grantClient.status));
+    ok(grantClient.body.code === 'NOTEPAD_GRANT_NOT_ELIGIBLE', '4g: and the refusal names itself', JSON.stringify(grantClient.body));
+    const [clientAccess] = await conn.query('SELECT 1 FROM notepad_access WHERE user_id = 804');
+    ok(clientAccess.length === 0, '4g: no allowlist row was written for the client');
+
+    // The picker must not offer them either — belt as well as braces.
+    const cands4g = await request(app).get('/api/checklists/access/candidates').set('Authorization', OWNER);
+    const candIds = (cands4g.body?.data || []).map((c) => Number(c.id));
+    ok(!candIds.includes(804) && !candIds.includes(803),
+      '4g: the picker offers employees and family only — no clients, no subcontractors',
+      JSON.stringify(candIds));
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);
