@@ -7,7 +7,7 @@ const { getTimeStamp, timeStampFor, getUserTz } = require('../common/timdate');
 const multer = require('multer');
 const path = require('path');
 const logger = require('../common/logger');
-const { getAccessMode, isSameAccount } = require('../utils/access');
+const { getAccessMode, isSameAccount, resolveOwnerId } = require('../utils/access');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
 const { getSectionAccess } = require('../services/notepadAccess');
@@ -331,6 +331,9 @@ const createChecklistSectionSchema = Joi.object({
   shared_with_user_id: Joi.number().allow(null).optional(),
   // Optional job attached to the whole notepad (null = none).
   job_id: Joi.number().integer().positive().allow(null).optional(),
+  // A notepad can hang off a LEAD as well as a job. They are mutually
+  // exclusive: attaching one detaches the other, below.
+  lead_id: Joi.number().integer().positive().allow(null).optional(),
   sort_order: Joi.number().integer().min(0).allow(null).optional(),
 });
 
@@ -685,6 +688,31 @@ router.put('/sections/:id', auth.authenticateToken, async (req, res) => {
         }
         fields.push('job_id = ?');
         values.push(jobRes.jobId);
+      }
+
+      // Attach / detach a LEAD (null = detach). A notepad belongs to a job or
+      // a lead, never both — a bid that becomes a job is repointed, not
+      // duplicated (§5) — so setting one clears the other.
+      if (payload.lead_id !== undefined) {
+        await ensureNotepadFlowColumns(connection);
+        if (payload.lead_id === null) {
+          fields.push('lead_id = ?');
+          values.push(null);
+        } else {
+          const owner = Number(await resolveOwnerId(signedin_user, connection));
+          const [[lead]] = await connection.query(
+            'SELECT id, user_id FROM leads WHERE id = ? LIMIT 1',
+            [Number(payload.lead_id)],
+          );
+          const leadOwner = lead ? Number(await resolveOwnerId(Number(lead.user_id), connection)) : null;
+          if (!lead || leadOwner !== owner) {
+            return res.status(403).json({ success: false, message: 'That lead is not in your account.' });
+          }
+          fields.push('lead_id = ?');
+          values.push(Number(payload.lead_id));
+          fields.push('job_id = ?');
+          values.push(null);
+        }
       }
 
       if (!fields.length) {
