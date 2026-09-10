@@ -493,6 +493,32 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok((bill3bHub.body?.data || []).some((pad) => pad.title === 'No Job Assigned'),
       "3c: every user gets a 'No Job Assigned' pad, off-list included",
       JSON.stringify((bill3bHub.body?.data || []).map((pad) => pad.title)));
+
+    // ── 16. 3e — ONE shared order drives Notepads AND My Tasks ──────────────
+    // Drag a card on Notepads and My Tasks must present the same jobs in the
+    // same sequence. The owner arranges their work once, not twice.
+    const order3eHub = await request(app).get('/api/checklists/hub').set('Authorization', OWNER);
+    const jobPads = (order3eHub.body?.data || []).filter((pad) => pad.job_id != null);
+    if (jobPads.length >= 2) {
+      // Reverse the current order and save it.
+      const reversed = jobPads.map((pad) => Number(pad.id)).reverse();
+      const saved = await request(app).put('/api/checklists/sections/order').set('Authorization', OWNER).send({ order: reversed });
+      ok(saved.status === 200, '3e: the owner reorders their notepad cards', String(saved.status));
+
+      const mt = await request(app).get('/api/tasks/my-tasks').set('Authorization', OWNER);
+      const padJobOrder = reversed
+        .map((id) => jobPads.find((pad) => Number(pad.id) === id))
+        .map((pad) => Number(pad.job_id));
+      const mtJobOrder = (mt.body?.data || []).filter((g) => g.job_id != null && !g.is_lead).map((g) => Number(g.job_id));
+      // My Tasks only holds the jobs that have tasks on them, so compare the
+      // relative sequence rather than demanding identical lists.
+      const expected = padJobOrder.filter((id) => mtJobOrder.includes(id));
+      ok(JSON.stringify(mtJobOrder) === JSON.stringify(expected),
+        '3e: My Tasks groups follow the notepad card order, not the alphabet',
+        `mytasks=${JSON.stringify(mtJobOrder)} pads=${JSON.stringify(expected)}`);
+    } else {
+      ok(true, '3e: skipped — the fixture has fewer than two job pads to reorder');
+    }
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);

@@ -191,15 +191,55 @@ router.get('/my-tasks', auth.authenticateToken, requireNotepadMyTasks, async (re
         byJob.get(key).tasks.push(t);
       }
 
-      // Legacy bucket first when it has anything in it, then the job groups in a
-      // STABLE alphabetical order — deliberately NOT influenced by starring. If
-      // group order tracked the star sort, starring one Lynes task would yank
-      // the whole Lynes header above the others. Stars move a task inside its
-      // own group only.
+      // ── 3e — ONE SHARED PER-USER ORDER DRIVES BOTH PAGES ──────────────────
+      //
+      // Dragging a card on Notepads writes checklist_section_order. My Tasks
+      // reads the SAME table, so the two pages present the same jobs in the
+      // same sequence and the user only has to arrange their work once.
+      //
+      // Alphabetical stays as the tie-breaker for anything the user has never
+      // dragged, so a new job still lands somewhere predictable instead of at
+      // an arbitrary position.
+      const rankByJob = new Map();
+      const rankByLead = new Map();
+      try {
+        const [orderRows] = await connection.query(
+          `SELECT s.job_id, s.lead_id, COALESCE(o.sort_order, s.sort_order, 0) AS sort_order
+             FROM checklist_sections s
+             LEFT JOIN checklist_section_order o ON o.section_id = s.id AND o.user_id = ?
+            WHERE s.job_id IS NOT NULL OR s.lead_id IS NOT NULL`,
+          [uid],
+        );
+        for (const r of orderRows) {
+          // A user can see more than one pad for the same job (their private
+          // one and the company one). Lowest wins, so the card they actually
+          // dragged decides.
+          const target = r.job_id != null ? rankByJob : rankByLead;
+          const key = Number(r.job_id != null ? r.job_id : r.lead_id);
+          const val = Number(r.sort_order || 0);
+          if (!target.has(key) || val < target.get(key)) target.set(key, val);
+        }
+      } catch (e) {
+        // No order table yet, or a read failure. Fall through to alphabetical
+        // rather than failing the page: a list in the wrong order still works.
+        logger.error('my-tasks shared-order read failed, using alphabetical: ' + e.message);
+      }
+
+      // The NO JOB ASSIGNED bucket is first by default (3d) and only renders
+      // when it has something in it.
       if (noJob.tasks.length) groups.push(noJob);
-      const jobGroups = [...byJob.values()].sort((a, b) =>
-        String(a.job_name || '').localeCompare(String(b.job_name || ''), undefined, { sensitivity: 'base' }),
-      );
+
+      const UNRANKED = Number.MAX_SAFE_INTEGER;
+      const rankOf = (g) => {
+        const m = g.is_lead ? rankByLead : rankByJob;
+        const r = m.get(Number(g.job_id));
+        return r == null ? UNRANKED : r;
+      };
+      const jobGroups = [...byJob.values()].sort((a, b) => {
+        const ra = rankOf(a), rb = rankOf(b);
+        if (ra !== rb) return ra - rb;
+        return String(a.job_name || '').localeCompare(String(b.job_name || ''), undefined, { sensitivity: 'base' });
+      });
       for (const g of jobGroups) groups.push(g);
 
       res.json({ success: true, data: groups });
