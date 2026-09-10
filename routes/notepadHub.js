@@ -1148,7 +1148,7 @@ router.get('/items/:id/photos', auth.authenticateToken, requireNotepadMyTasks, a
       const found = await itemSectionAccess(connection, req.params.id, uid);
       if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
       const [rows] = await connection.query(
-        'SELECT id, filename, uploaded_by, created_at FROM checklist_item_images WHERE item_id = ? ORDER BY id ASC',
+        'SELECT id, filename, uploaded_by, created_at, mime, original_name, job_document_id FROM checklist_item_images WHERE item_id = ? ORDER BY id ASC',
         [Number(req.params.id)],
       );
       res.json({ success: true, data: rows });
@@ -1175,12 +1175,12 @@ router.post(
         if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
         for (const f of files) {
           await connection.query(
-            'INSERT INTO checklist_item_images (item_id, filename, uploaded_by) VALUES (?, ?, ?)',
-            [Number(req.params.id), f.filename, uid],
+            'INSERT INTO checklist_item_images (item_id, filename, uploaded_by, mime, original_name) VALUES (?, ?, ?, ?, ?)',
+            [Number(req.params.id), f.filename, uid, f.mimetype || null, f.originalname || null],
           );
         }
         const [rows] = await connection.query(
-          'SELECT id, filename, uploaded_by, created_at FROM checklist_item_images WHERE item_id = ? ORDER BY id ASC',
+          'SELECT id, filename, uploaded_by, created_at, mime, original_name, job_document_id FROM checklist_item_images WHERE item_id = ? ORDER BY id ASC',
           [Number(req.params.id)],
         );
         res.status(201).json({ success: true, data: rows });
@@ -1322,6 +1322,109 @@ router.post('/items/:id/notes', auth.authenticateToken, requireNotepadMyTasks, a
     });
   } catch (err) {
     logger.error('notepad item note write error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C24 — ATTACH A PLAN OR PDF FROM THE JOB'S FILES
+//
+// Deliberately a LINK, not an upload. Plans live in the job's Files and are
+// versioned there; copying a plan set onto a notepad row would leave two
+// files that drift apart, and the field would have no way to tell which was
+// current. Photos are still uploaded, because a photo taken on a phone has no
+// other home.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** The job (or lead) a row's notepad hangs off, for scoping the file list. */
+async function rowJobContext(connection, itemId) {
+  const [[r]] = await connection.query(
+    `SELECT s.job_id, s.lead_id
+       FROM check_list c
+       JOIN checklist_sections s ON s.id = c.section_id
+      WHERE c.id = ? LIMIT 1`,
+    [Number(itemId)],
+  );
+  return r || { job_id: null, lead_id: null };
+}
+
+router.get('/items/:id/job-files', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const found = await itemSectionAccess(connection, req.params.id, uid);
+      if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+
+      const ctx = await rowJobContext(connection, req.params.id);
+      if (!ctx.job_id) {
+        // No job behind this notepad, so there are no job files to offer. Not
+        // an error — the picker simply says so.
+        return res.json({ success: true, data: [], reason: 'NO_JOB' });
+      }
+      const [rows] = await connection.query(
+        'SELECT id, name, path, type FROM job_documents WHERE job_id = ? ORDER BY id DESC',
+        [Number(ctx.job_id)],
+      );
+      res.json({ success: true, data: rows });
+    });
+  } catch (err) {
+    logger.error('notepad row job-files read error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+const linkFilesSchema = Joi.object({
+  document_ids: Joi.array().items(Joi.number().integer().positive()).min(1).max(20).required(),
+});
+
+router.post('/items/:id/job-files', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  const { error, value } = linkFilesSchema.validate(req.body || {});
+  if (error) return res.status(400).json({ success: false, message: error.details[0].message });
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const found = await itemSectionAccess(connection, req.params.id, uid);
+      if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+
+      const ctx = await rowJobContext(connection, req.params.id);
+      if (!ctx.job_id) {
+        return res.status(400).json({ success: false, code: 'NO_JOB', message: 'This notepad has no job to take files from.' });
+      }
+      // Only documents belonging to THIS job. A document id from another job
+      // is refused outright rather than silently ignored.
+      const ph = value.document_ids.map(() => '?').join(',');
+      const [docs] = await connection.query(
+        `SELECT id, name, path, type FROM job_documents WHERE job_id = ? AND id IN (${ph})`,
+        [Number(ctx.job_id), ...value.document_ids],
+      );
+      if (docs.length !== value.document_ids.length) {
+        return res.status(403).json({ success: false, message: 'Those files are not on this job.' });
+      }
+      for (const d of docs) {
+        // Idempotent: linking the same plan twice is a no-op, not a duplicate.
+        const [[dupe]] = await connection.query(
+          'SELECT id FROM checklist_item_images WHERE item_id = ? AND job_document_id = ? LIMIT 1',
+          [Number(req.params.id), Number(d.id)],
+        );
+        if (dupe) continue;
+        await connection.query(
+          `INSERT INTO checklist_item_images (item_id, filename, uploaded_by, mime, original_name, job_document_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [Number(req.params.id), d.path || '', uid, null, d.name || null, Number(d.id)],
+        );
+      }
+      const [rows] = await connection.query(
+        `SELECT id, filename, uploaded_by, created_at, mime, original_name, job_document_id
+           FROM checklist_item_images WHERE item_id = ? ORDER BY id ASC`,
+        [Number(req.params.id)],
+      );
+      res.status(201).json({ success: true, data: rows });
+    });
+  } catch (err) {
+    logger.error('notepad row job-file link error: ' + err.message);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

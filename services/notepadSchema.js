@@ -234,6 +234,22 @@ async function ensureNotepadSchema(connection) {
     `),
   );
 
+  // ── C24: an attachment is not always a photograph.
+  //
+  // A set of plans or a spec PDF belongs on the same row as the pictures —
+  // the field crew opens whichever is relevant. Storing the mime type lets
+  // the client draw a thumbnail for an image and a document tile for a PDF
+  // instead of guessing from the file extension.
+  await run('checklist_item_images mime column', async () => {
+    await addColumn(connection, 'checklist_item_images', 'mime', 'VARCHAR(100) NULL DEFAULT NULL');
+    await addColumn(connection, 'checklist_item_images', 'original_name', 'VARCHAR(255) NULL DEFAULT NULL');
+    // C24: a LINK to an existing job document, not a copy of it. Plans live in
+    // the job's Files and are versioned there; duplicating a 40MB plan set
+    // onto a notepad row would leave two files that drift apart. When this is
+    // set, filename/mime/original_name are only a display cache.
+    await addColumn(connection, 'checklist_item_images', 'job_document_id', 'INT NULL DEFAULT NULL');
+  });
+
   // ── §10 the two-way note thread. Author + date per note, both directions.
   await run('task_notes', () =>
     connection.query(`
