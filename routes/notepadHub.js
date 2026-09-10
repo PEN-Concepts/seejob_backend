@@ -33,6 +33,7 @@ const {
   getSectionAccess,
   isShareable,
   ensureNoJobNotepad,
+  ensurePrivatePadsForDelegatedWork,
 } = require('../services/notepadAccess');
 
 // Contact categories (utils/access.js documents the model):
@@ -99,6 +100,14 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
       // a page read, which is the only way "every user gets one" is true for
       // accounts that existed before this shipped.
       await ensureNoJobNotepad(connection, uid);
+
+      // 3b/5b: an off-list user (a lower-level employee, or a subcontractor,
+      // who is not an account member at all) gets a private pad for each job
+      // they actually have delegated work on. Without it their work would be
+      // re-homed into 'No Job Assigned' — visible, but filed under the wrong
+      // heading. Bounded by the work they have been given, not by the size of
+      // the account.
+      if (!full) await ensurePrivatePadsForDelegatedWork(connection, uid);
 
       // Visibility, expressed once in SQL so a direct API call obeys exactly the
       // same rule the UI does.

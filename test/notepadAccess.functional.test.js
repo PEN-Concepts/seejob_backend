@@ -537,6 +537,32 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok(!candIds.includes(804) && !candIds.includes(803),
       '4g: the picker offers employees and family only — no clients, no subcontractors',
       JSON.stringify(candIds));
+
+    // ── 18. 5b — A SUBCONTRACTOR IS TREATED AS A LOWER-LEVEL EMPLOYEE ───────
+    // 803 is category 2. They can never be granted notepad access (asserted
+    // above), so 3a and 3b apply to them automatically: no My Tasks page, and
+    // delegated work inside their own notepad. What has to be checked is the
+    // FILING — a subcontractor is not an account member, so nothing ever made
+    // them a job pad, and their work would otherwise land in 'No Job Assigned'.
+    const forSub = await request(app).post('/api/checklists/create').set('Authorization', OWNER).send({ type: 'task', name: 'Rough-in the panel', section_id: companyPadId });
+    const forSubId = Number(forSub.body?.data?.id || 0);
+    const subDel = await request(app).post(`/api/checklists/items/${forSubId}/delegate`).set('Authorization', OWNER).send({ job_id: 900, assignee_id: 803 });
+    ok(subDel.status === 201, '5b: the owner delegates a company row to a subcontractor', JSON.stringify(subDel.body));
+
+    const subTasks = await request(app).get('/api/tasks/my-tasks').set('Authorization', tok(803));
+    ok(subTasks.status === 403, '5b: a subcontractor gets NO My Tasks page, same as a lower-level employee', String(subTasks.status));
+
+    const subHub = await request(app).get('/api/checklists/hub').set('Authorization', tok(803));
+    const subPads = subHub.body?.data || [];
+    const subHost = subPads.find((pad) => (pad.items || []).some((r) => Number(r.id) === forSubId));
+    ok(!!subHost, '5b: the delegated row reaches the subcontractor in their own notepad',
+      JSON.stringify(subPads.map((pad) => pad.title)));
+    ok(subHost && Number(subHost.job_id) === 900,
+      "5b: and it is filed under the JOB, not dumped in 'No Job Assigned'",
+      JSON.stringify(subHost && { title: subHost.title, job_id: subHost.job_id }));
+    const subRow = subHost && (subHost.items || []).find((r) => Number(r.id) === forSubId);
+    ok(subRow && subRow.can_edit === false && subRow.can_delete === false && subRow.can_delegate === false,
+      '5b: check off, note and photo only — nothing else, exactly as for an employee');
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);

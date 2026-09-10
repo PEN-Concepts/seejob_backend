@@ -31,9 +31,30 @@ const { ensureNotepadSchema } = require('./notepadSchema');
  */
 const NO_JOB_TITLE = 'No Job Assigned';
 
-/** The account this user belongs to. Employees resolve to their GC. */
+/**
+ * The account this user belongs to.
+ *
+ * DELIBERATELY WIDER THAN resolveOwnerId. That shared helper only walks up for
+ * category-1 employees, so a SUBCONTRACTOR or a CLIENT resolves to themselves —
+ * correct for billing, where a subcontractor must not inherit the GC's plan,
+ * and wrong here, where it made them look like their own account owner and
+ * therefore FULL ACCESS (5b). A subcontractor would have been handed a My Tasks
+ * page and an empty notepad instead of the GC's delegated work.
+ *
+ * For notepad purposes the rule is simply: whoever created you owns the account
+ * you belong to. Kept local so nothing about billing or entitlement moves.
+ */
 async function accountOwnerOf(connection, userId) {
-  return Number(await resolveOwnerId(Number(userId), connection));
+  const uid = Number(userId);
+  const resolved = Number(await resolveOwnerId(uid, connection));
+  if (resolved !== uid) return resolved;
+  try {
+    const [[u]] = await connection.query('SELECT created_by FROM \`user\` WHERE id = ? LIMIT 1', [uid]);
+    if (u && u.created_by && Number(u.created_by) !== uid) return Number(u.created_by);
+  } catch (e) {
+    /* fall through — treating them as their own owner is the safe default */
+  }
+  return uid;
 }
 
 /** True only when the caller IS the account owner (grants are owner-only). */
@@ -95,6 +116,60 @@ async function listAllowlist(connection, ownerId) {
       granted_at: r.granted_at,
     };
   });
+}
+
+/**
+ * 3b/5b — a private pad for every job an OFF-LIST user actually has work on.
+ *
+ * ensureAutoNotepads only back-fills for ACCOUNT MEMBERS (the owner plus
+ * category-1 employees). A subcontractor is category 2, so it never made them
+ * a pad at all — and without one, a row delegated to them would be re-homed
+ * into their "No Job Assigned" card, which is technically visible but filed
+ * under the wrong heading.
+ *
+ * This creates a pad ONLY for a job or lead where a row is already delegated
+ * to this user. It is bounded by the work they have been given, not by the
+ * size of the account, so it stays cheap enough for the page read.
+
+ * Idempotent: the NOT EXISTS makes a repeat call a no-op.
+ */
+async function ensurePrivatePadsForDelegatedWork(connection, userId) {
+  const uid = Number(userId);
+  const owner = await accountOwnerOf(connection, uid);
+
+  // Jobs.
+  await connection.query(
+    `INSERT INTO checklist_sections
+        (owner_user_id, shared_with_user_id, type, title, sort_order, job_id, lead_id, origin, scope, account_owner_id)
+     SELECT DISTINCT ?, NULL, 'task', j.name, 0, j.id, NULL, 'auto', 'private', ?
+       FROM check_list c
+       JOIN checklist_sections s ON s.id = c.section_id
+       JOIN \`job\` j ON j.id = s.job_id
+      WHERE c.delegated_to = ?
+        AND COALESCE(s.account_owner_id, s.owner_user_id) = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM checklist_sections x
+           WHERE x.owner_user_id = ? AND x.origin = 'auto' AND x.scope = 'private' AND x.job_id = j.id
+        )`,
+    [uid, owner, uid, owner, uid],
+  );
+
+  // Leads — a bid can carry delegated work too.
+  await connection.query(
+    `INSERT INTO checklist_sections
+        (owner_user_id, shared_with_user_id, type, title, sort_order, job_id, lead_id, origin, scope, account_owner_id)
+     SELECT DISTINCT ?, NULL, 'task', l.lead_name, 0, NULL, l.id, 'auto', 'private', ?
+       FROM check_list c
+       JOIN checklist_sections s ON s.id = c.section_id
+       JOIN leads l ON l.id = s.lead_id
+      WHERE c.delegated_to = ?
+        AND COALESCE(s.account_owner_id, s.owner_user_id) = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM checklist_sections x
+           WHERE x.owner_user_id = ? AND x.origin = 'auto' AND x.scope = 'private' AND x.lead_id = l.id
+        )`,
+    [uid, owner, uid, owner, uid],
+  );
 }
 
 /**
@@ -351,6 +426,7 @@ module.exports = {
   listAllowlist,
   ensureAutoNotepads,
   ensureNoJobNotepad,
+  ensurePrivatePadsForDelegatedWork,
   NO_JOB_TITLE,
   createAutoNotepadFor,
   repointNotepadLeadToJob,
