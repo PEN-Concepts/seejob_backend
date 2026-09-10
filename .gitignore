@@ -18,3 +18,6 @@ config/serviceAccountKey.json
 *-adminsdk-*.json
 *serviceAccount*.json
 *serviceaccount*.json
+
+# One-shot patch scripts written during a session; never part of the app.
+scratch-*.js
