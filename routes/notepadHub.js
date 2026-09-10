@@ -118,7 +118,13 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
       // the O(jobs) back-fill the note above retired — cheap enough to sit on
       // a page read, which is the only way "every user gets one" is true for
       // accounts that existed before this shipped.
-      await ensureNoJobNotepad(connection, uid);
+      //
+      // C40: except a SUBCONTRACTOR with no plan of their own. That pad is
+      // for their own work, which is the paid half of the product; the free
+      // half is the work the GC sends them.
+      const callerIsSub = await isSubcontractor(connection, uid);
+      const subMayOwnWork = !callerIsSub || (await subCanStartNotepad(connection, uid));
+      if (subMayOwnWork) await ensureNoJobNotepad(connection, uid);
 
       // 3b/5b: an off-list user (a lower-level employee, or a subcontractor,
       // who is not an account member at all) gets a private pad for each job
@@ -321,7 +327,7 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
       // delegated work on their own pad too, but they may still keep private
       // notes there — that is what the §8 merge is for. Only a sub gets the
       // read-only, orange 'this list was sent to you' treatment.
-      const callerIsSub = await isSubcontractor(connection, uid);
+      // (callerIsSub is resolved once, near the top of this handler.)
       // C26: which of MY pads are showing somebody else's delegated work.
       // A pad in that state is a RECEIVED list: the company owns what is on
       // it, so it is read-only apart from check off, note and photo.
@@ -406,7 +412,14 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
         }
       }
 
-      const data = sections.map((s) => {
+      // C40: HIDDEN, never deleted. A sub who lapses keeps whatever they
+      // wrote — it reappears intact the day they subscribe. Deleting a
+      // person's notes because their card expired would be indefensible.
+      const visibleSections = subMayOwnWork
+        ? sections
+        : sections.filter((x) => !(x.job_id == null && x.lead_id == null));
+
+      const data = visibleSections.map((s) => {
         const isLead = s.lead_id != null;
         return {
           ...s,
@@ -446,6 +459,11 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
         access: {
           full_access: full,
           is_account_owner: iAmOwner,
+          // C39: may this person start a notepad of their own? Only a
+          // subcontractor is ever told no, and only when they have no plan
+          // and no trial. Sent so the client can hide the button; the server
+          // refuses independently.
+          can_create_notepad: subMayOwnWork,
           can_delegate: full, // §6 "This IS the delegate permission"
           can_share: full,
           allowlist,
@@ -1168,6 +1186,31 @@ module.exports = router;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** The section a row belongs to, plus how this caller relates to it. */
+/**
+ * C39 mirror of the server-side gate in routes/checklists.js, so the client
+ * can hide a button it would only be refused for pressing. Deliberately NOT
+ * getAccessMode(): role 12 is in NEVER_GATED_ROLES, which is what keeps
+ * received work free, so that call always answers "paid" for a sub.
+ */
+const SUB_TRIAL_DAYS = 60;
+async function subCanStartNotepad(connection, userId) {
+  try {
+    const [subs] = await connection.query(
+      "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
+      [Number(userId)],
+    );
+    if (subs.length) return true;
+    const [[u]] = await connection.query(
+      'SELECT created_at FROM `user` WHERE id = ? LIMIT 1',
+      [Number(userId)],
+    );
+    if (!u || !u.created_at) return true;   // unknown age: fail OPEN
+    return Date.now() - new Date(u.created_at).getTime() <= SUB_TRIAL_DAYS * 86400000;
+  } catch (e) {
+    return true;   // never hide a control because a lookup hiccuped
+  }
+}
+
 async function itemSectionAccess(connection, itemId, uid) {
   const [[row]] = await connection.query(
     'SELECT id, section_id, created_by, delegated_to, delegated_task_id FROM check_list WHERE id = ? LIMIT 1',

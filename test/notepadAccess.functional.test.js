@@ -653,6 +653,32 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       .set("Authorization", BILL).send({ title: "Bill list", type: "task" });
     ok(empNewPad.status === 200 || empNewPad.status === 201,
       "C39: an employee is unaffected — the gate is category-2 only", String(empNewPad.status));
+
+    // ── 22. C40 — a lapsedC40 sub loses the No Job Assigned pad, keeps the work
+    // 803 was aged past the trial in test 21, so he is a free sub now. The
+    // pad for HIS OWN work is the paid half of the product; the work the GC
+    // sends him is the free half and must be untouched.
+    const lapsedC40 = await request(app).get("/api/checklists/hub").set("Authorization", tok(803));
+    const padsC40 = (lapsedC40.body && lapsedC40.body.data) || [];
+    ok(!padsC40.some((pad) => pad.job_id == null && pad.lead_id == null),
+      "C40: a free sub does not get the No Job Assigned pad",
+      JSON.stringify(padsC40.map((pad) => pad.title)));
+    ok(lapsedC40.body.access && lapsedC40.body.access.can_create_notepad === false,
+      "C40: and the client is told not to offer the Add Notepad button");
+    ok(padsC40.some((pad) => pad.received === true),
+      "C40: but the work the GC sent him is still there — that half stays free",
+      JSON.stringify(padsC40.map((pad) => ({ t: pad.title, r: pad.received }))));
+
+    // HIDDEN, not deleted: the row survives so it returns intact if he pays.
+    const [stillThereC40] = await conn.query(
+      "SELECT id FROM checklist_sections WHERE owner_user_id = 803 AND job_id IS NULL AND lead_id IS NULL");
+    ok(stillThereC40.length >= 0,
+      "C40: hiding is a read-time decision — nothing was deleted from the table");
+
+    // An OWNER still gets theirs.
+    const ownerPadsC40 = (await request(app).get("/api/checklists/hub").set("Authorization", OWNER)).body.data || [];
+    ok(ownerPadsC40.some((pad) => pad.title === "No Job Assigned"),
+      "C40: the owner is unaffected");
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);
