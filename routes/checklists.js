@@ -53,6 +53,36 @@ async function resolveBillingUserId(connection, userId) {
   return billingUserId;
 }
 
+/**
+ * C39 — does this SUBCONTRACTOR hold a plan of their own?
+ *
+ * Deliberately NOT getAccessMode(). Role 12 sits in NEVER_GATED_ROLES, which
+ * is what makes receiving work free forever — a sub can always tick, note and
+ * photograph the GC's tasks whatever their billing state, because the GC's
+ * crew depends on them working. Asking getAccessMode here would always answer
+ * "paid" and the gate would never close.
+ *
+ * So this asks the narrower question directly: an active subscription of
+ * their own, or their own account still inside the trial window. It reads the
+ * SUB's row, never the GC's — a sub must not inherit the GC's subscription.
+ */
+const SUB_TRIAL_DAYS = 60;
+async function subHasOwnPlan(connection, userId) {
+  const [subs] = await connection.query(
+    "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
+    [Number(userId)],
+  );
+  if (subs.length) return true;
+
+  const [[u]] = await connection.query(
+    'SELECT created_at FROM `user` WHERE id = ? LIMIT 1',
+    [Number(userId)],
+  );
+  if (!u || !u.created_at) return true;   // unknown age: fail OPEN, never lock out
+  const age = Date.now() - new Date(u.created_at).getTime();
+  return age <= SUB_TRIAL_DAYS * 24 * 60 * 60 * 1000;
+}
+
 async function getChecklistAccess(connection, userId) {
   const [userRows] = await connection.query(
     'SELECT id, role FROM user WHERE id = ? LIMIT 1',
@@ -394,6 +424,32 @@ router.post('/sections', auth.authenticateToken, async (req, res) => {
       }
       if (!access.canWrite) {
         return res.status(403).json({ success: false, message: 'Your plan does not allow modifying Clipboard.' });
+      }
+
+      // ── C39: A SUBCONTRACTOR NEEDS THEIR OWN PLAN TO START A NOTEPAD ─────
+      //
+      // A sub reaches this app through somebody else's job. Receiving work
+      // costs them nothing and always will — check off, note and photo stay
+      // free forever, because the GC's crew depends on them working.
+      //
+      // Starting their OWN notepad is a different thing: that is using the
+      // product for their own business, and it needs their own paid plan or
+      // an active trial. Note this reads the SUB's access mode, never the
+      // GC's — resolveOwnerId deliberately leaves a category-2 user pointing
+      // at themselves so they cannot inherit the GC's subscription.
+      try {
+        if (await isSubcontractor(connection, signedin_user) &&
+            !(await subHasOwnPlan(connection, signedin_user))) {
+          return res.status(403).json({
+            success: false,
+            code: 'SUB_NEEDS_PLAN',
+            message: 'Start your own plan or trial to create your own notepads. Work sent to you stays free.',
+          });
+        }
+      } catch (e) {
+        // Fail OPEN, like the rest of the access model: a lookup that errors
+        // must not stop somebody working.
+        logger.error('subcontractor notepad-create check failed: ' + e.message);
       }
 
       const payload = req.body || {};

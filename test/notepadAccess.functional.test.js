@@ -627,6 +627,32 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // The OWNER is unaffected.
     const ownerCreateC26 = await request(app).post("/api/checklists/create").set("Authorization", OWNER).send({ type: "task", name: "still fine", section_id: companyPadId });
     ok(ownerCreateC26.status === 200 || ownerCreateC26.status === 201, "C26: the owner can still add tasks", String(ownerCreateC26.status));
+
+    // ── 21. C39 — a sub needs their own plan to START a notepad ────────────
+    // Receiving work is free forever: 803 can tick, note and photograph the
+    // company's tasks whatever his plan. Creating his OWN notepad is using
+    // the product for his own business and needs his own plan or trial.
+    //
+    // The fixture gives 803 no subscription, so he is expired_free here.
+    // Age his account past the trial window so getAccessMode returns
+    // expired_free. Without this he looks like a day-one trial and the gate
+    // correctly lets him through — which would make this test prove nothing.
+    await conn.query("UPDATE `user` SET created_at = DATE_SUB(NOW(), INTERVAL 120 DAY) WHERE id = 803");
+    const subNewPad = await request(app).post("/api/checklists/sections")
+      .set("Authorization", tok(803)).send({ title: "My own list", type: "task" });
+    ok(subNewPad.status === 403, "C39: a sub with no plan cannot create a notepad", String(subNewPad.status));
+
+    // ...and the free things stay free. Same user, same moment.
+    const subStillNotes = await request(app).post("/api/checklists/items/" + forSubId + "/notes")
+      .set("Authorization", tok(803)).send({ body: "Still able to answer." });
+    ok(subStillNotes.status === 201,
+      "C39: receiving work stays free — he can still note on the company task", String(subStillNotes.status));
+
+    // An EMPLOYEE is not a subcontractor and is not gated by this.
+    const empNewPad = await request(app).post("/api/checklists/sections")
+      .set("Authorization", BILL).send({ title: "Bill list", type: "task" });
+    ok(empNewPad.status === 200 || empNewPad.status === 201,
+      "C39: an employee is unaffected — the gate is category-2 only", String(empNewPad.status));
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);
