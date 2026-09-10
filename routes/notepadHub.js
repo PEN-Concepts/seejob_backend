@@ -50,6 +50,7 @@ const {
   listAllowlist,
   getSectionAccess,
   isShareable,
+  isSubcontractor,
   ensureNoJobNotepad,
   ensurePrivatePadsForDelegatedWork,
 } = require('../services/notepadAccess');
@@ -316,6 +317,15 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
       // came from a pad with no job behind it — it lands in their
       // 'No Job Assigned' pad, which 3c guarantees exists. Nothing is dropped:
       // a task you cannot see is worse than one filed in the wrong place.
+      // C26: RECEIVED applies to SUBCONTRACTORS. An off-list employee sees
+      // delegated work on their own pad too, but they may still keep private
+      // notes there — that is what the §8 merge is for. Only a sub gets the
+      // read-only, orange 'this list was sent to you' treatment.
+      const callerIsSub = await isSubcontractor(connection, uid);
+      // C26: which of MY pads are showing somebody else's delegated work.
+      // A pad in that state is a RECEIVED list: the company owns what is on
+      // it, so it is read-only apart from check off, note and photo.
+      const receivedPads = new Set();
       if (borrowed.length) {
         const padForJob = new Map();
         const padForLead = new Map();
@@ -332,6 +342,7 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
             (it.src_lead_id != null && padForLead.get(Number(it.src_lead_id))) ||
             noJobPadId;
           if (!target) continue;
+          receivedPads.add(target);
           if (!bySection.has(target)) bySection.set(target, []);
           bySection.get(target).push({
             ...it,
@@ -351,6 +362,7 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
 
       // C25: plan count per section, so the header pill can carry a number.
       const planCount = new Map();
+      const inheritedPlanCount = new Map();
       if (sections.length) {
         const sph = sections.map(() => '?').join(',');
         try {
@@ -362,6 +374,32 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           for (const r of pc) planCount.set(Number(r.section_id), Number(r.n || 0));
         } catch (e) {
           logger.error('notepad hub plan-count read failed: ' + e.message);
+        }
+      }
+
+      // C26: a received pad inherits the company pad's PLANS for the same
+      // job. The sub cannot see the company notepad, but the drawings are
+      // exactly what they need to do the work, so the plans travel with the
+      // task rather than with the pad.
+      if (receivedPads.size) {
+        try {
+          const jobIds = sections
+            .filter((x) => receivedPads.has(Number(x.id)) && x.job_id != null)
+            .map((x) => Number(x.job_id));
+          if (jobIds.length) {
+            const jph = jobIds.map(() => '?').join(',');
+            const [inherited] = await connection.query(
+              `SELECT s2.job_id, COUNT(*) AS n
+                 FROM checklist_section_files f
+                 JOIN checklist_sections s2 ON s2.id = f.section_id
+                WHERE s2.job_id IN (${jph}) AND s2.scope = 'company'
+                GROUP BY s2.job_id`,
+              jobIds,
+            );
+            for (const r of inherited) inheritedPlanCount.set(Number(r.job_id), Number(r.n || 0));
+          }
+        } catch (e) {
+          logger.error('notepad hub inherited-plan read failed: ' + e.message);
         }
       }
 
@@ -378,6 +416,11 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           shared_with_anyone: Number(s.share_count || 0) > 0,
           items: bySection.get(Number(s.id)) || [],
           plan_count: planCount.get(Number(s.id)) || 0,
+          // C26: this pad is showing work the company delegated to me.
+          // Check off, note and photo only — no new tasks, no editing theirs.
+          received: callerIsSub && receivedPads.has(Number(s.id)),
+          // A received pad shows the company pad's plans for the same job.
+          inherited_plan_count: s.job_id != null ? (inheritedPlanCount.get(Number(s.job_id)) || 0) : 0,
         };
       });
 

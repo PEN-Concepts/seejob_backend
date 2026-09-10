@@ -590,6 +590,43 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const hubAfterNote = await request(app).get('/api/checklists/hub').set('Authorization', OWNER);
     const notedRow = (hubAfterNote.body?.data || []).flatMap((pad) => pad.items || []).find((r) => Number(r.id) === forBillId);
     ok(notedRow && notedRow.has_note === true, 'C19: a row note lights the paperclip', JSON.stringify(notedRow && { id: notedRow.id, has_note: notedRow.has_note }));
+
+    // ── 20. C26 — a RECEIVED notepad is read-only for new tasks ────────────
+    // 803 is the SUBCONTRACTOR, and 5b gave him delegated work on job 900.
+    // His pad for that job is a RECEIVED list: the company owns what is on
+    // it. He may tick, note and photograph — he may not invent a task there,
+    // because nobody who owns the work would ever see it.
+    //
+    // BILL (802) is an off-list EMPLOYEE and deliberately does NOT get this.
+    // His private notes on a job pad are exactly what the §8 merge folds
+    // into the company pad later, so blocking him would delete a feature to
+    // enforce a rule about a different audience.
+    const sub26 = await request(app).get('/api/checklists/hub').set('Authorization', tok(803));
+    const subPad = (sub26.body && sub26.body.data || []).find((pad) => pad.received === true);
+    ok(!!subPad, "C26: the subcontractor pad is flagged as RECEIVED",
+      JSON.stringify((sub26.body && sub26.body.data || []).map((pad) => ({ t: pad.title, r: pad.received }))));
+
+    const subCreate = await request(app).post('/api/checklists/create').set('Authorization', tok(803))
+      .send({ type: 'task', name: 'my own idea', section_id: subPad && subPad.id });
+    ok(subCreate.status === 403, "C26: he cannot add a task to a received notepad", String(subCreate.status));
+    ok(subCreate.body.code === "NOTEPAD_RECEIVED_READ_ONLY", "C26: and the refusal explains itself", JSON.stringify(subCreate.body));
+
+    // ...but what 3b grants him still works.
+    const subNote26 = await request(app).post("/api/checklists/items/" + forSubId + "/notes").set("Authorization", tok(803)).send({ body: "On it." });
+    ok(subNote26.status === 201, "C26: he can still add a note", String(subNote26.status));
+
+    // An off-list EMPLOYEE keeps their private notes — the merge depends on it.
+    const billHubC26 = await request(app).get("/api/checklists/hub").set("Authorization", BILL);
+    const billPad = (billHubC26.body && billHubC26.body.data || [])
+      .find((pad) => Number(pad.job_id) === 900 && Number(pad.owner_user_id) === 802);
+    const billCreate = await request(app).post("/api/checklists/create").set("Authorization", BILL)
+      .send({ type: "task", name: "my private note", section_id: billPad && billPad.id });
+    ok(billCreate.status === 200 || billCreate.status === 201,
+      "C26: an off-list EMPLOYEE can still keep private notes — the merge needs them", String(billCreate.status));
+
+    // The OWNER is unaffected.
+    const ownerCreateC26 = await request(app).post("/api/checklists/create").set("Authorization", OWNER).send({ type: "task", name: "still fine", section_id: companyPadId });
+    ok(ownerCreateC26.status === 200 || ownerCreateC26.status === 201, "C26: the owner can still add tasks", String(ownerCreateC26.status));
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);

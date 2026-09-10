@@ -57,6 +57,28 @@ async function accountOwnerOf(connection, userId) {
   return uid;
 }
 
+/**
+ * C26 — is this user a SUBCONTRACTOR (contact category 2)?
+ *
+ * The distinction matters because an off-list EMPLOYEE and an off-list
+ * SUBCONTRACTOR are not the same case. An employee keeps private notes on a
+ * job pad and those get merged into the company pad when they are granted
+ * access (§8). A subcontractor has no such path: the pad they see is the
+ * company's work sent to them, and a task they invented on it would be
+ * invisible to whoever owns the job.
+ */
+async function isSubcontractor(connection, userId) {
+  try {
+    const [[u]] = await connection.query(
+      'SELECT category FROM `user` WHERE id = ? LIMIT 1',
+      [Number(userId)],
+    );
+    return !!u && Number(u.category) === 2;
+  } catch (e) {
+    return false;   // fail OPEN: never lock someone out on a failed lookup
+  }
+}
+
 /** True only when the caller IS the account owner (grants are owner-only). */
 async function isAccountOwner(connection, userId) {
   return (await accountOwnerOf(connection, userId)) === Number(userId);
@@ -421,6 +443,7 @@ function isShareable(section) {
 module.exports = {
   accountOwnerOf,
   isAccountOwner,
+  isSubcontractor,
   isFullAccess,
   accountMemberIds,
   listAllowlist,

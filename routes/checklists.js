@@ -8,6 +8,7 @@ const multer = require('multer');
 const path = require('path');
 const logger = require('../common/logger');
 const { getAccessMode, isSameAccount, resolveOwnerId } = require('../utils/access');
+const { isFullAccess, isSubcontractor } = require('../services/notepadAccess');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
 const { getSectionAccess } = require('../services/notepadAccess');
@@ -924,6 +925,48 @@ router.post('/create', auth.authenticateToken, async (req, res) => {
         }
         if (normalizeChecklistType(section.type) !== normalizedType) {
           return res.status(400).json({ success: false, message: 'Checklist section type does not match item type' });
+        }
+
+        // ── C26: A RECEIVED NOTEPAD IS READ-ONLY FOR NEW TASKS ───────────
+        //
+        // A subcontractor (or any off-list worker) sees a pad that carries
+        // work the company delegated to them. They may tick it off, add a
+        // note and add a photo — that is the whole of 3b — but the list is
+        // the company's, and a task they invented on it would be invisible
+        // to the person who owns the work.
+        //
+        // Enforced HERE and not by hiding the entry bar: the bar is a
+        // courtesy, this is the rule.
+        try {
+          // SUBCONTRACTORS only. An off-list EMPLOYEE keeps their private
+          // notes on a job pad — that is what the §8 merge exists to fold
+          // into the company pad later, and blocking it would delete a
+          // whole feature to enforce a rule about a different audience.
+          const full = await isFullAccess(connection, signedin_user);
+          const sub = await isSubcontractor(connection, signedin_user);
+          if (!full && sub) {
+            const [[hasDelegated]] = await connection.query(
+              `SELECT 1 AS x
+                 FROM check_list c
+                 JOIN checklist_sections s2 ON s2.id = c.section_id
+                WHERE c.delegated_to = ?
+                  AND s2.job_id IS NOT NULL
+                  AND s2.job_id = (SELECT job_id FROM checklist_sections WHERE id = ?)
+                LIMIT 1`,
+              [signedin_user, Number(section_id)],
+            );
+            if (hasDelegated) {
+              return res.status(403).json({
+                success: false,
+                code: 'NOTEPAD_RECEIVED_READ_ONLY',
+                message: 'This list was sent to you. You can check items off, add a note or add a photo.',
+              });
+            }
+          }
+        } catch (e) {
+          // Never fail a create because this check could not run — the worst
+          // case is the pre-existing behaviour, not a broken notepad.
+          logger.error('received-pad create check failed: ' + e.message);
         }
       } else {
         section = await ensureDefaultSection(connection, signedin_user, normalizedType);
