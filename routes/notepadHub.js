@@ -367,6 +367,9 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
         const sph = sections.map(() => '?').join(',');
         try {
           const [pc] = await connection.query(
+            // Counts BOTH kinds of link. Counting only job_document_id left
+            // every lead notepad's badge reading zero while its plans dialog
+            // showed the files.
             `SELECT section_id, COUNT(*) AS n FROM checklist_section_files
               WHERE section_id IN (${sph}) GROUP BY section_id`,
             sections.map((x) => Number(x.id)),
@@ -1504,13 +1507,63 @@ router.post('/items/:id/job-files', auth.authenticateToken, requireNotepadMyTask
 // Files, and a duplicate here would drift from whatever the job holds.
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** The job behind a section, for scoping which documents may be offered. */
-async function sectionJobId(connection, sectionId) {
+/**
+ * What a section hangs off, for scoping which documents may be offered.
+ * A notepad belongs to a job OR a lead, never both, and each keeps its files
+ * in its own table.
+ */
+async function sectionSource(connection, sectionId) {
   const [[r]] = await connection.query(
-    'SELECT job_id FROM checklist_sections WHERE id = ? LIMIT 1',
+    'SELECT job_id, lead_id FROM checklist_sections WHERE id = ? LIMIT 1',
     [Number(sectionId)],
   );
-  return r && r.job_id ? Number(r.job_id) : null;
+  if (r && r.job_id) return { kind: 'job', id: Number(r.job_id) };
+  if (r && r.lead_id) return { kind: 'lead', id: Number(r.lead_id) };
+  return null;
+}
+
+/** The documents a source offers, normalised to one shape. */
+async function sourceDocuments(connection, src) {
+  if (!src) return [];
+  const table = src.kind === 'lead' ? 'lead_documents' : 'job_documents';
+  const col = src.kind === 'lead' ? 'lead_id' : 'job_id';
+  try {
+    const [rows] = await connection.query(
+      `SELECT id, name, path, type FROM ${table} WHERE ${col} = ? ORDER BY id DESC`,
+      [src.id],
+    );
+    return rows;
+  } catch (e) {
+    // lead_documents is absent on some installs. An empty list is the honest
+    // answer; a 500 would make the whole plans dialog look broken.
+    logger.error('notepad plans: ' + table + ' read failed: ' + e.message);
+    return [];
+  }
+}
+
+/** Everything linked to a section, from either table, in one shape. */
+async function linkedPlans(connection, sectionId) {
+  const [jobLinks] = await connection.query(
+    `SELECT f.id, f.job_document_id, NULL AS lead_document_id, d.name, d.path, d.type
+       FROM checklist_section_files f
+       JOIN job_documents d ON d.id = f.job_document_id
+      WHERE f.section_id = ? AND f.job_document_id IS NOT NULL
+      ORDER BY f.id ASC`,
+    [Number(sectionId)],
+  );
+  let leadLinks = [];
+  try {
+    const [rows] = await connection.query(
+      `SELECT f.id, NULL AS job_document_id, f.lead_document_id, d.name, d.path, d.type
+         FROM checklist_section_files f
+         JOIN lead_documents d ON d.id = f.lead_document_id
+        WHERE f.section_id = ? AND f.lead_document_id IS NOT NULL
+        ORDER BY f.id ASC`,
+      [Number(sectionId)],
+    );
+    leadLinks = rows;
+  } catch (e) { /* no lead_documents table on this install */ }
+  return [...jobLinks, ...leadLinks];
 }
 
 router.get('/sections/:id/plans', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
@@ -1521,24 +1574,10 @@ router.get('/sections/:id/plans', auth.authenticateToken, requireNotepadMyTasks,
       const access = await getSectionAccess(connection, req.params.id, uid);
       if (!access) return res.status(403).json({ success: false, message: 'Not your notepad.' });
 
-      const jobId = await sectionJobId(connection, req.params.id);
-      const [linked] = await connection.query(
-        `SELECT f.id, f.job_document_id, d.name, d.path, d.type
-           FROM checklist_section_files f
-           JOIN job_documents d ON d.id = f.job_document_id
-          WHERE f.section_id = ?
-          ORDER BY f.id ASC`,
-        [Number(req.params.id)],
-      );
-      let available = [];
-      if (jobId) {
-        const [rows] = await connection.query(
-          'SELECT id, name, path, type FROM job_documents WHERE job_id = ? ORDER BY id DESC',
-          [jobId],
-        );
-        available = rows;
-      }
-      res.json({ success: true, linked, available, reason: jobId ? '' : 'NO_JOB' });
+      const src = await sectionSource(connection, req.params.id);
+      const linked = await linkedPlans(connection, req.params.id);
+      const available = await sourceDocuments(connection, src);
+      res.json({ success: true, linked, available, reason: src ? '' : 'NO_JOB' });
     });
   } catch (err) {
     logger.error('notepad section plans read error: ' + err.message);
@@ -1560,36 +1599,28 @@ router.post('/sections/:id/plans', auth.authenticateToken, requireNotepadMyTasks
       const access = await getSectionAccess(connection, req.params.id, uid);
       if (!access) return res.status(403).json({ success: false, message: 'Not your notepad.' });
 
-      const jobId = await sectionJobId(connection, req.params.id);
-      if (!jobId) {
-        return res.status(400).json({ success: false, code: 'NO_JOB', message: 'This notepad has no job to take plans from.' });
+      const src = await sectionSource(connection, req.params.id);
+      if (!src) {
+        return res.status(400).json({ success: false, code: 'NO_JOB', message: 'This notepad has no job or lead to take plans from.' });
       }
       // Only documents on THIS job. An id from another job is refused
       // outright rather than silently dropped.
-      const ph = value.document_ids.map(() => '?').join(',');
-      const [docs] = await connection.query(
-        `SELECT id FROM job_documents WHERE job_id = ? AND id IN (${ph})`,
-        [jobId, ...value.document_ids],
-      );
-      if (docs.length !== value.document_ids.length) {
+      // Only documents on THIS job or lead. An id from anywhere else is
+      // refused outright rather than silently dropped.
+      const offered = await sourceDocuments(connection, src);
+      const allowed = new Set(offered.map((d) => Number(d.id)));
+      if (!value.document_ids.every((id) => allowed.has(Number(id)))) {
         return res.status(403).json({ success: false, message: 'Those files are not on this job.' });
       }
-      for (const d of docs) {
-        // UNIQUE(section_id, job_document_id) makes re-linking a no-op.
+      const col = src.kind === 'lead' ? 'lead_document_id' : 'job_document_id';
+      for (const id of value.document_ids) {
+        // The UNIQUE key on (section_id, <col>) makes re-linking a no-op.
         await connection.query(
-          'INSERT IGNORE INTO checklist_section_files (section_id, job_document_id, added_by) VALUES (?, ?, ?)',
-          [Number(req.params.id), Number(d.id), uid],
+          `INSERT IGNORE INTO checklist_section_files (section_id, ${col}, added_by) VALUES (?, ?, ?)`,
+          [Number(req.params.id), Number(id), uid],
         );
       }
-      const [linked] = await connection.query(
-        `SELECT f.id, f.job_document_id, d.name, d.path, d.type
-           FROM checklist_section_files f
-           JOIN job_documents d ON d.id = f.job_document_id
-          WHERE f.section_id = ?
-          ORDER BY f.id ASC`,
-        [Number(req.params.id)],
-      );
-      res.status(201).json({ success: true, linked });
+      res.status(201).json({ success: true, linked: await linkedPlans(connection, req.params.id) });
     });
   } catch (err) {
     logger.error('notepad section plan link error: ' + err.message);

@@ -256,6 +256,22 @@ async function ensureNotepadSchema(connection) {
     `),
   );
 
+  // ── C35: a LEAD has files too, and a lead notepad needs its plans.
+  //
+  // Lead documents live in lead_documents, a different table from
+  // job_documents, so the link needs its own column rather than a shared
+  // id that could mean either. job_document_id becomes nullable: a row now
+  // carries exactly one of the two.
+  await run('checklist_section_files lead column', async () => {
+    await addColumn(connection, 'checklist_section_files', 'lead_document_id', 'INT NULL DEFAULT NULL');
+    try {
+      await connection.query('ALTER TABLE checklist_section_files MODIFY job_document_id INT NULL DEFAULT NULL');
+    } catch (e) {
+      /* already nullable */
+    }
+    await addIndex(connection, `ALTER TABLE checklist_section_files ADD UNIQUE KEY uq_csf_lead (section_id, lead_document_id)`);
+  });
+
   // ── C24: an attachment is not always a photograph.
   //
   // A set of plans or a spec PDF belongs on the same row as the pictures —
