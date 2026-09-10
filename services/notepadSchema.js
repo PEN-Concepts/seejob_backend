@@ -234,6 +234,12 @@ async function ensureNotepadSchema(connection) {
     `),
   );
 
+  // C43: which task thread (if any) a row was folded in from, so the
+  // one-time absorb is idempotent without a separate bookkeeping table.
+  await run('checklist_item_notes absorbed column', async () => {
+    await addColumn(connection, 'checklist_item_notes', 'absorbed_task_id', 'INT NULL DEFAULT NULL');
+  });
+
   // ── C25: PLANS BELONG TO THE NOTEPAD, NOT THE TASK.
   //
   // A plan set is about the whole job, not one line of it — attaching it per

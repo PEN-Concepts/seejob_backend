@@ -440,10 +440,70 @@ function isShareable(section) {
   return String(section && section.origin) === 'manual';
 }
 
+/**
+ * C43 — ONE CONVERSATION PER PIECE OF WORK.
+ *
+ * A notepad row that has been delegated exists twice: as a check_list
+ * row and as the tasks row it became. Notes were being written to two
+ * different tables depending on which page you were standing on, so the
+ * boss on Notepads and the assignee on My Tasks were talking past each
+ * other in separate threads about the same job.
+ *
+ * The CHECK_LIST row is the anchor whenever one exists — it is where the
+ * work originated. A task with no notepad row behind it (created straight
+ * on My Tasks) keeps its own task_notes thread.
+ *
+ * Returns { kind: "item"|"task", id }.
+ */
+async function resolveThreadAnchor(connection, { itemId = null, taskId = null }) {
+  if (itemId) return { kind: "item", id: Number(itemId) };
+  if (!taskId) return null;
+  try {
+    const [[row]] = await connection.query(
+      'SELECT id FROM check_list WHERE delegated_task_id = ? LIMIT 1',
+      [Number(taskId)],
+    );
+    if (row) return { kind: "item", id: Number(row.id) };
+  } catch (e) {
+    /* fall through to the task thread */
+  }
+  return { kind: "task", id: Number(taskId) };
+}
+
+/**
+ * Fold any pre-existing task_notes for this item's task into the item
+ * thread, once. COPY, never move: the old rows stay where they are, so
+ * nothing is destroyed if this ever has to be reversed.
+ */
+async function absorbTaskNotes(connection, itemId) {
+  try {
+    const [[row]] = await connection.query(
+      'SELECT delegated_task_id FROM check_list WHERE id = ? LIMIT 1',
+      [Number(itemId)],
+    );
+    if (!row || !row.delegated_task_id) return;
+    const [[done]] = await connection.query(
+      'SELECT COUNT(*) AS n FROM checklist_item_notes WHERE item_id = ? AND absorbed_task_id = ?',
+      [Number(itemId), Number(row.delegated_task_id)],
+    );
+    if (Number(done.n) > 0) return;
+    await connection.query(
+      `INSERT INTO checklist_item_notes (item_id, user_id, body, created_at, absorbed_task_id)
+         SELECT ?, n.user_id, n.body, n.created_at, ?
+           FROM task_notes n WHERE n.task_id = ?`,
+      [Number(itemId), Number(row.delegated_task_id), Number(row.delegated_task_id)],
+    );
+  } catch (e) {
+    /* nothing to absorb, or the column is not there yet */
+  }
+}
+
 module.exports = {
   accountOwnerOf,
   isAccountOwner,
   isSubcontractor,
+  resolveThreadAnchor,
+  absorbTaskNotes,
   isFullAccess,
   accountMemberIds,
   listAllowlist,

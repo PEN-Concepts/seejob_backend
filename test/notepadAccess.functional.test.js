@@ -697,6 +697,37 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       JSON.stringify(subSees && { id: subSees.id, has_note: subSees.has_note }));
     ok(subSees && Array.isArray(subSees.images),
       "C42: the re-homed row carries its images array — the photo strip reads from it");
+
+    // ── 24. C43 — ONE conversation, whichever page you are standing on ─────
+    // delTaskId is the task companyItemId became. The sender works from the
+    // NOTEPAD row, the assignee from MY TASKS. They must be the same thread.
+    const fromNotepad = await request(app).post("/api/checklists/items/" + companyItemId + "/notes")
+      .set("Authorization", OWNER).send({ body: "Posted from the notepad." });
+    ok(fromNotepad.status === 201, "C43: the sender posts from the notepad row", String(fromNotepad.status));
+
+    const fromMyTasks = await request(app).post("/api/tasks/" + delTaskId + "/notes")
+      .set("Authorization", JOSH).send({ body: "Replied from My Tasks." });
+    ok(fromMyTasks.status === 201, "C43: the assignee replies from My Tasks", String(fromMyTasks.status));
+
+    const seenOnNotepad = (await request(app).get("/api/checklists/items/" + companyItemId + "/notes")
+      .set("Authorization", OWNER)).body.data.map((n) => n.body);
+    const seenOnMyTasks = (await request(app).get("/api/tasks/" + delTaskId + "/notes")
+      .set("Authorization", JOSH)).body.data.map((n) => n.body);
+    ok(seenOnNotepad.includes("Posted from the notepad.") && seenOnNotepad.includes("Replied from My Tasks."),
+      "C43: the notepad shows BOTH sides of the conversation", JSON.stringify(seenOnNotepad));
+    ok(JSON.stringify(seenOnNotepad) === JSON.stringify(seenOnMyTasks),
+      "C43: My Tasks shows exactly the same thread, in the same order",
+      JSON.stringify({ notepad: seenOnNotepad, mytasks: seenOnMyTasks }));
+
+    // Every message carries what the chat UI needs on both pages.
+    const mtNotes = (await request(app).get("/api/tasks/" + delTaskId + "/notes").set("Authorization", JOSH)).body.data;
+    ok(mtNotes.every((n) => n.initials && n.author_name && typeof n.is_mine === "boolean"),
+      "C43: My Tasks notes carry initials, author and is_mine for the avatar");
+
+    // ...and the boundary holds: not every SJR user, only this work.
+    const outsiderThread = await request(app).get("/api/tasks/" + delTaskId + "/notes").set("Authorization", OUTSIDER);
+    ok(outsiderThread.status === 403,
+      "C43: someone outside the company and not assigned still cannot read it", String(outsiderThread.status));
     console.log('\nnotepadAccess.functional');
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);

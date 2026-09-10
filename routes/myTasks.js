@@ -29,7 +29,7 @@ const Joi = require('joi');
 const auth = require('../services/authentication');
 const logger = require('../common/logger');
 const { isSameAccount, getAccessMode } = require('../utils/access');
-const { isFullAccess } = require('../services/notepadAccess');
+const { isFullAccess, resolveThreadAnchor, absorbTaskNotes } = require('../services/notepadAccess');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 const { requireNotepadMyTasks } = require('../services/featureFlags');
 
@@ -51,6 +51,13 @@ async function requireFullAccess(connection, uid, res) {
     message: 'My Tasks is not part of your access. Your assigned work is in your job notepad.',
   });
   return false;
+}
+
+/** Initials for the chat avatar, matching the notepad thread exactly. */
+function initialsOf(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '?';
+  return parts.slice(0, 2).map((x) => x[0].toUpperCase()).join("");
 }
 
 async function withConn(fn) {
@@ -266,13 +273,37 @@ router.get('/:id/notes', auth.authenticateToken, requireNotepadMyTasks, async (r
       if (!rel.assignee && !rel.owner) {
         return res.status(403).json({ success: false, message: 'This task is not yours.' });
       }
-      const [rows] = await connection.query(
-        `SELECT n.id, n.body, n.created_at, n.user_id, u.name AS author_name
-           FROM task_notes n LEFT JOIN \`user\` u ON u.id = n.user_id
-          WHERE n.task_id = ? ORDER BY n.id ASC`,
-        [taskId],
-      );
-      res.json({ success: true, data: rows });
+      // C43: ONE conversation per piece of work. If this task came from a
+      // notepad row, that row is the anchor and BOTH pages read the same
+      // thread. Before this the sender on Notepads and the assignee on My
+      // Tasks wrote to two different tables about the same job.
+      const anchor = await resolveThreadAnchor(connection, { taskId });
+      let rows;
+      if (anchor.kind === 'item') {
+        await absorbTaskNotes(connection, anchor.id);
+        [rows] = await connection.query(
+          `SELECT n.id, n.body, n.created_at, n.user_id, u.name AS author_name
+             FROM checklist_item_notes n LEFT JOIN \`user\` u ON u.id = n.user_id
+            WHERE n.item_id = ? ORDER BY n.id ASC`,
+          [anchor.id],
+        );
+      } else {
+        [rows] = await connection.query(
+          `SELECT n.id, n.body, n.created_at, n.user_id, u.name AS author_name
+             FROM task_notes n LEFT JOIN \`user\` u ON u.id = n.user_id
+            WHERE n.task_id = ? ORDER BY n.id ASC`,
+          [taskId],
+        );
+      }
+      res.json({
+        success: true,
+        data: rows.map((r) => ({
+          ...r,
+          author_name: r.author_name || 'Someone',
+          initials: initialsOf(r.author_name),
+          is_mine: Number(r.user_id) === uid,
+        })),
+      });
     });
   } catch (err) {
     logger.error('task notes read error: ' + err.message);
@@ -297,17 +328,40 @@ router.post('/:id/notes', auth.authenticateToken, requireNotepadMyTasks, async (
       if (!rel.assignee && !rel.owner) {
         return res.status(403).json({ success: false, message: 'This task is not yours.' });
       }
-      const [r] = await connection.query('INSERT INTO task_notes (task_id, user_id, body) VALUES (?, ?, ?)', [
-        taskId,
-        uid,
-        value.body.trim(),
-      ]);
-      const [[row]] = await connection.query(
-        `SELECT n.id, n.body, n.created_at, n.user_id, u.name AS author_name
-           FROM task_notes n LEFT JOIN \`user\` u ON u.id = n.user_id WHERE n.id = ?`,
-        [r.insertId],
-      );
-      res.status(201).json({ success: true, data: row });
+      // C43: write into the SAME thread the notepad row reads.
+      const anchor = await resolveThreadAnchor(connection, { taskId });
+      let row;
+      if (anchor.kind === 'item') {
+        await absorbTaskNotes(connection, anchor.id);
+        const [ins] = await connection.query(
+          'INSERT INTO checklist_item_notes (item_id, user_id, body) VALUES (?, ?, ?)',
+          [anchor.id, uid, value.body.trim()],
+        );
+        [[row]] = await connection.query(
+          `SELECT n.id, n.body, n.created_at, n.user_id, u.name AS author_name
+             FROM checklist_item_notes n LEFT JOIN \`user\` u ON u.id = n.user_id WHERE n.id = ?`,
+          [ins.insertId],
+        );
+      } else {
+        const [ins] = await connection.query(
+          'INSERT INTO task_notes (task_id, user_id, body) VALUES (?, ?, ?)',
+          [taskId, uid, value.body.trim()],
+        );
+        [[row]] = await connection.query(
+          `SELECT n.id, n.body, n.created_at, n.user_id, u.name AS author_name
+             FROM task_notes n LEFT JOIN \`user\` u ON u.id = n.user_id WHERE n.id = ?`,
+          [ins.insertId],
+        );
+      }
+      res.status(201).json({
+        success: true,
+        data: {
+          ...row,
+          author_name: row.author_name || 'You',
+          initials: initialsOf(row.author_name),
+          is_mine: true,
+        },
+      });
     });
   } catch (err) {
     logger.error('task note create error: ' + err.message);
