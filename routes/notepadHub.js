@@ -25,6 +25,21 @@ const { requireNotepadMyTasks, publicFlags, mergeArmed, clientInviteArmed } = re
 const notify = require('../services/notify');
 const { logDestructiveJob } = require('../services/destructiveLog');
 const mailer = require('../services/mailer');
+const multer = require('multer');
+const path = require('path');
+
+// C9c: notepad row photos land in the same uploads dir the rest of the app
+// uses, and are served by the existing express.static('/uploads') mount.
+const photoStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, path.join(__dirname, '..', 'uploads')),
+  filename: (req, file, cb) => cb(null, 'np-' + Date.now() + '-' + Math.round(Math.random() * 1e6) + path.extname(file.originalname)),
+});
+const photoUpload = multer({
+  storage: photoStorage,
+  limits: { fileSize: 12 * 1024 * 1024 },
+  // Images only. A non-image is rejected silently rather than 500ing.
+  fileFilter: (req, file, cb) => cb(null, String(file.mimetype || '').startsWith('image/')),
+});
 const {
   accountOwnerOf,
   isAccountOwner,
@@ -140,7 +155,12 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
             l.project_street_address AS lead_address,
             owner.name AS owner_name,
             (SELECT COUNT(*) FROM checklist_section_shares sh2
-              WHERE sh2.section_id = s.id AND sh2.is_client = 1) AS client_share_count
+              WHERE sh2.section_id = s.id AND sh2.is_client = 1) AS client_share_count,
+            -- Any live share at all, client or colleague. Drives the share
+            -- icon's "this has been shared" state, which was previously a
+            -- guess made from the client count alone.
+            (SELECT COUNT(*) FROM checklist_section_shares sh3
+              WHERE sh3.section_id = s.id) AS share_count
           FROM checklist_sections s
           LEFT JOIN checklist_section_order o ON o.section_id = s.id AND o.user_id = ?
           LEFT JOIN \`job\`  j ON j.id = s.job_id
@@ -159,6 +179,7 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           `SELECT
               c.id, c.section_id, c.name, c.photo, c.priority, c.due_date, c.status,
               c.assignee_completed, c.created_by, c.delegated_task_id, c.delegated_to,
+              c.note,
               u.name AS created_by_name,
               du.name AS delegated_to_name,
               t.assignee_completed AS task_assignee_completed,
@@ -172,6 +193,48 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           ids,
         );
         items = rows;
+      }
+
+      // ── C9b/C9c: photos and the note flag, per row ─────────────────────
+      // Two small extra reads rather than joins on the main query: a JOIN
+      // against a one-to-many image table would multiply the item rows and
+      // every consumer would have to de-duplicate them.
+      const imagesByItem = new Map();
+      const threadCountByItem = new Map();
+      if (ids.length) {
+        const ph = ids.map(() => '?').join(',');
+        try {
+          const [imgs] = await connection.query(
+            `SELECT i.id, i.item_id, i.filename, i.created_at
+               FROM checklist_item_images i
+               JOIN check_list c ON c.id = i.item_id
+              WHERE c.section_id IN (${ph})
+              ORDER BY i.id ASC`,
+            ids,
+          );
+          for (const im of imgs) {
+            const k = Number(im.item_id);
+            if (!imagesByItem.has(k)) imagesByItem.set(k, []);
+            imagesByItem.get(k).push({ id: Number(im.id), filename: im.filename, created_at: im.created_at });
+          }
+        } catch (e) {
+          logger.error('notepad hub images read failed: ' + e.message);
+        }
+        try {
+          // A delegated row can also carry the two-way thread. Either source
+          // lights the paperclip.
+          const [tn] = await connection.query(
+            `SELECT c.id AS item_id, COUNT(n.id) AS n
+               FROM check_list c
+               JOIN task_notes n ON n.task_id = c.delegated_task_id
+              WHERE c.section_id IN (${ph}) AND c.delegated_task_id IS NOT NULL
+              GROUP BY c.id`,
+            ids,
+          );
+          for (const r of tn) threadCountByItem.set(Number(r.item_id), Number(r.n || 0));
+        } catch (e) {
+          logger.error('notepad hub thread-count read failed: ' + e.message);
+        }
       }
 
       // ── 3b — DELEGATED WORK FOLLOWS THE PERSON, NOT THE NOTEPAD ──────────
@@ -227,6 +290,10 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           delegated_first_name: firstNameOf(it.delegated_to_name),
           is_self_assigned: it.delegated_to != null && Number(it.delegated_to) === uid,
           can_edit: Number(it.created_by) === uid, // default rule: your own typing only
+          // C9b/C9c — what the row's indicators read from.
+          note: it.note || null,
+          has_note: !!String(it.note || '').trim() || (threadCountByItem.get(Number(it.id)) || 0) > 0,
+          images: imagesByItem.get(Number(it.id)) || [],
         });
       }
 
@@ -278,6 +345,7 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           kind: isLead ? 'lead' : s.job_id != null ? 'job' : 'plain',
           shareable: isShareable(s), // §9 hand-made pads only
           client_shared: Number(s.client_share_count || 0) > 0,
+          shared_with_anyone: Number(s.share_count || 0) > 0,
           items: bySection.get(Number(s.id)) || [],
         };
       });
@@ -1011,4 +1079,106 @@ router.get('/admin/activity', auth.authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C9c — PHOTOS ON A NOTEPAD ROW
+//
+// check_list.photo is a single VARCHAR and cannot hold a set, so images live
+// in checklist_item_images. Access is decided by the row's SECTION, not by the
+// row: if you may read the notepad you may see its pictures, and 3b's
+// delegated-row rule already says an assignee may add a photo even though they
+// may not edit the words.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** The section a row belongs to, plus how this caller relates to it. */
+async function itemSectionAccess(connection, itemId, uid) {
+  const [[row]] = await connection.query(
+    'SELECT id, section_id, created_by, delegated_to FROM check_list WHERE id = ? LIMIT 1',
+    [Number(itemId)],
+  );
+  if (!row) return null;
+  const access = await getSectionAccess(connection, row.section_id, uid);
+  if (!access) return null;
+  return { row, access };
+}
+
+router.get('/items/:id/photos', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const found = await itemSectionAccess(connection, req.params.id, uid);
+      if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+      const [rows] = await connection.query(
+        'SELECT id, filename, uploaded_by, created_at FROM checklist_item_images WHERE item_id = ? ORDER BY id ASC',
+        [Number(req.params.id)],
+      );
+      res.json({ success: true, data: rows });
+    });
+  } catch (err) {
+    logger.error('notepad item photos read error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+router.post(
+  '/items/:id/photos',
+  auth.authenticateToken,
+  requireNotepadMyTasks,
+  photoUpload.array('photos', 10),
+  async (req, res) => {
+    const uid = Number(res.locals.id);
+    const files = req.files || [];
+    if (!files.length) return res.status(400).json({ success: false, message: 'No files uploaded.' });
+    try {
+      await withConn(async (connection) => {
+        await ensureNotepadSchema(connection);
+        const found = await itemSectionAccess(connection, req.params.id, uid);
+        if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+        for (const f of files) {
+          await connection.query(
+            'INSERT INTO checklist_item_images (item_id, filename, uploaded_by) VALUES (?, ?, ?)',
+            [Number(req.params.id), f.filename, uid],
+          );
+        }
+        const [rows] = await connection.query(
+          'SELECT id, filename, uploaded_by, created_at FROM checklist_item_images WHERE item_id = ? ORDER BY id ASC',
+          [Number(req.params.id)],
+        );
+        res.status(201).json({ success: true, data: rows });
+      });
+    } catch (err) {
+      logger.error('notepad item photo upload error: ' + err.message);
+      res.status(500).json({ success: false, message: 'Server error' });
+    }
+  },
+);
+
+router.delete('/photos/:imageId', auth.authenticateToken, requireNotepadMyTasks, async (req, res) => {
+  const uid = Number(res.locals.id);
+  try {
+    await withConn(async (connection) => {
+      await ensureNotepadSchema(connection);
+      const [[img]] = await connection.query(
+        'SELECT id, item_id, filename, uploaded_by FROM checklist_item_images WHERE id = ? LIMIT 1',
+        [Number(req.params.imageId)],
+      );
+      if (!img) return res.status(404).json({ success: false, message: 'No such photo.' });
+      const found = await itemSectionAccess(connection, img.item_id, uid);
+      if (!found) return res.status(403).json({ success: false, message: 'Not your notepad.' });
+      // Your own picture, or the notepad is yours. A share recipient cannot
+      // delete somebody else's photo.
+      const mine = Number(img.uploaded_by) === uid;
+      if (!mine && found.access.role !== 'owner' && found.access.role !== 'full') {
+        return res.status(403).json({ success: false, message: 'You can only remove photos you added.' });
+      }
+      await connection.query('DELETE FROM checklist_item_images WHERE id = ?', [Number(req.params.imageId)]);
+      res.json({ success: true, deleted: true });
+    });
+  } catch (err) {
+    logger.error('notepad item photo delete error: ' + err.message);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports.previewMerge = previewMerge;

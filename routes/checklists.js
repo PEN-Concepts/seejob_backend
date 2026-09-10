@@ -303,6 +303,9 @@ const createChecklistSchema = Joi.object({
 
 const updateChecklistSchema = Joi.object({
   name: Joi.string().allow('', null).max(NAME_MAX).optional(),
+  // C9b: a note on the row itself. Not the two-way thread — that belongs to
+  // the task a row becomes once delegated. 4000 matches the delegate note.
+  note: Joi.string().allow('', null).max(4000).optional(),
   assign_to: Joi.number().allow(null).optional(),
   job_id: Joi.number().allow(null).optional(),
   lead_id: Joi.number().allow(null).optional(),

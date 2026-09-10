@@ -183,6 +183,35 @@ async function ensureNotepadSchema(connection) {
     await addIndex(connection, 'ALTER TABLE check_list ADD INDEX idx_cl_delegated (delegated_task_id)');
   });
 
+  // ── C9b: a note ON THE ROW ITSELF.
+  //
+  // The two-way thread in task_notes only exists once a row has been
+  // delegated and become a task. A plain notepad line had nowhere to keep a
+  // note at all, so there was nothing for the paperclip indicator to report.
+  // Additive TEXT column, nullable — nothing existing changes meaning.
+  await run('check_list note column', async () => {
+    await addColumn(connection, 'check_list', 'note', 'TEXT NULL DEFAULT NULL');
+  });
+
+  // ── C9c: photos on a notepad row.
+  //
+  // check_list.photo is a single VARCHAR(255) filename and cannot hold a set.
+  // Rather than overload it, a proper child table: many images per row, each
+  // knowing who added it and when, so a thumbnail strip and a full-size
+  // viewer both have something honest to read.
+  await run('checklist_item_images', () =>
+    connection.query(`
+      CREATE TABLE IF NOT EXISTS checklist_item_images (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        item_id INT NOT NULL,
+        filename VARCHAR(255) NOT NULL,
+        uploaded_by INT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_cli_item (item_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `),
+  );
+
   // ── §10 the two-way note thread. Author + date per note, both directions.
   await run('task_notes', () =>
     connection.query(`
