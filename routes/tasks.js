@@ -11,6 +11,7 @@ const { requireOwnsRecord } = require("../utils/ownership");
 const { attachAssignees } = require("../services/taskAssignees");
 const { attachTaskImages } = require("../services/taskImages");
 const { notepadMyTasksEnabled } = require("../services/featureFlags");
+const { isFullAccess } = require("../services/notepadAccess");
 
 // For an expired_free user, keep ONLY tasks on FOREIGN (other-account) jobs/leads
 // they collaborate on — hide everything on their own account's jobs/leads and
@@ -1590,7 +1591,51 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
 
 
 // DELETE task
-router.delete("/delete/:id", auth.authenticateToken, requireOwnsRecord({ table: "tasks", ownerCol: "created_by" }), async (req, res) => {
+/**
+ * Who may delete a task. Ruled 2026-09-11:
+ *
+ *   FULL ACCESS (the account owner, or someone granted Manage access) may
+ *   delete ANY task on the account. Everyone else may delete only the tasks
+ *   they created.
+ *
+ * This replaces requireOwnsRecord({ ownerCol: "created_by" }), which only
+ * checked isSameAccount — so ANY user on the account could delete ANY task,
+ * including the owner's. My Tasks hid the button behind an is_mine check in
+ * the component, but a hidden button is not a permission: a direct DELETE
+ * walked straight past it.
+ *
+ * Fails CLOSED. A lookup that errors refuses the delete rather than allowing
+ * it — the opposite of the read-side helpers, because the cost of being wrong
+ * is a destroyed row.
+ */
+async function requireMayDeleteTask(req, res, next) {
+  const uid = Number(req.user && req.user.id);
+  const taskId = Number(req.params.id);
+  if (!taskId) return res.status(400).json({ code: "400", message: "Invalid task id" });
+  let conn;
+  try {
+    conn = await pool.getConnection();
+    const [[row]] = await conn.query("SELECT created_by FROM tasks WHERE id = ? LIMIT 1", [taskId]);
+    if (!row) return res.status(404).json({ code: "404", message: "Not found" });
+    // Outer bound first: never across accounts, whatever your access level.
+    if (!(await isSameAccount(uid, row.created_by, conn))) {
+      return res.status(403).json({ code: "403", message: "This record does not belong to your account." });
+    }
+    if (Number(row.created_by) === uid) return next();
+    if (await isFullAccess(conn, uid)) return next();
+    return res.status(403).json({
+      code: "TASK_DELETE_NOT_YOURS",
+      message: "Only the person who created this task, or someone with full access, can delete it.",
+    });
+  } catch (e) {
+    logger.error("requireMayDeleteTask: " + (e && e.message));
+    return res.status(403).json({ code: "403", message: "Could not verify permission to delete." });
+  } finally {
+    if (conn) conn.release();
+  }
+}
+
+router.delete("/delete/:id", auth.authenticateToken, requireMayDeleteTask, async (req, res) => {
   let connection;
   try {
     const taskId = Number(req.params.id);
