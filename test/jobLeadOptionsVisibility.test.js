@@ -26,7 +26,13 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
 
     await conn.query(`CREATE TABLE user (id INT PRIMARY KEY, created_by INT, role INT, category INT)`);
     await conn.query(`CREATE TABLE job (id INT PRIMARY KEY, name VARCHAR(120), address VARCHAR(190), city VARCHAR(90),
-      state VARCHAR(90), zipcode VARCHAR(20), contract_status VARCHAR(40), type VARCHAR(40), status INT,
+      state VARCHAR(90), zipcode VARCHAR(20),
+      -- The JOB SITE address, which job-lead-options now prefers over the
+      -- mailing one. Real schema has had these for a long time (jobs.js reads
+      -- and writes them in a dozen places); the fixture had simply never
+      -- needed them.
+      job_address VARCHAR(190), job_city VARCHAR(90), job_state VARCHAR(90), job_zipcode VARCHAR(20),
+      contract_status VARCHAR(40), type VARCHAR(40), status INT,
       color VARCHAR(20), created_by INT, sort_order INT DEFAULT 0)`);
     await conn.query(`CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(120), lead_type VARCHAR(40), status VARCHAR(10),
       project_street_address VARCHAR(190), project_town VARCHAR(90), project_state VARCHAR(90), leads_zipcode VARCHAR(20),

@@ -10,6 +10,7 @@ const { denyExpiredFreeWrites, isSameAccount, getAccessMode, resolveOwnerId, den
 const { requireOwnsRecord } = require("../utils/ownership");
 const { attachAssignees } = require("../services/taskAssignees");
 const { attachTaskImages } = require("../services/taskImages");
+const { notepadMyTasksEnabled } = require("../services/featureFlags");
 
 // For an expired_free user, keep ONLY tasks on FOREIGN (other-account) jobs/leads
 // they collaborate on — hide everything on their own account's jobs/leads and
@@ -1076,6 +1077,32 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     // thing they may do is re-assign it, and only to one of their OWN contacts.
     const ownsTask = await isSameAccount(actorId, oldTask.created_by, connection);
     const isAssignee = Number(oldTask.user_id || 0) === Number(actorId);
+    // CCP §10: "ASSIGNED tasks: photo and notes ONLY." That is about being the
+    // ASSIGNEE, not about being a subcontractor — an EMPLOYEE assignee resolves
+    // to the same account as the creator, so ownsTask was true and the whitelist
+    // gate below never fired for them. They could rename a task assigned to them
+    // while a sub could not. Compute assignee-ness across the FULL roster
+    // (primary + task_assignees) and treat "assignee who did not create it" as
+    // completion-only too, whatever their account.
+    let isAnyAssignee = isAssignee;
+    if (!isAnyAssignee) {
+      const [memRows] = await connection.query(
+        'SELECT 1 FROM task_assignees WHERE task_id = ? AND user_id = ? LIMIT 1',
+        [oldTask.id, actorId],
+      );
+      isAnyAssignee = memRows.length > 0;
+    }
+    const isCreator = Number(oldTask.created_by || 0) === Number(actorId);
+    // Restricted to their own check-off: anyone outside the account, AND any
+    // assignee who is not the person who created the task. The creator keeps
+    // full edit on their own task ("Own task shows edit and delete").
+    // Gated with the rebuild so that flag-off is EXACTLY the old behaviour.
+    // This tightens permissions on a live route (an assignee who did not
+    // create the task loses rename and job-move), which is a real fix but not
+    // one the flag could take back if it shipped ungated.
+    const completionOnly = notepadMyTasksEnabled()
+      ? (!ownsTask || (isAnyAssignee && !isCreator))
+      : !ownsTask;
     if (!ownsTask && !isAssignee) {
       await connection.rollback();
       return res.status(403).json({
@@ -1214,7 +1241,9 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     // could reassign inside the job would never need their own paid account). We
     // reject only a REAL change (a full-object PUT echoing unchanged values passes),
     // and return a DISTINCT code + the offending fields so the FE can explain.
-    if (!ownsTask) {
+    // `completionOnly` (not `ownsTask`) is the gate: it also catches an EMPLOYEE
+    // assignee editing a task somebody else assigned to them.
+    if (completionOnly) {
       const ymdOf = (v) => {
         if (!v) return null;
         if (v instanceof Date) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
@@ -1250,6 +1279,17 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       // re-assignment: a non-owner may NOT change the assignee at all (commercial).
       if (Object.prototype.hasOwnProperty.call(req.body, 'assignees') || Object.prototype.hasOwnProperty.call(req.body, 'user_id'))
         chgNum('user_id', newUser, oldTask.user_id);
+      // job move: also owner-only. Was missing from the whitelist, so a non-owning
+      // assignee could relocate a task onto a different job — the one hole left in
+      // "an assignee can only check off their own work" (CCP §10: assigned tasks
+      // get photo and notes, nothing else).
+      // Gated too, so flag-off is exactly the old whitelist.
+      if (notepadMyTasksEnabled() && Object.prototype.hasOwnProperty.call(req.body, 'job_id')) {
+        const nvJob = (job_id === '' || job_id === 'null' || job_id === 'undefined' || Number(job_id) === 0 || isNaN(Number(job_id)))
+          ? null
+          : Number(job_id);
+        if (Number(nvJob || 0) !== Number(oldTask.job_id || 0)) violated.push('job_id');
+      }
       if (violated.length) {
         await connection.rollback();
         return res.status(403).json({

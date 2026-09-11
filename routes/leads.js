@@ -10,6 +10,8 @@ const { ensureJobColorColumn } = require("../services/dbMigrations");
 const { pickJobColor } = require("../services/jobColorPalette");
 const chat = require("../services/chat");
 const { upload } = require("../services/fileUpload");
+const { createAutoNotepadFor, repointNotepadLeadToJob } = require("../services/notepadAccess");
+const { notepadMyTasksEnabled } = require("../services/featureFlags");
 const path = require("path");
 const fs = require("fs");
 
@@ -166,6 +168,19 @@ router.post("/leads/create", auth.authenticateToken, requireLevel(4), async (req
     // omits (e.g. lead_category/next_phase) would otherwise crash the INSERT.
     const safeValues = values.map((v) => (v === undefined ? null : v));
     const [result] = await pool.query(sql, safeValues);
+
+    // CCP §5: creating a LEAD auto-creates its company notepad, exactly as a job
+    // does. Jobs and leads stay separate categories on the page (blue border vs
+    // gold), but the pad itself is the same kind of thing — which is why
+    // converting the lead later changes nothing but the border colour.
+    try {
+      // Gated with the rest of the rebuild — see routes/jobs.js.
+      if (notepadMyTasksEnabled()) {
+        await createAutoNotepadFor(pool, "lead", result?.insertId, req.user.id, lead_name);
+      }
+    } catch (npErr) {
+      logger.error("Auto notepad create failed on lead create:", npErr);
+    }
 
     res.status(201).json({
       message: "Lead created successfully!",
@@ -751,6 +766,16 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, requireLevel(4), 
     // Hand the lead's chat to the new job so there's ONE chat per project (the
     // converted lead no longer gets its own — see the chat dedupe migration).
     try { await chat.migrateLeadChatToJob(connection, leadId, newJobId); } catch (e) { logger.error('convert-to-job chat migrate failed: ' + e.message); }
+
+    // CCP §5: "Lead -> job conversion changes NOTHING about the notepad. Same
+    // name, same address, same contents. Only the blue border becomes gold."
+    // So re-point the SAME section row rather than creating a second pad — the
+    // border colour is derived from job_id, never stored.
+    // Gated: with the feature off there is no auto-pad to re-point, and
+    // touching one would be a write the flag cannot undo.
+    if (notepadMyTasksEnabled()) {
+      await repointNotepadLeadToJob(connection, leadId, newJobId);
+    }
 
     await connection.commit();
     res.json({ message: "Lead converted to Job successfully", jobId: newJobId });

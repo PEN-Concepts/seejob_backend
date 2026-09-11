@@ -8,3 +8,16 @@
 
 config/serviceAccountKey.json
 
+# Firebase / Google service-account credentials. The literal line above only
+# covered one hard-coded name; the real key ships as
+# seejobrun-ce5bb-firebase-adminsdk-fbsvc-<id>.json, which matched nothing and
+# would have been staged by a plain `git add -A`. Patterns, not one filename.
+# Deliberately NOT config/*.json — too easy to silently ignore something that
+# should be tracked.
+*firebase-adminsdk*.json
+*-adminsdk-*.json
+*serviceAccount*.json
+*serviceaccount*.json
+
+# One-shot patch scripts written during a session; never part of the app.
+scratch-*.js

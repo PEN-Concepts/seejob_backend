@@ -27,6 +27,8 @@ const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
 const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, requireLevel } = require("../utils/access");
 const { requireOwnsJob, ownsJob } = require("../utils/ownership");
+const { createAutoNotepadFor } = require("../services/notepadAccess");
+const { notepadMyTasksEnabled } = require("../services/featureFlags");
 // Cross-account guard: the job/lead the request targets must belong to the
 // caller's account. getJobId(req) locates the id (param/query/body); optional
 // getOwnerType(req) yields 'job'|'lead'. 404 if missing, 403 if another account's.
@@ -655,6 +657,7 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
       `
         SELECT
           j.id, j.name, j.address, j.city, j.state, j.zipcode,
+          j.job_address, j.job_city, j.job_state, j.job_zipcode,
           j.contract_status, j.type, j.status, j.color
         FROM job j
         WHERE ${jobsWhere}
@@ -706,10 +709,13 @@ router.get("/job-lead-options", auth.authenticateToken, async (req, res) => {
         status: j.status,
         color: j.color || null,
         contract_status: normalize(j.contract_status),
-        address: normalize(j.address),
-        city: normalize(j.city),
-        state: normalize(j.state),
-        zipcode: normalize(j.zipcode),
+        // Prefer the JOB SITE address — that is the one a field user recognises
+        // in a picker, and the one the notepad shows. Falls back to the mailing
+        // address when the site one was never filled in.
+        address: normalize(j.job_address) || normalize(j.address),
+        city: normalize(j.job_city) || normalize(j.city),
+        state: normalize(j.job_state) || normalize(j.state),
+        zipcode: normalize(j.job_zipcode) || normalize(j.zipcode),
       });
     }
 
@@ -858,6 +864,21 @@ const [result] = await connection.execute(
       }
     } catch (contactErr) {
       logger.error("Auto client contact failed on job create:", contactErr);
+    }
+
+    // CCP §5: creating a JOB auto-creates its company notepad, named after the
+    // job. The address is NOT copied — every notepad read JOINs the job record,
+    // so fixing a typo on the job updates every notepad and Maps link.
+    try {
+      // Gated with the rest of the rebuild. Ungated, a "dark" release would
+      // still write a notepad row for every new job — visible on the OLD page,
+      // and NOT undone by switching the flag back off. A flag that only covers
+      // the endpoints is not a rollback.
+      if (notepadMyTasksEnabled()) {
+        await createAutoNotepadFor(connection, "job", result.insertId, req.user.id, name);
+      }
+    } catch (npErr) {
+      logger.error("Auto notepad create failed on job create:", npErr);
     }
 
     res.status(201).json({
