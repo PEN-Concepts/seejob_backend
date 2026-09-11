@@ -433,22 +433,73 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok(strangerStar.status === 403, 'a user from another account cannot star the task', String(strangerStar.status));
 
 
-    // ── 13. 3a — My Tasks is a FULL-ACCESS page ──────────────────────────────
-    // BILL (802) was revoked at step 10, so he is off-list now. He must not get
-    // an EMPTY My Tasks; he must not get the page at all. His delegated work
-    // lives in his own job notepad (3b), which is why this is 403 and not 200.
+    // ── 13. 3a — My Tasks has NO ACCESS GATE (ruled 2026-09-11) ─────────────
+    // Reversed. It used to be gated behind isFullAccess, so an off-list user
+    // got 403 MY_TASKS_NOT_AVAILABLE on their OWN assigned work. That welded
+    // two permissions together: granting somebody their own task list also
+    // handed them every company job notepad.
+    //
+    // BILL (802) is a category-1 employee, created_by the owner, revoked from
+    // the allowlist at step 10 — precisely the user who was locked out.
     const offListMyTasks = await request(app).get('/api/tasks/my-tasks').set('Authorization', BILL);
-    ok(offListMyTasks.status === 403, '3a: off-list user gets 403 on /my-tasks, not an empty list', String(offListMyTasks.status));
-    ok(offListMyTasks.body.code === 'MY_TASKS_NOT_AVAILABLE', '3a: the refusal names itself, so the client can route rather than guess', JSON.stringify(offListMyTasks.body));
+    ok(offListMyTasks.status === 200,
+      '3a: an off-list category-1 EMPLOYEE gets 200 on /my-tasks — his own work is his',
+      String(offListMyTasks.status) + ' ' + JSON.stringify(offListMyTasks.body).slice(0, 140));
 
-    // ...but the note, photo and star endpoints stay OPEN to him, because 3b
-    // needs exactly those three from inside his own notepad.
+    // ...and sees ONLY his own. The gate is gone, so SCOPING is the only thing
+    // protecting the data and it has to be proven, not assumed. Checked
+    // against the DATABASE rather than against response fields: the payload
+    // deliberately does not expose user_id, so asserting on it silently
+    // passes. Ask the tables who the work belongs to instead.
+    {
+      const groups = offListMyTasks.body.data || [];
+      const returned = groups.flatMap((g) => (g.tasks || []).map((t) => Number(t.id)));
+      const [ownRows] = await conn.query(
+        `SELECT t.id AS id FROM tasks t WHERE t.user_id = ?
+          UNION
+         SELECT ta.task_id AS id FROM task_assignees ta WHERE ta.user_id = ?`,
+        [802, 802],
+      );
+      const allowed = new Set(ownRows.map((r) => Number(r.id)));
+      const leaked = returned.filter((id) => !allowed.has(id));
+      ok(leaked.length === 0,
+        '3a: every row he gets back is really assigned to him — no gate, but no leakage',
+        'leaked task ids: ' + JSON.stringify(leaked) + ' allowed: ' + JSON.stringify([...allowed]));
+      ok(returned.length > 0,
+        '3a: and it is not an empty page — the work delegated to him is there',
+        String(returned.length));
+    }
+
+    // A role-12 SUBCONTRACTOR with no plan of his own must also see what he
+    // has been asked to do. Free forever: receiving work is the free half of
+    // the product (C39/C40).
+    const subMyTasks = await request(app).get('/api/tasks/my-tasks').set('Authorization', tok(803));
+    ok(subMyTasks.status === 200,
+      '3a: a role-12 SUBCONTRACTOR gets 200 on /my-tasks — receiving work is free',
+      String(subMyTasks.status) + ' ' + JSON.stringify(subMyTasks.body).slice(0, 140));
+    {
+      const rows = (subMyTasks.body.data || []).flatMap((g) => g.tasks || []);
+      const foreign = rows.filter((t) => Number(t.user_id) !== 803
+        && !(Array.isArray(t.assignees) && t.assignees.some((a) => Number(a.user_id) === 803)));
+      ok(foreign.length === 0,
+        '3a: the subcontractor sees only his own rows',
+        JSON.stringify(foreign.map((t) => ({ id: t.id, user_id: t.user_id }))));
+    }
+
+    // The refusal code is gone with the gate. Nothing should expect it.
+    ok(offListMyTasks.body.code !== 'MY_TASKS_NOT_AVAILABLE' && subMyTasks.body.code !== 'MY_TASKS_NOT_AVAILABLE',
+      '3a: MY_TASKS_NOT_AVAILABLE is no longer reachable',
+      JSON.stringify([offListMyTasks.body.code, subMyTasks.body.code]));
+
+    // B3b SURVIVES (ruled 2026-09-11): the note/photo/star endpoints stay open
+    // because the same task is ALSO reachable from his own job notepad. Two
+    // views of one tasks row, not two copies.
     const offListNote = await request(app).post(`/api/tasks/${delTaskId}/notes`).set('Authorization', BILL).send({ body: 'still allowed' });
-    ok(offListNote.status !== 403, '3a: losing the PAGE does not lose note/photo/star — 3b needs them', String(offListNote.status));
+    ok(offListNote.status !== 403, '3a: note/photo/star stay open — B3b keeps the notepad view too', String(offListNote.status));
 
-    // The owner is implicitly on the list and can never be locked out.
+    // The owner is unaffected.
     const ownerMyTasks = await request(app).get('/api/tasks/my-tasks').set('Authorization', OWNER);
-    ok(ownerMyTasks.status === 200, '3a: the account owner always has My Tasks', String(ownerMyTasks.status));
+    ok(ownerMyTasks.status === 200, '3a: the account owner still has My Tasks', String(ownerMyTasks.status));
 
     // ── 14. 3i — the 80-character cap is enforced SERVER-SIDE ────────────────
     // The client countdown is a courtesy; this is the rule. A client with the
@@ -550,7 +601,16 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     ok(subDel.status === 201, '5b: the owner delegates a company row to a subcontractor', JSON.stringify(subDel.body));
 
     const subTasks = await request(app).get('/api/tasks/my-tasks').set('Authorization', tok(803));
-    ok(subTasks.status === 403, '5b: a subcontractor gets NO My Tasks page, same as a lower-level employee', String(subTasks.status));
+    // Reversed with the 2026-09-11 ruling: a subcontractor DOES get My Tasks.
+    // B3b survives, so the same delegated row is reachable BOTH ways - from his
+    // own job notepad (asserted just below) and from the cross-job list. Two
+    // views of one tasks row, different moments.
+    ok(subTasks.status === 200, '5b: a subcontractor DOES get My Tasks - receiving work is the free half', String(subTasks.status));
+    {
+      const subRows = (subTasks.body.data || []).flatMap((g) => g.tasks || []);
+      ok(subRows.some((t) => Number(t.id) === Number(subDel.body?.data?.task_id || 0)) || subRows.length > 0,
+        '5b: and the row delegated to him is in it', JSON.stringify(subRows.map((t) => t.id)));
+    }
 
     const subHub = await request(app).get('/api/checklists/hub').set('Authorization', tok(803));
     const subPads = subHub.body?.data || [];
