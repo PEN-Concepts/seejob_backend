@@ -11,6 +11,7 @@ const { pickJobColor } = require("../services/jobColorPalette");
 const chat = require("../services/chat");
 const { upload } = require("../services/fileUpload");
 const { createAutoNotepadFor, repointNotepadLeadToJob } = require("../services/notepadAccess");
+const { notepadMyTasksEnabled } = require("../services/featureFlags");
 const path = require("path");
 const fs = require("fs");
 
@@ -173,7 +174,10 @@ router.post("/leads/create", auth.authenticateToken, requireLevel(4), async (req
     // gold), but the pad itself is the same kind of thing — which is why
     // converting the lead later changes nothing but the border colour.
     try {
-      await createAutoNotepadFor(pool, "lead", result?.insertId, req.user.id, lead_name);
+      // Gated with the rest of the rebuild — see routes/jobs.js.
+      if (notepadMyTasksEnabled()) {
+        await createAutoNotepadFor(pool, "lead", result?.insertId, req.user.id, lead_name);
+      }
     } catch (npErr) {
       logger.error("Auto notepad create failed on lead create:", npErr);
     }
@@ -767,7 +771,11 @@ router.post("/convert-to-job/:leadId", auth.authenticateToken, requireLevel(4), 
     // name, same address, same contents. Only the blue border becomes gold."
     // So re-point the SAME section row rather than creating a second pad — the
     // border colour is derived from job_id, never stored.
-    await repointNotepadLeadToJob(connection, leadId, newJobId);
+    // Gated: with the feature off there is no auto-pad to re-point, and
+    // touching one would be a write the flag cannot undo.
+    if (notepadMyTasksEnabled()) {
+      await repointNotepadLeadToJob(connection, leadId, newJobId);
+    }
 
     await connection.commit();
     res.json({ message: "Lead converted to Job successfully", jobId: newJobId });

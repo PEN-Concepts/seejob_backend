@@ -21,6 +21,10 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
   let db, pool, conn, app, request, jwt;
   try {
     process.env.ACCESS_TOKEN = 'test_secret';
+    // The assignee tighten is gated with the Notepad/My-Tasks rebuild, so the
+    // suite has to switch the feature on to see it. A flag-off case at the
+    // bottom proves the OLD behaviour comes back when it is switched off.
+    process.env.NOTEPAD_MYTASKS_ENABLED = '1';
     delete process.env.NODE_ENV;
 
     const { createDB } = require('mysql-memory-server');
@@ -173,6 +177,31 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const rOwn = await request(app).put('/api/jobtask/update/2902').set('Authorization', empTok).send({ task_name: 'My own task renamed', user_id: 930 });
     ok(rOwn.status === 200, 'employee CAN rename a task they created themselves -> 200', rOwn.status + ' ' + JSON.stringify(rOwn.body));
 
+
+    // ---- ROLLBACK GUARANTEE: flag OFF restores the OLD behaviour ----
+    // The owner's condition for switching the feature on was that switching it
+    // back off is a COMPLETE rollback. The tighten above lives on a live route,
+    // so this proves the gate really does hand the old behaviour back rather
+    // than merely hiding a button.
+    delete process.env.NOTEPAD_MYTASKS_ENABLED;
+    await conn.query("INSERT INTO tasks (id,job_id,user_id,created_by,task_type,task_name,priority,status,complete_percentage,start_date,end_date,duration_days,is_urgent,assignee_completed,created_at) VALUES (2903,1900,930,900,'job','Flag off task','low',0,10,'2026-09-10','2026-09-12',3,0,0, NOW())");
+    const rOffName = await request(app).put('/api/jobtask/update/2903').set('Authorization', empTok)
+      .send({ task_name: 'Renamed with the flag off', user_id: 930 });
+    ok(rOffName.status === 200,
+      'FLAG OFF: the employee assignee can rename again — exactly as before the release',
+      rOffName.status + ' ' + JSON.stringify(rOffName.body));
+    {
+      const [[t]] = await conn.query('SELECT * FROM tasks WHERE id=2903');
+      ok(t.task_name === 'Renamed with the flag off', 'FLAG OFF: the rename actually landed', t.task_name);
+    }
+    // And the cross-account sub is STILL refused with the flag off, because that
+    // gate is old behaviour and was never part of the rebuild.
+    const rOffSub = await request(app).put('/api/jobtask/update/2900').set('Authorization', tok(910))
+      .send({ task_name: 'Sub rename with flag off' });
+    ok(rOffSub.status === 403,
+      'FLAG OFF: the cross-account sub is still refused — the flag did not loosen anything',
+      rOffSub.status + ' ' + JSON.stringify(rOffSub.body));
+    process.env.NOTEPAD_MYTASKS_ENABLED = '1';
   } catch (err) {
     ok(false, 'suite threw', String(err && err.stack ? err.stack.split('\n').slice(0, 6).join(' | ') : err));
   } finally {

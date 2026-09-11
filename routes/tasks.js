@@ -10,6 +10,7 @@ const { denyExpiredFreeWrites, isSameAccount, getAccessMode, resolveOwnerId, den
 const { requireOwnsRecord } = require("../utils/ownership");
 const { attachAssignees } = require("../services/taskAssignees");
 const { attachTaskImages } = require("../services/taskImages");
+const { notepadMyTasksEnabled } = require("../services/featureFlags");
 
 // For an expired_free user, keep ONLY tasks on FOREIGN (other-account) jobs/leads
 // they collaborate on — hide everything on their own account's jobs/leads and
@@ -1095,7 +1096,13 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
     // Restricted to their own check-off: anyone outside the account, AND any
     // assignee who is not the person who created the task. The creator keeps
     // full edit on their own task ("Own task shows edit and delete").
-    const completionOnly = !ownsTask || (isAnyAssignee && !isCreator);
+    // Gated with the rebuild so that flag-off is EXACTLY the old behaviour.
+    // This tightens permissions on a live route (an assignee who did not
+    // create the task loses rename and job-move), which is a real fix but not
+    // one the flag could take back if it shipped ungated.
+    const completionOnly = notepadMyTasksEnabled()
+      ? (!ownsTask || (isAnyAssignee && !isCreator))
+      : !ownsTask;
     if (!ownsTask && !isAssignee) {
       await connection.rollback();
       return res.status(403).json({
@@ -1276,7 +1283,8 @@ router.put("/update/:id", upload.single("image"), auth.authenticateToken, denyEx
       // assignee could relocate a task onto a different job — the one hole left in
       // "an assignee can only check off their own work" (CCP §10: assigned tasks
       // get photo and notes, nothing else).
-      if (Object.prototype.hasOwnProperty.call(req.body, 'job_id')) {
+      // Gated too, so flag-off is exactly the old whitelist.
+      if (notepadMyTasksEnabled() && Object.prototype.hasOwnProperty.call(req.body, 'job_id')) {
         const nvJob = (job_id === '' || job_id === 'null' || job_id === 'undefined' || Number(job_id) === 0 || isNaN(Number(job_id)))
           ? null
           : Number(job_id);

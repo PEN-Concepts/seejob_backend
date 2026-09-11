@@ -9,6 +9,7 @@ const path = require('path');
 const logger = require('../common/logger');
 const { getAccessMode, isSameAccount, resolveOwnerId } = require('../utils/access');
 const { isFullAccess, isSubcontractor } = require('../services/notepadAccess');
+const { notepadMyTasksEnabled } = require('../services/featureFlags');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
 const { getSectionAccess } = require('../services/notepadAccess');
@@ -438,7 +439,11 @@ router.post('/sections', auth.authenticateToken, async (req, res) => {
       // GC's — resolveOwnerId deliberately leaves a category-2 user pointing
       // at themselves so they cannot inherit the GC's subscription.
       try {
-        if (await isSubcontractor(connection, signedin_user) &&
+        // Gated with the rebuild: this is NEW policy on the OLD page, so
+        // shipping it ungated would change what a sub can do while the
+        // feature is supposedly off — and the flag could not take it back.
+        if (notepadMyTasksEnabled() &&
+            await isSubcontractor(connection, signedin_user) &&
             !(await subHasOwnPlan(connection, signedin_user))) {
           return res.status(403).json({
             success: false,
@@ -1000,7 +1005,8 @@ router.post('/create', auth.authenticateToken, async (req, res) => {
           // whole feature to enforce a rule about a different audience.
           const full = await isFullAccess(connection, signedin_user);
           const sub = await isSubcontractor(connection, signedin_user);
-          if (!full && sub) {
+          // Gated with the rebuild — new policy on the OLD page, see above.
+          if (notepadMyTasksEnabled() && !full && sub) {
             const [[hasDelegated]] = await connection.query(
               `SELECT 1 AS x
                  FROM check_list c
