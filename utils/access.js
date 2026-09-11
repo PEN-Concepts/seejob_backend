@@ -427,6 +427,21 @@ async function getActivePlanLevel(userId, connection) {
       } catch (ownerErr) {
         // fall through to the subscription-based tier on any lookup error
       }
+
+      // FREE TRIAL = full app access, and that has to mean the PLAN TIER too.
+      // A trial has no subscription row, so the query below found nothing and
+      // returned 0 — which silently locked trials out of every requirePlan()
+      // endpoint (Budget, Invoices, Job Schedules, Schedule Templates) and hid
+      // the Platinum job tabs. The intent was always "trial = full access"; this
+      // is the tier half of it, mirroring the owner exemption directly above.
+      // expired_free is deliberately NOT included: a dead trial keeps tier 0.
+      try {
+        if ((await getAccessMode(effectiveId, conn)) === "trial_active") {
+          return PLAN_LEVELS.platinum;
+        }
+      } catch (trialErr) {
+        // fall through to the subscription-based tier on any lookup error
+      }
       let rows;
       try {
         [rows] = await conn.query(
