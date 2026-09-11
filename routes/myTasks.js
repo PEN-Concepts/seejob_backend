@@ -29,29 +29,13 @@ const Joi = require('joi');
 const auth = require('../services/authentication');
 const logger = require('../common/logger');
 const { isSameAccount, getAccessMode } = require('../utils/access');
-const { isFullAccess, resolveThreadAnchor, absorbTaskNotes } = require('../services/notepadAccess');
+const { resolveThreadAnchor, absorbTaskNotes } = require('../services/notepadAccess');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 const { requireNotepadMyTasks } = require('../services/featureFlags');
 
-/**
- * 3a — MY TASKS IS A FULL-ACCESS PAGE.
- *
- * Off-list users do not get it: they see the work delegated to them inline in
- * their own job notepad (3b), which is one place instead of two. So this is a
- * 403 and not an empty list — an empty list would look like a bug to someone
- * who has nine tasks waiting for them somewhere else.
- *
- * ROLE gate, never a plan gate. Nothing here consults the subscription.
- */
-async function requireFullAccess(connection, uid, res) {
-  if (await isFullAccess(connection, uid)) return true;
-  res.status(403).json({
-    success: false,
-    code: 'MY_TASKS_NOT_AVAILABLE',
-    message: 'My Tasks is not part of your access. Your assigned work is in your job notepad.',
-  });
-  return false;
-}
+// requireFullAccess() was here. Deleted with the gate it enforced - see the
+// ruling at GET /my-tasks. MY_TASKS_NOT_AVAILABLE is no longer reachable and
+// no longer exists; nothing should be taught to expect it.
 
 /** Initials for the chat avatar, matching the notepad thread exactly. */
 function initialsOf(name) {
@@ -102,7 +86,22 @@ router.get('/my-tasks', auth.authenticateToken, requireNotepadMyTasks, async (re
   try {
     await withConn(async (connection) => {
       await ensureNotepadSchema(connection);
-      if (!(await requireFullAccess(connection, uid, res))) return;
+      // NO GATE. Ruled 2026-09-11: any authenticated user sees their OWN
+      // assigned tasks - employees at every level, and role-12
+      // subcontractors, who must be able to see what they have been asked to
+      // do whether or not they hold a subscription.
+      //
+      // This was gated behind isFullAccess ("is the account owner, or is on
+      // the owner's notepad_access allowlist"), which is a question about
+      // NOTEPAD SHARING, not seniority. It welded two permissions together:
+      // giving somebody their own task list also handed them every company
+      // job notepad, and there was no way to grant one without the other. A
+      // role gate would rebuild the same wall with a different key.
+      //
+      // Safe because the query below is already scoped to this user:
+      //   WHERE t.user_id = ?  OR  EXISTS(task_assignees for this user)
+      // so nothing but their own work can come back. notepad_access still
+      // gates exactly one thing - the company notepads, in routes/notepadHub.
 
       const [rows] = await connection.query(
         `SELECT
