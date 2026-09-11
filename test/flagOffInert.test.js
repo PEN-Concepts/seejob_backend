@@ -44,7 +44,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query('CREATE TABLE `job` (id INT PRIMARY KEY AUTO_INCREMENT, type VARCHAR(40), name VARCHAR(150), permit_no VARCHAR(60), permit_type VARCHAR(60), gate_no VARCHAR(60), lock_box_code VARCHAR(60), inspector_id INT NULL, client_id INT NULL, additional_client_email VARCHAR(190), additional_client_mobile VARCHAR(60), additional_client_name VARCHAR(120), address VARCHAR(190), city VARCHAR(90), state VARCHAR(90), zipcode VARCHAR(20), job_address VARCHAR(190), job_city VARCHAR(90), job_state VARCHAR(90), job_zipcode VARCHAR(20), sameAsAddress TINYINT DEFAULT 0, contract_status VARCHAR(40), from_leads INT NULL, lead_id INT NULL, status INT DEFAULT 1, color VARCHAR(20) NULL, created_by INT, sort_order INT DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
     await conn.query('CREATE TABLE leads (id INT PRIMARY KEY AUTO_INCREMENT, lead_name VARCHAR(150), lead_type VARCHAR(40), lead_category VARCHAR(60) NULL, budget VARCHAR(60) NULL, bid_status VARCHAR(40) NULL, status VARCHAR(10) NULL, client_id INT NULL, client_name VARCHAR(120) NULL, client_email VARCHAR(190) NULL, client_phone VARCHAR(60) NULL, project_street_address VARCHAR(190) NULL, project_town VARCHAR(90) NULL, project_state VARCHAR(90) NULL, project_description TEXT NULL, project_start_date DATE NULL, leads_street_address VARCHAR(190) NULL, leads_town_city VARCHAR(90) NULL, leads_state VARCHAR(90) NULL, leads_zipcode VARCHAR(20) NULL, next_phase VARCHAR(60) NULL, finance_method VARCHAR(60) NULL, user_id INT NULL, converted_job_id INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
     await conn.query('CREATE TABLE check_list (id INT PRIMARY KEY AUTO_INCREMENT, section_id INT, name VARCHAR(255), is_checked TINYINT DEFAULT 0, created_by INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
-    await conn.query('CREATE TABLE checklist_sections (id INT PRIMARY KEY AUTO_INCREMENT, owner_user_id INT NULL, shared_with_user_id INT NULL, type VARCHAR(20) NULL, title VARCHAR(190), sort_order INT DEFAULT 0, job_id INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)');
+    await conn.query('CREATE TABLE checklist_sections (id INT PRIMARY KEY AUTO_INCREMENT, owner_user_id INT NULL, shared_with_user_id INT NULL, type VARCHAR(20) NULL, title VARCHAR(190), sort_order INT DEFAULT 0, job_id INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NULL)');
     await conn.query('CREATE TABLE tasks (id INT PRIMARY KEY AUTO_INCREMENT, job_id INT, task_type VARCHAR(20), user_id INT, created_by INT, task_name VARCHAR(190) NULL, archived_at DATETIME NULL)');
     await conn.query('CREATE TABLE job_documents (id INT PRIMARY KEY AUTO_INCREMENT, path VARCHAR(255), name VARCHAR(190), job_id INT, mime_type VARCHAR(90) NULL, created_by INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, type VARCHAR(40) NULL, is_shared TINYINT DEFAULT 0)');
     await conn.query('CREATE TABLE lead_documents (id INT PRIMARY KEY AUTO_INCREMENT, path VARCHAR(255), name VARCHAR(190), lead_id INT, mime_type VARCHAR(90) NULL, created_by INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, type VARCHAR(40) NULL, is_shared TINYINT DEFAULT 0)');
@@ -64,6 +64,13 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     app.use(express.json());
     app.use('/api', require('../routes/jobs'));
     app.use('/api/leads', require('../routes/leads'));
+    // The rebuild's own routers, so the READ paths are exercised too. /hub
+    // WRITES ON READ (ensureNoJobNotepad, ensurePrivatePadsForDelegatedWork),
+    // which the first version of this test never covered: it drove three
+    // CREATE actions and no reads at all.
+    app.use('/api/checklists', require('../routes/notepadHub'));
+    app.use('/api/tasks', require('../routes/myTasks'));
+    app.use('/api/checklists', require('../routes/checklists'));
 
     const TOK = 'Bearer ' + jwt.sign(
       { id: 74, working_id: 74, role: 14, category: 4, email: 'owner@t.co' }, process.env.ACCESS_TOKEN);
@@ -121,6 +128,62 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const offFinal = after;
     ok(offFinal.checklist_sections === 0 && offFinal.notepad_access === 0 && offFinal.checklist_section_order === 0,
       'flag OFF: all three tables are still EMPTY after three real actions', JSON.stringify(offFinal));
+
+    // routes/checklists.js ensureDefaultSection() seeds ONE pad for a user who
+    // has none of that type. It is on origin/main and predates the rebuild, so
+    // it is not a flag concern - but it fires on a READ, so it has to be
+    // accounted for or it looks like the rebuild writing. Prove it explicitly,
+    // then give the user a pad so the rest of the read phase measures only
+    // what the REBUILD would do. The owner already has three pads, so his
+    // state is "has pads", not "has none".
+    {
+      const b = await counts();
+      await request(app).get('/api/checklists/sections').set('Authorization', TOK);
+      const a = await counts();
+      ok(a.checklist_sections === b.checklist_sections + 1,
+        'LEGACY (pre-rebuild, on main): the first /sections read seeds one default pad for a user with none',
+        delta(b, a));
+      const [[seeded]] = await conn.query(
+        'SELECT title, origin, scope FROM checklist_sections ORDER BY id DESC LIMIT 1');
+      ok(seeded && seeded.origin !== 'auto',
+        'LEGACY seed is not an auto pad - it is the old default page, not a rebuild notepad',
+        JSON.stringify(seeded));
+    }
+
+    // ---- READS, flag off. The half that was missing. ----
+    // /hub calls ensureNoJobNotepad() and ensurePrivatePadsForDelegatedWork(),
+    // both of which INSERT. If the flag ever stops covering the ROUTE, a mere
+    // page load starts creating notepads - and no amount of flag-flipping
+    // takes them back. The old ungated /checklists/sections is included
+    // because it is what actually serves users while the flag is off.
+    before = await counts();
+    console.log(show('before READS       ', before));
+
+    const rHub = await request(app).get('/api/checklists/hub').set('Authorization', TOK);
+    ok(rHub.status === 404 && rHub.body && rHub.body.code === 'FEATURE_DISABLED',
+      'flag OFF: GET /hub is refused by name, not served',
+      rHub.status + ' ' + JSON.stringify(rHub.body).slice(0, 120));
+
+    const rMine = await request(app).get('/api/tasks/my-tasks').set('Authorization', TOK);
+    ok(rMine.status === 404 && rMine.body && rMine.body.code === 'FEATURE_DISABLED',
+      'flag OFF: GET /my-tasks is refused by name, not served',
+      rMine.status + ' ' + JSON.stringify(rMine.body).slice(0, 120));
+
+    const rOld = await request(app).get('/api/checklists/sections').set('Authorization', TOK);
+    ok(rOld.status === 200,
+      'flag OFF: the OLD sections read still WORKS - this is what users get',
+      rOld.status + ' ' + JSON.stringify(rOld.body).slice(0, 120));
+
+    // Read it twice: ensureNoJobNotepad is NOT EXISTS-guarded, so a second
+    // call must also add nothing. A guard that only holds once is not a guard.
+    await request(app).get('/api/checklists/hub').set('Authorization', TOK);
+    await request(app).get('/api/checklists/sections').set('Authorization', TOK);
+
+    after = await counts();
+    console.log(show('after  READS       ', after));
+    ok(same(before, after),
+      'flag OFF: with pads already present, FIVE page reads wrote NOTHING - the rebuild adds nothing on read',
+      delta(before, after));
 
     // ================ FLAG ON ================
     process.env.NOTEPAD_MYTASKS_ENABLED = '1';
