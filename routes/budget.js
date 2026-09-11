@@ -88,19 +88,39 @@ async function getActivePlanFeatures(connection, userId) {
   );
 
   if (!subRows.length) {
-    // No subscription row: owner-exempt accounts, internal roles and TRIAL users
-    // are treated as a top-tier paying customer (full feature set). This copy
-    // returned [] unconditionally, so a trial was refused with
-    // FEATURE_NOT_AVAILABLE. Its twin in routes/jobs.js already handled trials
-    // correctly; this one was never updated to match — which is the whole
-    // pattern this fix is closing. expired_free still gets nothing.
-    let mode = "paid";
+    // No subscription row. Exactly TWO cases earn the full feature set here,
+    // and both are tested for by name rather than inferred:
+    //
+    //   trial_active  - the case this fix exists for. Mirrors the branch in
+    //                   utils/access.js getActivePlanLevel(), which tests
+    //                   === "trial_active" and nothing else.
+    //   owner-exempt  - internal accounts, granted explicitly.
+    //
+    // The first version tested `mode === "paid"`, which is a WIDER set than
+    // it looks: getAccessInfo() also reports "paid" for NEVER_GATED_ROLES
+    // (role 12, subcontractors) and for any account whose created_at will
+    // not parse. A subcontractor collecting the full Budget feature list was
+    // never the intent - the rule is "trials get what they would have paid
+    // for", not "anyone without a subscription row".
+    //
+    // expired_free still gets nothing, as before.
+    const [[who]] = await connection.query(
+      "SELECT email FROM `user` WHERE id = ? LIMIT 1",
+      [billingUserId]
+    );
+    const email = String((who && who.email) || "").trim().toLowerCase();
+    const ownerExempt = OWNER_EXEMPT_EMAILS.has(email);
+
+    let mode = null;
     try {
       mode = await getAccessMode(userId);
     } catch (e) {
-      mode = "paid"; // fail open, matching the jobs.js twin
+      // Unknown: keep the OLD answer rather than widen. A lookup that failed
+      // is not evidence of entitlement.
+      mode = null;
     }
-    if (mode === "paid" || mode === "trial_active") {
+
+    if (ownerExempt || mode === "trial_active") {
       const [allRows] = await connection.query(
         "SELECT DISTINCT feature_key FROM plan_features"
       );
@@ -1534,3 +1554,7 @@ router.post("/unlock", auth.authenticateToken, blockExpiredOwnRecord((r) => r.bo
 });
 
 module.exports = router;
+// Exported for test/trialEntitlement.test.js, which asserts a role-12
+// subcontractor gets [] here. Hung off the router object so the route
+// wiring is untouched.
+module.exports.getActivePlanFeatures = getActivePlanFeatures;

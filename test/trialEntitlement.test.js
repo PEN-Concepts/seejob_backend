@@ -55,7 +55,12 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       (10,'Trial Tina','tina@ex.com',14,NULL, NOW() - INTERVAL 5 DAY),
       (20,'Expired Ed','ed@ex.com',14,NULL,  NOW() - INTERVAL 200 DAY),
       (30,'Paid Pat','pat@ex.com',14,NULL,   NOW() - INTERVAL 200 DAY),
-      (40,'Basic Bea','bea@ex.com',14,NULL,  NOW() - INTERVAL 200 DAY)`);
+      (40,'Basic Bea','bea@ex.com',14,NULL,  NOW() - INTERVAL 200 DAY),
+      -- role 12 = subcontractor: in NEVER_GATED_ROLES, so getAccessInfo calls
+      -- them "paid" though they hold no subscription. Aged past the trial so
+      -- account age cannot be what saves us here.
+      (50,'Sub Sam','sam@ex.com',12,2,    NOW() - INTERVAL 200 DAY),
+      (60,'Owner Exempt','poul@oakcoast.net',14,NULL, NOW() - INTERVAL 200 DAY)`);
     await conn.query("INSERT INTO subscriptions (user_id,plan_id,status,created_at) VALUES (30,5,'active',NOW()),(40,1,'active',NOW())");
 
     const access = require('../utils/access');
@@ -92,14 +97,39 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // Exercised through the module's own export surface where possible; the
     // function is module-private, so drive it through a tiny harness that
     // mirrors the middleware's decision.
-    const budgetSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'budget.js'), 'utf8');
-    ok(/mode === "paid" \|\| mode === "trial_active"/.test(budgetSrc),
-      'budget.js getActivePlanFeatures now admits trial_active (was a bare `return []`)');
-    ok(/if \(!subRows\.length\) \{/.test(budgetSrc), 'budget.js no longer early-returns [] unconditionally');
+    // Behavioural, not a regex over the source. The previous version of this
+    // asserted that budget.js CONTAINED a particular string, which is not the
+    // same as asserting what it DOES - and it would have passed happily while
+    // the branch handed the full feature list to a subcontractor.
+    const { getActivePlanFeatures } = require('../routes/budget');
+    const feats = async (uid) => (await getActivePlanFeatures(conn, uid)) || [];
 
-    const jobsSrc = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'jobs.js'), 'utf8');
-    ok(/mode === "paid" \|\| mode === "trial_active"/.test(jobsSrc),
-      'jobs.js copy already admitted trials (unchanged — my audit was wrong about this one)');
+    ok((await feats(10)).length === 5,
+      'TRIAL gets the full feature list from budget.js getActivePlanFeatures',
+      JSON.stringify(await feats(10)));
+    ok((await feats(20)).length === 0,
+      'EXPIRED still gets [] - the widening did not reach dead trials',
+      JSON.stringify(await feats(20)));
+    ok((await feats(30)).length === 5,
+      'PAID Platinum unchanged - still its own plan features',
+      JSON.stringify(await feats(30)));
+    ok((await feats(40)).length === 1,
+      'PAID Basic unchanged - still exactly its one feature, not everything',
+      JSON.stringify(await feats(40)));
+
+    // THE REGRESSION GUARD. getAccessInfo() reports "paid" for role 12
+    // (NEVER_GATED_ROLES), so a branch testing mode === "paid" handed a
+    // subcontractor the entire Budget feature set. The branch now tests
+    // trial_active by name. If someone widens it again, this fails.
+    ok((await feats(50)).length === 0,
+      'role-12 SUBCONTRACTOR gets [] - reports "paid" with no subscription, but is not a trial',
+      JSON.stringify(await feats(50)));
+
+    // Owner-exempt is granted by its own explicit branch, not as a side
+    // effect of the trial path.
+    ok((await feats(60)).length === 5,
+      'OWNER-EXEMPT email still gets the full list, by its own branch',
+      JSON.stringify(await feats(60)));
 
     // ── 5. the expired-trial guard that must NOT have widened ───────────────
     ok(typeof access.denyExpiredFreeWrites === 'function', 'denyExpiredFreeWrites still exported');
