@@ -46,10 +46,12 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     await conn.query("CREATE TABLE teams (id INT PRIMARY KEY, team_name VARCHAR(120), team_color VARCHAR(20))");
     await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, created_by INT NULL, name VARCHAR(150), color VARCHAR(30) NULL, status INT DEFAULT 1)");
+    await conn.query("CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(150), user_id INT NULL, status VARCHAR(10) NULL)");
     // 700 = owner; 800 = a DIFFERENT account (created_by NULL → own account root).
     await conn.query("INSERT INTO `user` (id,name,email,role,category) VALUES (700,'Owner Olly','olly@x.com',14,2),(800,'Foreign Fran','fran@x.com',14,2)");
     // Job 10 belongs to 700; job 20 belongs to the foreign account 800.
     await conn.query("INSERT INTO `job` (id,created_by,name,color) VALUES (10,700,'Lynes - ADU','#a83279'),(20,800,'Foreign Job','#123456')");
+    await conn.query("INSERT INTO leads (id,lead_name,user_id) VALUES (77,'Oak Ave Bid',700),(88,'Foreign Bid',800)");
 
     const express = require('express');
     app = express();
@@ -66,6 +68,24 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // A) Create a section WITH an own-account job attached.
     const mk = await request(app).post('/api/checklists/sections').set('Authorization', OWNER).send({ type: 'task', title: 'Lynes pad', job_id: 10 });
     ok(mk.status === 201 && Number(mk.body?.data?.job_id) === 10, 'A: create section with own job → 201, job_id stored', JSON.stringify(mk.body));
+
+    // A2) Create a section against a LEAD. The Joi schema always accepted
+    //     lead_id but the INSERT never wrote it, so the pad came back
+    //     unattached — a silent loss, since the UI then showed no job or lead.
+    const mkLead = await request(app).post('/api/checklists/sections').set('Authorization', OWNER).send({ type: 'task', title: 'Oak Ave pad', lead_id: 77 });
+    ok(mkLead.status === 201 && Number(mkLead.body?.data?.lead_id) === 77,
+      'A2: create section with own LEAD -> 201, lead_id stored', JSON.stringify(mkLead.body));
+    ok(mkLead.status === 201 && mkLead.body?.data?.job_id == null,
+      'A2: and job_id stays null - a pad belongs to a job OR a lead, never both', JSON.stringify(mkLead.body));
+    {
+      const [[row]] = await conn.query('SELECT job_id, lead_id FROM checklist_sections WHERE id = ?', [mkLead.body?.data?.id]);
+      ok(row && Number(row.lead_id) === 77 && row.job_id == null,
+        'A2: and it is really in the table, not just echoed back', JSON.stringify(row));
+    }
+
+    // A3) A lead on someone else account is refused, like a foreign job.
+    const mkForeignLead = await request(app).post('/api/checklists/sections').set('Authorization', OWNER).send({ type: 'task', title: 'Nope', lead_id: 88 });
+    ok(mkForeignLead.status === 403, 'A3: a foreign LEAD is refused 403', String(mkForeignLead.status));
     const secId = mk.body.data.id;
 
     // B) Read returns the job's exact name + color.

@@ -475,12 +475,48 @@ router.post('/sections', auth.authenticateToken, async (req, res) => {
       }
       const jobId = jobRes.jobId;
 
-      const [result] = await connection.query(
-        `INSERT INTO checklist_sections
-          (owner_user_id, shared_with_user_id, type, title, sort_order, job_id)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [signedin_user, sharedWithUserId, type, title, sortOrder, jobId],
-      );
+      // A notepad can hang off a LEAD as well as a job (§5). The Joi schema
+      // above has always accepted lead_id, but the INSERT below never wrote
+      // it — so creating a pad against a bid silently produced an unattached
+      // pad. Ownership is checked the same way the UPDATE path checks it.
+      let leadId = null;
+      if (payload.lead_id != null) {
+        const owner = Number(await resolveOwnerId(signedin_user, connection));
+        const [[lead]] = await connection.query(
+          'SELECT id, user_id FROM leads WHERE id = ? LIMIT 1',
+          [Number(payload.lead_id)],
+        );
+        const leadOwner = lead ? Number(await resolveOwnerId(Number(lead.user_id), connection)) : null;
+        if (!lead || leadOwner !== owner) {
+          return res.status(403).json({ success: false, message: 'That lead is not in your account.' });
+        }
+        leadId = Number(payload.lead_id);
+      }
+      // Mutually exclusive, exactly as on update: a pad belongs to one or the
+      // other, never both.
+      const finalJobId = leadId != null ? null : jobId;
+
+      // checklist_sections.lead_id is created by ensureNotepadSchema, which this
+      // route does not run. So only mention the column when a lead is actually
+      // being attached: the no-lead path keeps exactly the INSERT it always had
+      // and gains no dependency on migration ordering.
+      let result;
+      if (leadId != null) {
+        await ensureNotepadSchema(connection);
+        [result] = await connection.query(
+          `INSERT INTO checklist_sections
+            (owner_user_id, shared_with_user_id, type, title, sort_order, job_id, lead_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [signedin_user, sharedWithUserId, type, title, sortOrder, null, leadId],
+        );
+      } else {
+        [result] = await connection.query(
+          `INSERT INTO checklist_sections
+            (owner_user_id, shared_with_user_id, type, title, sort_order, job_id)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [signedin_user, sharedWithUserId, type, title, sortOrder, jobId],
+        );
+      }
 
       res.status(201).json({
         success: true,
@@ -492,7 +528,8 @@ router.post('/sections', auth.authenticateToken, async (req, res) => {
           type,
           title,
           sort_order: sortOrder,
-          job_id: jobId,
+          job_id: finalJobId,
+          lead_id: leadId,
         },
       });
     } finally {
