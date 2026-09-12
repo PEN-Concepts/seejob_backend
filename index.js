@@ -130,6 +130,8 @@ app.use(`${api}/budget`, budget);
 app.use(`${api}/invoices`, invoices);
 app.use(`${api}/payments`, payments);
 app.use(`${api}/checklists`, notepadHub);
+// Per-login preferences (allowlisted keys, capped values) - see routes/preferences.js
+app.use(`${api}/preferences`, require("./routes/preferences"));
 app.use(`${api}/checklists`, notepadDelegate);
 app.use(`${api}/checklists`, checklists);
 app.use(`${api}/admin_contactRequest`, adminContact);
