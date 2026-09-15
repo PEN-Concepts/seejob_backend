@@ -46,8 +46,30 @@ const delegateSchema = Joi.object({
   photo: Joi.string().allow('', null).max(255).optional(),
 });
 
+/**
+ * A bare YYYY-MM-DD is parsed by new Date() as UTC midnight (ECMAScript
+ * requires it). Reading LOCAL parts off that then gives the PREVIOUS day in
+ * any negative-offset zone: 3 Oct becomes 2 Oct in California, so framing
+ * booked for the 3rd read as the 2nd.
+ *
+ * So a date-only string is built as LOCAL midnight from its own parts. A
+ * string that carries a time is untouched: V8 already parses that as local.
+ *
+ * This does NOT resolve the model question. due_date is a DATETIME and still
+ * cannot distinguish "3 Oct, all day" from "3 Oct at midnight" — both are
+ * stored as 00:00:00. That decision is still open; this only stops the day
+ * from moving.
+ */
+function parseDateInput(input) {
+  if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.trim())) {
+    const [y, m, d] = input.trim().split('-').map(Number);
+    return new Date(y, m - 1, d, 0, 0, 0, 0);
+  }
+  return new Date(input);
+}
+
 function toMySQLDateTime(date) {
-  const d = new Date(date);
+  const d = parseDateInput(date);
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }

@@ -112,21 +112,40 @@ const note = (m) => rec.push('  · ' + m);
     const storedDateOnly = await dueOf(dateOnlyId);
     note('date with no time is stored as: ' + JSON.stringify(storedDateOnly) +
          '  (DATETIME column — midnight, so "3 Oct" and "3 Oct 00:00" are the SAME stored value)');
-    // CHARACTERISATION, NOT APPROVAL. This pins the CURRENT behaviour so the
-    // defect is visible and cannot change unnoticed. A bare 'YYYY-MM-DD' is
-    // parsed as UTC midnight and then converted to local time, so in any
-    // negative-offset zone it lands on the PREVIOUS DAY. Picking 3 Oct stores
-    // 2 Oct 17:00 in Pacific. That is wrong and is reported, not fixed here:
-    // due_date is a DATETIME and genuinely cannot distinguish '3 Oct, no time'
-    // from '3 Oct at midnight', which makes it a data-model question rather
-    // than a parsing one. When it IS fixed, this assertion should start
-    // failing — that is the point of it.
-    ok(storedDateOnly !== null,
-      'a date with no time is stored (as something) rather than dropped',
+    // A bare YYYY-MM-DD is now parsed as LOCAL midnight. Previously new Date()
+    // read it as UTC midnight and the local parts came back as the PREVIOUS
+    // day — 3 Oct stored as 2 Oct 17:00 in Pacific.
+    //
+    // THE MODEL AMBIGUITY IS STILL OPEN. due_date is a DATETIME, so '3 Oct,
+    // all day' and '3 Oct at midnight' are the SAME stored value. This change
+    // only stops the DAY from moving; it does not add an all-day flag and
+    // does not answer the question Item 10 raised.
+    const offsetMin = new Date().getTimezoneOffset();
+    note('test machine offset: UTC' + (offsetMin > 0 ? '-' : '+') + Math.abs(offsetMin) / 60 +
+         '  (the bug only shows at a NEGATIVE offset; this run ' +
+         (offsetMin > 0 ? 'DOES' : 'does NOT') + ' exercise it)');
+    ok(offsetMin > 0,
+      'this run is at a negative UTC offset, where the day-shift bug appears',
+      'offset minutes ' + offsetMin);
+    ok(String(storedDateOnly).startsWith('2026-10-03'),
+      'a date picked as 3 Oct with no time STORES as 3 Oct, not 2 Oct',
       JSON.stringify(storedDateOnly));
-    ok(String(storedDateOnly).startsWith('2026-10-02'),
-      'KNOWN DEFECT pinned: a bare date shifts back a day in a negative-offset zone',
-      JSON.stringify(storedDateOnly));
+    ok(String(storedDateOnly).includes('00:00:00'),
+      'and stores at local midnight', JSON.stringify(storedDateOnly));
+
+    // ROUND TRIP. The fix is only correct if both directions agree.
+    //
+    // Read it back through the SAME driver the app reads with: mysql2 returns
+    // a DATETIME as a local-time JS Date, which is what every display path
+    // then formats. If the write and the read disagreed, the day would move
+    // again here.
+    const [[rt]] = await conn.query('SELECT due_date FROM check_list WHERE id = ?', [dateOnlyId]);
+    const back = rt && rt.due_date instanceof Date
+      ? `${rt.due_date.getFullYear()}-${String(rt.due_date.getMonth() + 1).padStart(2, '0')}-${String(rt.due_date.getDate()).padStart(2, '0')}`
+      : String(rt && rt.due_date).slice(0, 10);
+    ok(back === '2026-10-03',
+      'and it READS BACK as 3 Oct — the round trip lands on the day that was picked',
+      'read back as ' + back);
 
     // ── 4. The pre-existing date is untouched ──────────────────────────
     const dryIn = await dueOf(999);
@@ -137,7 +156,7 @@ const note = (m) => rec.push('  · ' + m);
     // ── 5. Reading the pad repeatedly writes nothing ───────────────────
     const [[before]] = await conn.query('SELECT COUNT(*) AS n FROM check_list WHERE due_date IS NOT NULL');
     for (let i = 0; i < 5; i++) {
-      await request(app).get('/api/checklists/items').set('Authorization', tok(700, 14, 4));
+      await request(app).get('/api/checklists/list').set('Authorization', tok(700, 14, 4));
     }
     const [[after]] = await conn.query('SELECT COUNT(*) AS n FROM check_list WHERE due_date IS NOT NULL');
     ok(Number(before.n) === Number(after.n),
