@@ -1,0 +1,10 @@
+{
+  "success": true,
+  "access": {
+    "is_account_owner": true,
+    "can_delegate": true,
+    "can_create_notepad": false,
+    "allowlist_len": 0
+  },
+  "pads": []
+}
