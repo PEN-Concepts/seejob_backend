@@ -28,7 +28,8 @@ const {
 const {
   lastActivityForJobs, lastActivityForLeads, daysSince, isStalled, activeSnoozes,
 } = require('../services/dashboardStalled');
-const { accountOwnerOf } = require('../services/notepadAccess');
+const { accountOwnerOf, isFullAccess } = require('../services/notepadAccess');
+const { buildDayStream, eachDay } = require('../services/dashboardDay');
 
 /** 'YYYY-MM-DD' only. Anything else is not a date we will store. */
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
@@ -277,6 +278,232 @@ router.get('/item-review', auth.authenticateToken, async (req, res) => {
     }
   } catch (err) {
     logger.error('dashboard item-review read error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/**
+ * GET /day?from=YYYY-MM-DD&to=YYYY-MM-DD — the merged day stream.
+ *
+ * Four sources: appointments, planner goals, dated notepad tasks, and dated
+ * inspection rows from job schedules. Nothing from master_calendar_tasks —
+ * that is the reusable trade list and has no date to be placed on.
+ */
+router.get('/day', auth.authenticateToken, async (req, res) => {
+  const uid = Number(res.locals.id);
+  const from = String(req.query.from || '').trim();
+  const to = String(req.query.to || '').trim();
+  if (!YMD.test(from) || !YMD.test(to)) {
+    return res.status(400).json({ success: false, message: 'from and to must be YYYY-MM-DD dates.' });
+  }
+  if (from > to) {
+    return res.status(400).json({ success: false, message: 'from must not be after to.' });
+  }
+  // A window, not the whole history — the page scrolls a few weeks either way.
+  if (eachDay(from, to).length > 120) {
+    return res.status(400).json({ success: false, message: 'Range too wide (max 120 days).' });
+  }
+
+  try {
+    const connection = await pool.getConnection();
+    try {
+      await ensureDashboardSchema(connection);
+      const owner = await accountOwnerOf(connection, uid);
+      const full = await isFullAccess(connection, uid);
+      const stream = await buildDayStream(connection, { uid, owner, from, to, full });
+
+      // Account-wide missed/kept for the window, folded in so the page does
+      // not need a second round trip.
+      let reviews = [];
+      try {
+        const [r] = await connection.query(
+          `SELECT item_type, item_id, DATE_FORMAT(occurs_on,'%Y-%m-%d') AS occurs_on, state
+             FROM dashboard_item_review
+            WHERE account_owner_id = ? AND occurs_on BETWEEN ? AND ?`,
+          [owner, from, to],
+        );
+        reviews = r;
+      } catch (e) { reviews = []; }
+
+      return res.status(200).json({ success: true, from, to, days: stream.days, reviews });
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    logger.error('dashboard day error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/**
+ * GET /exceptions — the three bands of §3.
+ *
+ * THE ROLL-UP RULE: one offending item on a container is named directly; two
+ * or more roll up to the container with a count. The point is that a single
+ * problem stays specific enough to act on, while five do not bury the rest of
+ * the page.
+ *
+ * Incomplete Gantt items are the one exception to the exception: they are
+ * NEVER listed individually — one row per job reading "<job> · Gantt chart",
+ * however many are incomplete.
+ */
+router.get('/exceptions', auth.authenticateToken, async (req, res) => {
+  const uid = Number(res.locals.id);
+  try {
+    const connection = await pool.getConnection();
+    try {
+      await ensureDashboardSchema(connection);
+      const owner = await accountOwnerOf(connection, uid);
+      const full = await isFullAccess(connection, uid);
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+      const jobs = new Map();
+      try {
+        const [js] = await connection.query('SELECT id, name, color FROM `job` WHERE created_by = ?', [owner]);
+        for (const j of js) jobs.set(Number(j.id), { name: j.name, color: j.color || null });
+      } catch (e) { /* none */ }
+
+      // ── PAST DUE — dated notepad tasks past their day and not complete.
+      const pastDue = [];
+      try {
+        const where = ['s.owner_user_id = ?'];
+        const params = [uid];
+        if (full) {
+          where.push("(s.scope = 'company' AND COALESCE(s.account_owner_id, s.owner_user_id) = ?)");
+          params.push(owner);
+        }
+        where.push('EXISTS (SELECT 1 FROM checklist_section_shares sh WHERE sh.section_id = s.id AND sh.user_id = ?)');
+        params.push(uid);
+        const [rows] = await connection.query(
+          `SELECT c.id, c.name, c.due_date, s.id AS section_id, s.job_id
+             FROM check_list c
+             JOIN checklist_sections s ON s.id = c.section_id
+            WHERE (${where.join(' OR ')})
+              AND c.due_date IS NOT NULL
+              AND DATE(c.due_date) < ?
+              AND (c.status IS NULL OR LOWER(c.status) <> 'complete')`,
+          [...params, today],
+        );
+        pastDue.push(...rows.map((r) => ({
+          id: Number(r.id), name: r.name, section_id: Number(r.section_id),
+          job_id: r.job_id == null ? null : Number(r.job_id),
+        })));
+      } catch (e) { /* none */ }
+
+      // ── INCOMPLETE — Gantt items with no assignee, and jobs with no schedule.
+      const incompleteGantt = new Map(); // job_id -> count
+      const noSchedule = [];
+      try {
+        const [rows] = await connection.query(
+          `SELECT sc.job_id, COUNT(*) AS n
+             FROM job_schedule_items i
+             JOIN job_schedules sc ON sc.id = i.schedule_id
+             JOIN \`job\` j ON j.id = sc.job_id
+            WHERE j.created_by = ? AND (i.assignee_user_id IS NULL OR i.computed_start_date IS NULL)
+            GROUP BY sc.job_id`,
+          [owner],
+        );
+        for (const r of rows) incompleteGantt.set(Number(r.job_id), Number(r.n));
+      } catch (e) { /* none */ }
+      try {
+        const [rows] = await connection.query(
+          `SELECT j.id FROM \`job\` j
+            WHERE j.created_by = ?
+              AND NOT EXISTS (SELECT 1 FROM job_schedules sc WHERE sc.job_id = j.id)`,
+          [owner],
+        );
+        for (const r of rows) noSchedule.push(Number(r.id));
+      } catch (e) { /* none */ }
+
+      // ── STALLED (reuses the same detection as GET /stalled).
+      const stalled = [];
+      try {
+        const [js] = await connection.query('SELECT id, name, color FROM `job` WHERE created_by = ?', [owner]);
+        let leads = [];
+        try {
+          const [l] = await connection.query('SELECT id, lead_name AS name FROM leads WHERE user_id = ?', [owner]);
+          leads = l;
+        } catch (e) { leads = []; }
+        const jobAct = await lastActivityForJobs(connection, js.map((j) => j.id));
+        const leadAct = await lastActivityForLeads(connection, leads.map((l) => l.id));
+        const snoozed = await activeSnoozes(connection, uid, now);
+        const th = stallDays();
+        for (const j of js) {
+          const ts = jobAct.get(Number(j.id)) || null;
+          if (!isStalled(ts, now, th) || snoozed.has(`job:${Number(j.id)}`)) continue;
+          stalled.push({ target_type: 'job', id: Number(j.id), label: j.name, sub: 'nothing changed', color: j.color || null, days: daysSince(ts, now) });
+        }
+        for (const l of leads) {
+          const ts = leadAct.get(Number(l.id)) || null;
+          if (!isStalled(ts, now, th) || snoozed.has(`lead:${Number(l.id)}`)) continue;
+          stalled.push({ target_type: 'lead', id: Number(l.id), label: l.name, sub: 'lead · no contact', color: null, days: daysSince(ts, now) });
+        }
+        stalled.sort((a, b) => (b.days || 0) - (a.days || 0));
+      } catch (e) { /* none */ }
+
+      // ── Apply the roll-up rule to PAST DUE.
+      const byJob = new Map();
+      const orphans = [];
+      for (const p of pastDue) {
+        if (p.job_id == null) { orphans.push(p); continue; }
+        if (!byJob.has(p.job_id)) byJob.set(p.job_id, []);
+        byJob.get(p.job_id).push(p);
+      }
+      const pastDueRows = [];
+      for (const [jid, list] of byJob) {
+        const job = jobs.get(jid) || { name: 'Job', color: null };
+        if (list.length === 1) {
+          // ONE offender is named directly — specific enough to act on.
+          pastDueRows.push({
+            kind: 'item', label: list[0].name, sub: job.name, color: job.color,
+            count: 1, job_id: jid, section_id: list[0].section_id, item_id: list[0].id,
+          });
+        } else {
+          // TWO OR MORE roll up to the container with a count.
+          pastDueRows.push({
+            kind: 'rollup', label: job.name, sub: 'notepad', color: job.color,
+            count: list.length, job_id: jid, section_id: list[0].section_id, item_id: null,
+          });
+        }
+      }
+      for (const o of orphans) {
+        pastDueRows.push({
+          kind: 'item', label: o.name, sub: 'notepad', color: null,
+          count: 1, job_id: null, section_id: o.section_id, item_id: o.id,
+        });
+      }
+
+      // ── INCOMPLETE rows. Gantt items NEVER list individually.
+      const incompleteRows = [];
+      for (const [jid, n] of incompleteGantt) {
+        const job = jobs.get(jid) || { name: 'Job', color: null };
+        incompleteRows.push({
+          kind: 'gantt', label: job.name, sub: 'Gantt chart', color: job.color,
+          count: n, job_id: jid, section_id: null, item_id: null,
+        });
+      }
+      for (const jid of noSchedule) {
+        const job = jobs.get(jid) || { name: 'Job', color: null };
+        incompleteRows.push({
+          kind: 'no-schedule', label: job.name, sub: 'no schedule', color: job.color,
+          count: 1, job_id: jid, section_id: null, item_id: null,
+        });
+      }
+
+      // A band with no items is ABSENT ENTIRELY — not an empty array the page
+      // has to remember to hide. §3.
+      const bands = {};
+      if (pastDueRows.length) bands.past_due = pastDueRows;
+      if (incompleteRows.length) bands.incomplete = incompleteRows;
+      if (stalled.length) bands.stalled = stalled;
+
+      return res.status(200).json({ success: true, bands });
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    logger.error('dashboard exceptions error: ' + err.message);
     return res.status(500).json({ success: false, message: 'Server error' });
   }
 });
