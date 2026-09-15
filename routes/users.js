@@ -274,11 +274,25 @@ async function sendOTPEmail(toEmail, otp) {
     `,
   };
 
+  // THIS USED TO SWALLOW ITS OWN FAILURE. It caught the error, logged it and
+  // returned normally, so the promise NEVER rejected and the caller's .catch()
+  // was dead code. The OTP request route then reported "OTP sent" whatever had
+  // happened, and a user was sent to watch an inbox that would never receive
+  // anything. The only trace was one line on a server they cannot read.
+  //
+  // It now PROPAGATES. The log line stays, because the real reason — bad
+  // credentials, quota, a refused host, a provider rejection — belongs on the
+  // server and nowhere else. What the caller gets is the failure itself, so it
+  // can decide what the user is told.
+  //
+  // NO EMAIL ADDRESS IS LOGGED HERE, deliberately. A caller that needs to
+  // identify the recipient logs the user id instead.
   try {
     await transporter.sendMail(mailOptions);
     logger.info("OTP email sent successfully!");
   } catch (error) {
     logger.error("Error sending OTP email:", error);
+    throw error;
   }
 }
 
@@ -554,7 +568,14 @@ router.post("/register", async (req, res) => {
       await sendPasswordEmail(r.email, plainPassword);
     } else {
       // Send ONLY OTP
-      await sendOTPEmail(r.email, otp);
+      // SCOPE GUARD, NOT AN OVERSIGHT. sendOTPEmail now propagates, but this
+      // is the REGISTRATION path, not the OTP login path this change is scoped
+      // to. Registration has always completed even when its mail failed, and
+      // silently changing that would turn a mail blip into a failed signup.
+      // The old fire-and-forget behaviour is preserved HERE, on purpose, and
+      // is its own decision to revisit.
+      try { await sendOTPEmail(r.email, otp); }
+      catch (mailErr) { logger.error("Registration OTP email failed: " + mailErr.message); }
     }
 
     // ðŸ”¥ LEAVES LOGIC (ONLY FOR EMPLOYEES)
@@ -940,14 +961,39 @@ router.post("/login-otp-request", async (req, res) => {
       [otp, Number(user.id), Number(user.id)]
     );
 
-    // Send the email in the background — don't make the user wait on SMTP
-    sendOTPEmail(normalizedEmail, otp).catch((mailErr) => {
-      logger.error(`OTP email failed for ${normalizedEmail}:`, mailErr);
-    });
+    // AWAIT THE SEND, AND SAY SO IF IT FAILS.
+    //
+    // This used to be fire-and-forget with a comment reading "don't make the
+    // user wait on SMTP". The intent was reasonable; the effect was that a
+    // total mail outage looked identical to success. The user was told to
+    // check an inbox nothing would ever arrive in, and the only record was a
+    // log line on a server they cannot read.
+    //
+    // Waiting costs a moment on the happy path. Not waiting cost an evening.
+    //
+    // WHAT THE CLIENT IS TOLD IS DELIBERATELY GENERIC. No SMTP detail, no
+    // provider, no bounce reason: those describe our infrastructure and belong
+    // in the log above, which sendOTPEmail already writes. The user gets what
+    // they can act on — it didn't send, try again, or ask the account owner.
+    try {
+      await sendOTPEmail(normalizedEmail, otp);
+    } catch (mailErr) {
+      // User id, never the address. The address is the caller's own input and
+      // repeating it into the log adds nothing but a personal detail at rest.
+      logger.error(`OTP email send failed for user id ${Number(user.id)}: ${mailErr && mailErr.message}`);
+      return res.status(200).json({
+        code: "502",
+        message: "We could not send your code. Try again shortly, or contact your account owner.",
+        data: {},
+      });
+    }
 
     return res.status(200).json({ code: "200", message: "OTP sent", data: {} });
   } catch (error) {
-    logger.error(`- ${normalizedEmail} - ${new Date()} - Login OTP request error:`, error);
+    // The address was being written into this log line on EVERY error. Dropped:
+    // it identifies nobody the id cannot, and it put an address in the log on
+    // paths that had nothing to do with mail.
+    logger.error(`- ${new Date()} - Login OTP request error:`, error);
     return res.status(200).json({ code: "500", message: "Internal Server Error", data: {} });
   } finally {
     if (connection) connection.release();
@@ -1004,9 +1050,38 @@ router.post("/login-otp-verify", async (req, res) => {
     );
 
     if (!rows.length) {
+      // EXPIRED IS NOT THE SAME AS WRONG, and telling someone "invalid or
+      // expired" when their code was simply stale sends them hunting for a
+      // typo that isn't there. Especially when mail is slow: a code can land
+      // already dead, and the old message gave no hint of that.
+      //
+      // THE VERIFICATION ABOVE IS UNTOUCHED. This is a second, read-only
+      // lookup that runs ONLY after the authoritative query has already
+      // refused, purely to choose the wording. It grants nothing: it can only
+      // report on a code the caller has already supplied, which they must
+      // hold to be asking in the first place.
+      let expired = false;
+      try {
+        const [[stale]] = await connection.query(
+          `SELECT 1 AS x
+             FROM user u
+            WHERE u.email = ?
+              AND LPAD(CAST(u.otp AS CHAR), 4, '0') = ?
+              AND u.otp_status = 1
+              AND u.updated_at < (NOW() - INTERVAL 3 MINUTE)
+            LIMIT 1`,
+          [normalizedEmail, normalizedOtpDigits]
+        );
+        expired = !!stale;
+      } catch (e) {
+        // Wording is not worth a 500. Fall back to the original message.
+      }
+
       return res.status(200).json({
         code: "400",
-        message: "Invalid or expired OTP.",
+        message: expired
+          ? "That code has expired. Codes last 3 minutes — request a new one."
+          : "That code is not correct. Check the digits and try again.",
         data: {},
       });
     }
@@ -2331,7 +2406,11 @@ router.post("/resendotp", async (req, res) => {
       });
     }
 
-    await sendOTPEmail(signedin_useremail, otp);
+    // SCOPE GUARD — see the note on the registration path. This is the
+    // change-password path, not the OTP login path. Its prior behaviour is
+    // preserved deliberately.
+    try { await sendOTPEmail(signedin_useremail, otp); }
+    catch (mailErr) { logger.error("Change-password OTP email failed: " + mailErr.message); }
 
     return res.status(200).json({
       code: "200",
