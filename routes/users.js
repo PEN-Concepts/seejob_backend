@@ -611,9 +611,29 @@ router.post("/register", async (req, res) => {
   } catch (error) {
     if (process.env.SJR_DEBUG_REGISTER) console.error('REGISTER ERR:', error && error.stack ? error.stack : error);
     if (error.code === "ER_DUP_ENTRY") {
+      // THIS IS NOW THE ONLY WAY SIGNUP LEARNS AN EMAIL IS TAKEN, since
+      // /check-email was deleted as an enumeration oracle. So it has to say
+      // something a person can act on, not "Email and Mobile must be unique",
+      // which named two fields, identified neither, and offered no way out.
+      //
+      // Keyed off the index MySQL actually rejected on rather than assuming:
+      // `user.mobile` once carried a UNIQUE index and a migration dropped it,
+      // so in practice this is always the email — but reading the error keeps
+      // that true if an index is ever added back.
+      //
+      // NOT AN ENUMERATION LEAK. Registration has to refuse a duplicate to
+      // function at all; the address was typed by whoever is holding the form,
+      // and they learn only about the one they submitted. That is categorically
+      // different from an endpoint that answers the question for any address,
+      // unauthenticated, eleven times a second.
+      const dupKey = String((error && error.sqlMessage) || "").toLowerCase();
+      const isEmailDup = dupKey.includes("email") || !dupKey.includes("mobile");
       return res.status(409).json({
         code: "409",
-        message: "Email and Mobile must be unique",
+        field: isEmailDup ? "email" : "mobile",
+        message: isEmailDup
+          ? "That email is already registered. Sign in instead."
+          : "That mobile number is already registered. Sign in instead.",
         data: {},
       });
     }
@@ -3674,16 +3694,27 @@ router.put("/approve-leave/:leaveId", auth.authenticateToken, async (req, res) =
   }
 });
 
-router.post('/check-email', async (req, res) => {
-  const { email } = req.body;
-  try {
-    const [rows] = await pool.query('SELECT id FROM user WHERE email = ?', [email]);
-    res.json({ exists: rows.length > 0 });
-  } catch (error) {
-    logger.error("Error checking email:", error);
-    res.status(500).json({ message: 'Error checking email' });
-  }
-});
+// ── DELETED: POST /check-email ───────────────────────────────────────────
+//
+// It took an email address and returned {"exists": true|false}. No token, no
+// rate limit, about 90ms a call. That is an account-enumeration oracle, and on
+// this platform a worse one than usual: logins here ARE subcontractors' and
+// clients' email addresses, so anyone could map which contractors are on See
+// Job Run and, joined to public information, infer who works with whom.
+// Measured on production before removal: roughly eleven addresses a second,
+// from anywhere, with nothing to stop it.
+//
+// ONLY THE SIGNUP FORM CALLED IT. Searched the web app, the mobile app and
+// this codebase: three call sites, all in the signup flow, no server-side
+// caller. Signup now learns about a duplicate from /register, which already
+// refuses on the email UNIQUE index and now says which field and what to do.
+//
+// DO NOT REINSTATE IT, and do not "fix" it with a rate limit or a CAPTCHA — a
+// rate-limited boolean is still a boolean. The honest-user benefit it gave
+// (learning while typing instead of on submit) is available from the submit
+// response without handing the user list to anyone who asks. If the behaviour
+// is ever genuinely needed, put it behind authentication and think hard about
+// who is allowed to ask.
 
 router.get("/check-device", async (req, res) => {
  
