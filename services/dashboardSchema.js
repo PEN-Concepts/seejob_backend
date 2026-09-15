@@ -64,9 +64,21 @@ async function ensureDashboardSchema(connection) {
   );
 
   // ── MISSED / KEPT ─────────────────────────────────────────────────────
-  // The user's review of a past item.
+  // A RECORD OF WHAT HAPPENED, AND THEREFORE ACCOUNT-WIDE.
   //
-  // `occurs_on` is part of the key because a Planner goal recurs: missing it
+  // This is the one thing here that is NOT per user, and the distinction is
+  // deliberate. The snooze means "stop nagging ME", and two people can
+  // reasonably want different things. Missed/kept is a fact: if the Tuesday
+  // inspection did not happen, it did not happen for everybody. Scoped per
+  // user, the boss and an employee could hold contradictory beliefs about
+  // whether an inspection took place and the app would show both as true.
+  //
+  // So the key is the ACCOUNT, not the person. Whoever sets it, sets it for
+  // everyone. `set_by_user_id` records who, because "it did not happen" is
+  // worth being able to attribute — but it is not part of the key, so it
+  // cannot fork the answer.
+  //
+  // `occurs_on` IS part of the key, because a Planner goal recurs: missing it
   // on Monday says nothing about Tuesday. Without the day, confirming one
   // Monday missed would mark every occurrence of that goal missed forever.
   //
@@ -76,15 +88,16 @@ async function ensureDashboardSchema(connection) {
     connection.query(`
       CREATE TABLE IF NOT EXISTS dashboard_item_review (
         id INT AUTO_INCREMENT PRIMARY KEY,
-        user_id INT NOT NULL,
+        account_owner_id INT NOT NULL,
         item_type VARCHAR(16) NOT NULL,
         item_id INT NOT NULL,
         occurs_on DATE NOT NULL,
         state VARCHAR(8) NOT NULL,
+        set_by_user_id INT NULL DEFAULT NULL,
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME NULL DEFAULT NULL,
-        UNIQUE KEY uq_dir_user_item_day (user_id, item_type, item_id, occurs_on),
-        KEY idx_dir_user_day (user_id, occurs_on)
+        UNIQUE KEY uq_dir_account_item_day (account_owner_id, item_type, item_id, occurs_on),
+        KEY idx_dir_account_day (account_owner_id, occurs_on)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `),
   );

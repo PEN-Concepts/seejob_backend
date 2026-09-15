@@ -1,11 +1,20 @@
 'use strict';
 
 /**
- * One-day Spartan Dashboard — stall snooze and the STALLED band.
+ * One-day Spartan Dashboard — the STALLED band, the snooze, and the
+ * missed/kept review.
  *
- * Everything here is PER USER. One person snoozing a stalled job must never
- * silence it for anybody else, so every read and write is scoped by the
- * caller's own id and there is no account-wide variant of either.
+ * TWO DIFFERENT SCOPES, ON PURPOSE. Do not collapse them.
+ *
+ *   SNOOZE is PER USER. It means "stop nagging ME about this job", and two
+ *   people can reasonably want different things. One person silencing a
+ *   stalled job must never silence it for anybody else.
+ *
+ *   MISSED / KEPT is PER ACCOUNT. It records what happened, and what happened
+ *   is the same for everyone: if the Tuesday inspection did not take place, it
+ *   did not take place for the boss and the foreman alike. Per user, two
+ *   people could hold contradictory beliefs about whether an inspection
+ *   occurred and the app would show both as true.
  */
 
 const express = require('express');
@@ -13,7 +22,9 @@ const router = express.Router();
 const pool = require('../config/connection');
 const logger = require('../common/logger');
 const auth = require('../services/authentication');
-const { ensureDashboardSchema, stallDays, SNOOZE_TARGETS } = require('../services/dashboardSchema');
+const {
+  ensureDashboardSchema, stallDays, SNOOZE_TARGETS, REVIEWABLE, REVIEW_STATES,
+} = require('../services/dashboardSchema');
 const {
   lastActivityForJobs, lastActivityForLeads, daysSince, isStalled, activeSnoozes,
 } = require('../services/dashboardStalled');
@@ -172,6 +183,100 @@ router.get('/stalled', auth.authenticateToken, async (req, res) => {
     }
   } catch (err) {
     logger.error('dashboard stalled error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/**
+ * POST /item-review — mark a past item MISSED or KEPT.
+ *
+ * ACCOUNT-WIDE, unlike the snooze. This records what happened, and what
+ * happened is the same for everyone: if the Tuesday inspection did not take
+ * place, it did not take place for the boss and the foreman alike. Whoever
+ * sets it, sets it for the account.
+ *
+ * Grey — "not yet reviewed" — is the ABSENCE of a row. Only this endpoint
+ * writes one, so grey can never harden into red on its own.
+ */
+router.post('/item-review', auth.authenticateToken, async (req, res) => {
+  const uid = Number(res.locals.id);
+  const body = req.body || {};
+  const itemType = String(body.item_type || '').trim();
+  const itemId = Number(body.item_id);
+  const occursOn = String(body.occurs_on || '').trim();
+  const state = String(body.state || '').trim();
+
+  if (!REVIEWABLE.has(itemType)) {
+    return res.status(400).json({ success: false, message: 'Unknown item_type.' });
+  }
+  if (!Number.isInteger(itemId) || itemId <= 0) {
+    return res.status(400).json({ success: false, message: 'item_id must be a positive id.' });
+  }
+  if (!YMD.test(occursOn)) {
+    return res.status(400).json({ success: false, message: 'occurs_on must be a YYYY-MM-DD date.' });
+  }
+  if (!REVIEW_STATES.has(state)) {
+    return res.status(400).json({ success: false, message: 'state must be missed or kept.' });
+  }
+
+  try {
+    const connection = await pool.getConnection();
+    try {
+      await ensureDashboardSchema(connection);
+      const owner = await accountOwnerOf(connection, uid);
+
+      await connection.query(
+        `INSERT INTO dashboard_item_review
+           (account_owner_id, item_type, item_id, occurs_on, state, set_by_user_id)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           state = VALUES(state),
+           set_by_user_id = VALUES(set_by_user_id),
+           updated_at = NOW()`,
+        [owner, itemType, itemId, occursOn, state, uid],
+      );
+
+      const [[stored]] = await connection.query(
+        `SELECT account_owner_id, item_type, item_id,
+                DATE_FORMAT(occurs_on,'%Y-%m-%d') AS occurs_on, state, set_by_user_id
+           FROM dashboard_item_review
+          WHERE account_owner_id = ? AND item_type = ? AND item_id = ? AND occurs_on = ? LIMIT 1`,
+        [owner, itemType, itemId, occursOn],
+      );
+      return res.status(200).json({ success: true, review: stored });
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    logger.error('dashboard item-review error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/** GET /item-review?on=YYYY-MM-DD — the account's reviews for one day. */
+router.get('/item-review', auth.authenticateToken, async (req, res) => {
+  const uid = Number(res.locals.id);
+  const on = String(req.query.on || '').trim();
+  if (!YMD.test(on)) {
+    return res.status(400).json({ success: false, message: 'on must be a YYYY-MM-DD date.' });
+  }
+  try {
+    const connection = await pool.getConnection();
+    try {
+      await ensureDashboardSchema(connection);
+      const owner = await accountOwnerOf(connection, uid);
+      const [rows] = await connection.query(
+        `SELECT item_type, item_id, DATE_FORMAT(occurs_on,'%Y-%m-%d') AS occurs_on, state, set_by_user_id
+           FROM dashboard_item_review
+          WHERE account_owner_id = ? AND occurs_on = ?`,
+        [owner, on],
+      );
+      return res.status(200).json({ success: true, reviews: rows });
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    logger.error('dashboard item-review read error: ' + err.message);
     return res.status(500).json({ success: false, message: 'Server error' });
   }
 });
