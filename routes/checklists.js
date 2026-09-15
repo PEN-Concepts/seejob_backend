@@ -1101,11 +1101,18 @@ router.post('/create', auth.authenticateToken, async (req, res) => {
 
       const finalPriority = priority ?? 'low';
       const finalStatus = status ?? 'new';
-      const finalDueDate = due_date
-        ? toMySQLDateTime(due_date)
-        : normalizedType === 'task'
-          ? toMySQLDateTime(new Date())
-          : null;
+      // NO DATE MEANS NO DATE.
+      //
+      // This used to fall through to toMySQLDateTime(new Date()) for task-type
+      // items, so EVERY notepad line added without a date was stamped with the
+      // moment it was typed. Not a display default — written straight into
+      // check_list.due_date on INSERT, which is why it survived a refresh, drove
+      // the "late" calculation, and re-sorted the list around values nobody
+      // had entered.
+      //
+      // Undated is a valid, common and intended state. If the user gave no
+      // date, store null.
+      const finalDueDate = due_date ? toMySQLDateTime(due_date) : null;
 
       const sql = `
         INSERT INTO check_list
