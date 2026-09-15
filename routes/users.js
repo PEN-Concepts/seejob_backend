@@ -1001,13 +1001,27 @@ router.post("/login-otp-request", async (req, res) => {
 
     const otp = generateOTP();
 
-    await connection.query(
-      // otp_attempts = 0: the counter belongs to the code currently on the row,
-      // so issuing a new one starts its budget fresh. Without this a user who
-      // burned a code could never use the replacement.
-      "UPDATE user SET otp = ?, otp_status = 1, otp_attempts = 0, updated_at = NOW(), updated_by = ? WHERE id = ?",
-      [otp, Number(user.id), Number(user.id)]
-    );
+    // otp_attempts = 0: the counter belongs to the code currently on the row, so
+    // issuing a new one starts its budget fresh. Without this a user who burned
+    // a code could never use the replacement.
+    //
+    // FALLS BACK IF THE COLUMN IS MISSING. The migration call above is wrapped
+    // in a try, so a failed ALTER (permissions, a locked table) would otherwise
+    // make this statement throw and turn "request a code" into a 500 for EVERY
+    // user — an outage worse than the hole being closed. The counter is a safety
+    // feature and must never become the thing that breaks sign-in.
+    try {
+      await connection.query(
+        "UPDATE user SET otp = ?, otp_status = 1, otp_attempts = 0, updated_at = NOW(), updated_by = ? WHERE id = ?",
+        [otp, Number(user.id), Number(user.id)]
+      );
+    } catch (colErr) {
+      logger.error('OTP request: otp_attempts unavailable, issuing without it: ' + (colErr && colErr.message));
+      await connection.query(
+        "UPDATE user SET otp = ?, otp_status = 1, updated_at = NOW(), updated_by = ? WHERE id = ?",
+        [otp, Number(user.id), Number(user.id)]
+      );
+    }
 
     // AWAIT THE SEND, AND SAY SO IF IT FAILS.
     //
@@ -1236,10 +1250,20 @@ router.post("/login-otp-verify", async (req, res) => {
     // ===============================
     // Clear OTP
     // ===============================
-    await connection.query(
-      "UPDATE user SET otp_status = 0, otp = '', otp_attempts = 0, updated_at = NOW(), updated_by = ? WHERE id = ?",
-      [id, id]
-    );
+    // Same fallback as the request path: a missing counter column must never
+    // stop a CORRECT code from signing someone in.
+    try {
+      await connection.query(
+        "UPDATE user SET otp_status = 0, otp = '', otp_attempts = 0, updated_at = NOW(), updated_by = ? WHERE id = ?",
+        [id, id]
+      );
+    } catch (colErr) {
+      logger.error('OTP verify: otp_attempts unavailable on clear: ' + (colErr && colErr.message));
+      await connection.query(
+        "UPDATE user SET otp_status = 0, otp = '', updated_at = NOW(), updated_by = ? WHERE id = ?",
+        [id, id]
+      );
+    }
 
     // ===============================
     // Get User Rights (FIXED)
