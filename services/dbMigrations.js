@@ -1328,6 +1328,32 @@ async function ensureDeviceTokenUnique(connection) {
   deviceTokenUniqueEnsured = true;
 }
 
+// OTP ATTEMPT CAP. Counts WRONG guesses against the code currently on the
+// row. At five the code is invalidated — not the account, which is the whole
+// point: burning a code costs the attacker their guess budget, while locking
+// an account would let anyone shut a contractor out of the product just by
+// guessing at their address five times.
+//
+// Before this existed there was NO cap, NO lockout and NO delay: a four-digit
+// code (10,000 possibilities) could be ground down at roughly eleven requests
+// a second for the full three minutes it stayed alive — about a one-in-five
+// chance per code, repeatable. Five attempts makes it one in two thousand.
+//
+// Reset to 0 whenever a NEW code is issued and whenever a code is used
+// successfully, so the counter always belongs to the code on the row.
+let otpAttemptsEnsured = false;
+async function ensureOtpAttemptsColumn(connection) {
+  if (otpAttemptsEnsured) return;
+  const [[row]] = await connection.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = 'otp_attempts'`
+  );
+  if (!row) {
+    await connection.query('ALTER TABLE `user` ADD COLUMN otp_attempts INT NOT NULL DEFAULT 0');
+  }
+  otpAttemptsEnsured = true;
+}
+
 // ── Chat system (group chat per Job/Lead + 1:1 DMs) ──────────────────────────
 // Four tables modeled on the existing task_assignees/tasks_images patterns.
 let chatTablesEnsured = false;
@@ -1601,6 +1627,7 @@ module.exports = {
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,
+  ensureOtpAttemptsColumn,
   ensureDeviceTokenUnique,
   dropUserMobileUniqueIndex,
   ensureSuggestedItemsTable,

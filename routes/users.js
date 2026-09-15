@@ -9,7 +9,7 @@ const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS, getAccessMode, hasLevelAtLeast } = require("../utils/access");
-const { ensureOwnerTypeColumns, ensureContactAuthorityColumn } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureContactAuthorityColumn, ensureOtpAttemptsColumn } = require("../services/dbMigrations");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const path = require("path");
 const multer = require("multer");
@@ -206,14 +206,35 @@ transporter.verify((err, success) => {
   }
 });
 
-// Function to generate a random OTP
+// OTP_DIGITS stays at 4 in THIS change, deliberately. Moving to six digits
+// requires the clients to accept a variable length first, and shipping the
+// length change ahead of them would lock every user out of the product at once.
+// The GENERATOR is switched here because that part is backend-only and safe.
+const OTP_DIGITS = 4;
+
+// Five wrong guesses and the code dies. The CODE — never the account.
+const OTP_MAX_ATTEMPTS = 5;
+
+/**
+ * WAS Math.random(), which is a finding in its own right rather than a tidy-up.
+ *
+ * Math.random() is not a cryptographic generator: V8 runs an xorshift128+
+ * stream per context and its outputs are not independent — given enough
+ * observed values the internal state can be recovered and SUBSEQUENT values
+ * predicted. Anyone who can see a handful of codes (their own, requested
+ * repeatedly) may therefore be attacking something far weaker than the
+ * 1-in-10,000 the digit count implies.
+ *
+ * crypto.randomInt draws from the OS CSPRNG and rejection-samples, so the
+ * distribution is uniform across the range with no modulo bias.
+ *
+ * padStart keeps the width fixed: randomInt can return 7, and "0007" is a
+ * valid code where "7" is not. Losing leading zeros would quietly shrink the
+ * space and break the comparison against the stored value.
+ */
 function generateOTP() {
-  const digits = "0123456789";
-  let OTP = "";
-  for (let i = 0; i < 4; i++) {
-    OTP += digits[Math.floor(Math.random() * 10)];
-  }
-  return OTP;
+  const max = Math.pow(10, OTP_DIGITS);
+  return String(crypto.randomInt(0, max)).padStart(OTP_DIGITS, "0");
 }
 
 function generateRandomPassword(length = 10) {
@@ -960,6 +981,10 @@ router.post("/login-otp-request", async (req, res) => {
 
   try {
     connection = await pool.getConnection();
+    // The counter column is added by migration; ensure it before anything
+    // on this path reads or writes it, so the route works on a database
+    // that has not been migrated yet.
+    try { await ensureOtpAttemptsColumn(connection); } catch (e) {}
     const [rows] = await connection.query(
       "SELECT id, status FROM user WHERE email = ? LIMIT 1",
       [normalizedEmail]
@@ -977,7 +1002,10 @@ router.post("/login-otp-request", async (req, res) => {
     const otp = generateOTP();
 
     await connection.query(
-      "UPDATE user SET otp = ?, otp_status = 1, updated_at = NOW(), updated_by = ? WHERE id = ?",
+      // otp_attempts = 0: the counter belongs to the code currently on the row,
+      // so issuing a new one starts its budget fresh. Without this a user who
+      // burned a code could never use the replacement.
+      "UPDATE user SET otp = ?, otp_status = 1, otp_attempts = 0, updated_at = NOW(), updated_by = ? WHERE id = ?",
       [otp, Number(user.id), Number(user.id)]
     );
 
@@ -1046,6 +1074,10 @@ router.post("/login-otp-verify", async (req, res) => {
 
   try {
     connection = await pool.getConnection();
+    // The counter column is added by migration; ensure it before anything
+    // on this path reads or writes it, so the route works on a database
+    // that has not been migrated yet.
+    try { await ensureOtpAttemptsColumn(connection); } catch (e) {}
 
     const [rows] = await connection.query(
       `SELECT 
@@ -1080,26 +1112,77 @@ router.post("/login-otp-verify", async (req, res) => {
       // refused, purely to choose the wording. It grants nothing: it can only
       // report on a code the caller has already supplied, which they must
       // hold to be asking in the first place.
+      //
+      // THE ATTEMPT CAP LIVES HERE TOO. Five wrong guesses against a live code
+      // and the code is invalidated — the CODE, never the account. Locking the
+      // account would let anyone shut a contractor out of the product by
+      // guessing at their address five times, which is a worse bug than the one
+      // being fixed.
+      //
+      // Before this, a wrong guess cost the attacker nothing at all: the code
+      // survived every failure until its three-minute expiry, so a four-digit
+      // space could be ground down at the request rate for the full window.
       let expired = false;
+      let burned = false;
       try {
-        const [[stale]] = await connection.query(
-          `SELECT 1 AS x
-             FROM user u
-            WHERE u.email = ?
-              AND LPAD(CAST(u.otp AS CHAR), 4, '0') = ?
-              AND u.otp_status = 1
-              AND u.updated_at < (NOW() - INTERVAL 3 MINUTE)
-            LIMIT 1`,
-          [normalizedEmail, normalizedOtpDigits]
+        await ensureOtpAttemptsColumn(connection);
+
+        const [[state]] = await connection.query(
+          `SELECT id, otp_status, otp_attempts,
+                  (updated_at < (NOW() - INTERVAL 3 MINUTE)) AS is_stale,
+                  (LPAD(CAST(otp AS CHAR), ?, '0') = ?) AS code_matches
+             FROM user WHERE email = ? LIMIT 1`,
+          [OTP_DIGITS, normalizedOtpDigits, normalizedEmail]
         );
-        expired = !!stale;
+
+        if (state) {
+          if (Number(state.otp_status) !== 1) {
+            // No live code on the row: already used, or burned by a previous
+            // run of this very branch. Reads as expired, which it effectively is.
+            expired = true;
+          } else if (Number(state.is_stale) === 1) {
+            expired = true;
+          } else if (Number(state.code_matches) !== 1) {
+            // A WRONG guess against a LIVE code. Charge it.
+            //
+            // Counted and burned in ONE statement so parallel guesses cannot
+            // race past the cap: without this, N simultaneous requests could
+            // each read 4 and each decide they were the fifth.
+            //
+            // ORDER MATTERS AND IS NOT COSMETIC. MySQL evaluates SET clauses
+            // left to right, and a later clause sees the NEW value of a column
+            // already assigned. With the increment written first, the guards'
+            // `otp_attempts + 1` read the ALREADY-incremented value and burned
+            // the code an attempt early — a cap of four, not five. The guards
+            // therefore come FIRST, while otp_attempts still holds the
+            // pre-increment count, so `+ 1` means "the attempt being made now".
+            await connection.query(
+              `UPDATE \`user\`
+                  SET otp_status = IF(otp_attempts + 1 >= ?, 0, otp_status),
+                      otp        = IF(otp_attempts + 1 >= ?, '', otp),
+                      otp_attempts = otp_attempts + 1
+                WHERE id = ? AND otp_status = 1`,
+              [OTP_MAX_ATTEMPTS, OTP_MAX_ATTEMPTS, Number(state.id)]
+            );
+            const [[after]] = await connection.query(
+              'SELECT otp_status FROM `user` WHERE id = ? LIMIT 1',
+              [Number(state.id)]
+            );
+            burned = !!after && Number(after.otp_status) !== 1;
+          }
+        }
       } catch (e) {
-        // Wording is not worth a 500. Fall back to the original message.
+        // Neither the wording nor the counter is worth a 500 to the user.
+        logger.error('OTP verify attempt accounting failed: ' + (e && e.message));
       }
 
+      // A BURNED CODE AND AN EXPIRED CODE READ IDENTICALLY, on purpose. Both
+      // mean "this code is dead, ask for another", and saying which would tell
+      // an attacker whether they had exhausted the budget or simply run out of
+      // time. Neither message discloses attempts used or remaining.
       return res.status(200).json({
         code: "400",
-        message: expired
+        message: (expired || burned)
           ? "That code has expired. Codes last 3 minutes — request a new one."
           : "That code is not correct. Check the digits and try again.",
         data: {},
@@ -1154,7 +1237,7 @@ router.post("/login-otp-verify", async (req, res) => {
     // Clear OTP
     // ===============================
     await connection.query(
-      "UPDATE user SET otp_status = 0, otp = '', updated_at = NOW(), updated_by = ? WHERE id = ?",
+      "UPDATE user SET otp_status = 0, otp = '', otp_attempts = 0, updated_at = NOW(), updated_by = ? WHERE id = ?",
       [id, id]
     );
 
