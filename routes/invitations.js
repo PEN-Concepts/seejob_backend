@@ -49,6 +49,22 @@ const { checkLicense, checkAllLicenses, ensureCslbColumns } = require("../servic
 const { ensureContactStatusColumn } = require("../services/dbMigrations");
 
 //get contacts
+// getuserbycategory and getuserbysubcategory were DELETED here.
+//
+// They were unscoped duplicates: their WHERE clause was the caller-supplied
+// category alone, with no company, owner or contact join, so they returned
+// matching users across every company. routes/contacts.js carries the SAME
+// two paths, correctly scoped through getContactScope/visibleUserPredicate —
+// someone fixed the exposure there and missed these copies.
+//
+// Nothing called either one: no component, template, service method or URL
+// string anywhere in the frontend, and no internal caller here. Import
+// Contractors posts licence numbers to /bulk-create-from-licenses and does
+// not browse users at all.
+//
+// If you need this shape, use the routes/contacts.js versions. Do not
+// re-add an unscoped copy.
+
 router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
   let connection;
   try {
@@ -684,63 +700,8 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
 });
 
 
-// NOTE ON THESE TWO ENDPOINTS (getuserbycategory / getuserbysubcategory).
-//
-// Their WHERE clause is the caller-supplied category alone — no company, no
-// owner, no contact join — so they return matching users ACROSS EVERY
-// COMPANY. They previously also returned email and mobile, which made them a
-// usable export of other companies contact details.
-//
-// Email and mobile were removed. That changes no WHERE clause, so it cannot
-// change which rows come back; it removes the part of the payload worth
-// taking. The row breadth is a separate, open question.
-//
-// At the time of writing NOTHING in the frontend calls either endpoint, and
-// Import Contractors on the Contacts page does not: that posts license
-// numbers to /invitation/bulk-create-from-licenses. If that is still true
-// when you read this, these two routes should be deleted outright rather
-// than narrowed further.
-//
-// Do not add email, mobile or any other personal column back without first
-// giving these queries an ownership clause.
-router.get("/getuserbycategory/:id", auth.authenticateToken, async (req, res) => {
-    const id = req.params.id;
-    let connection;
-    try {
-        connection = await pool.getConnection();
-        query = "SELECT u.id, u.name FROM user u where u.category = ? order by u.id asc";
-        const [rows] = await connection.query(query, [id]);
-        res.status(200).json({ code: "200", message: "getuserbycategory data successfully", data: rows });
-        return;
-    } catch (error) {
-        logger.error(`${error}`)
-        res.status(200).json({ code: "500", data: {}, message: "Something went wrong" });
-        return;
-    } finally {
-        if (connection) connection.release();
-    }
-
-});
 
 
-router.get("/getuserbysubcategory/:id", auth.authenticateToken, async (req, res) => {
-    const id = req.params.id;
-    let connection;
-    try {
-        connection = await pool.getConnection();
-        query = "SELECT u.id, u.name FROM user u where u.subcategory = ? order by u.id asc";
-        const [rows] = await connection.query(query, [id]);
-        res.status(200).json({ code: "200", message: "getuserbysubcategory data successfully", data: rows });
-        return;
-    } catch (error) {
-        logger.error(`${error}`)
-        res.status(200).json({ code: "500", data: {}, message: "Something went wrong" });
-        return;
-    } finally {
-        if (connection) connection.release();
-    }
-
-});
 // routes/right.js or your main routes file
 
 router.get('/rights', auth.authenticateToken, async (req, res) => {
