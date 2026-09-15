@@ -684,12 +684,31 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
 });
 
 
+// NOTE ON THESE TWO ENDPOINTS (getuserbycategory / getuserbysubcategory).
+//
+// Their WHERE clause is the caller-supplied category alone — no company, no
+// owner, no contact join — so they return matching users ACROSS EVERY
+// COMPANY. They previously also returned email and mobile, which made them a
+// usable export of other companies contact details.
+//
+// Email and mobile were removed. That changes no WHERE clause, so it cannot
+// change which rows come back; it removes the part of the payload worth
+// taking. The row breadth is a separate, open question.
+//
+// At the time of writing NOTHING in the frontend calls either endpoint, and
+// Import Contractors on the Contacts page does not: that posts license
+// numbers to /invitation/bulk-create-from-licenses. If that is still true
+// when you read this, these two routes should be deleted outright rather
+// than narrowed further.
+//
+// Do not add email, mobile or any other personal column back without first
+// giving these queries an ownership clause.
 router.get("/getuserbycategory/:id", auth.authenticateToken, async (req, res) => {
     const id = req.params.id;
     let connection;
     try {
         connection = await pool.getConnection();
-        query = "SELECT u.id, u.name, u.email, u.mobile FROM user u where u.category = ? order by u.id asc";
+        query = "SELECT u.id, u.name FROM user u where u.category = ? order by u.id asc";
         const [rows] = await connection.query(query, [id]);
         res.status(200).json({ code: "200", message: "getuserbycategory data successfully", data: rows });
         return;
@@ -709,7 +728,7 @@ router.get("/getuserbysubcategory/:id", auth.authenticateToken, async (req, res)
     let connection;
     try {
         connection = await pool.getConnection();
-        query = "SELECT u.id, u.name, u.email, u.mobile FROM user u where u.subcategory = ? order by u.id asc";
+        query = "SELECT u.id, u.name FROM user u where u.subcategory = ? order by u.id asc";
         const [rows] = await connection.query(query, [id]);
         res.status(200).json({ code: "200", message: "getuserbysubcategory data successfully", data: rows });
         return;
