@@ -8,7 +8,7 @@ const multer = require('multer');
 const path = require('path');
 const logger = require('../common/logger');
 const { getAccessMode, isSameAccount, resolveOwnerId } = require('../utils/access');
-const { isFullAccess, isSubcontractor } = require('../services/notepadAccess');
+const { isFullAccess, isSubcontractor, isAccountOwner } = require('../services/notepadAccess');
 const { notepadMyTasksEnabled } = require('../services/featureFlags');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
@@ -855,10 +855,38 @@ router.delete('/sections/:id', auth.authenticateToken, async (req, res) => {
         return res.status(404).json({ success: false, message: 'Checklist section not found' });
       }
 
+      // DELETING A PAD IS NOT THE SAME RIGHT AS EDITING ONE.
+      //
+      // getManageableSection admits anyone whose role is not 'share', and
+      // getSectionAccess hands role 'full' to every allowlisted user on a
+      // COMPANY pad — which is correct for editing items and wrong for
+      // destroying the pad. Without this check the two statements below
+      // disagreed: `check_list` was deleted unscoped while
+      // `checklist_sections` was scoped to owner_user_id, so a non-owner
+      // admin wiped every item and left the empty pad standing, and the
+      // endpoint answered 200 success. Items destroyed, nothing to show for
+      // it, no error. (Reproduced in test/notepadDeleteAuthority.test.js.)
+      //
+      // The pad's owner may delete it. The account owner (the Boss) may
+      // delete a COMPANY pad, because that pad is the company's. Nobody else
+      // may, whatever their edit rights.
+      const iAmTheOwner = Number(section.owner_user_id) === Number(signedin_user);
+      const iAmTheBoss = await isAccountOwner(connection, signedin_user);
+      const bossDeletingCompanyPad = iAmTheBoss && String(section.scope) === 'company';
+      if (!iAmTheOwner && !bossDeletingCompanyPad) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only the notepad owner or the account owner can delete this notepad.',
+        });
+      }
+
       await connection.beginTransaction();
       try {
+        // Both statements key off the section id now that authority is
+        // settled above. Scoping one and not the other is what caused the
+        // half-delete.
         await connection.query('DELETE FROM check_list WHERE section_id = ?', [id]);
-        await connection.query('DELETE FROM checklist_sections WHERE id = ? AND owner_user_id = ?', [id, signedin_user]);
+        await connection.query('DELETE FROM checklist_sections WHERE id = ?', [id]);
         await connection.commit();
       } catch (e) {
         await connection.rollback();
