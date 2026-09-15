@@ -99,7 +99,11 @@ router.post('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks
     }
 
     const assigneeId = value.assignee_id ? Number(value.assignee_id) : null;
-    const start = value.due_date ? toMySQLDateTime(value.due_date) : toMySQLDateTime(new Date());
+    // NO DATE MEANS NO DATE — the same defect as the notepad item create, in a
+    // second place. This used to fall back to new Date(), so delegating without
+    // picking a date scheduled the task for the moment you pressed the button,
+    // and the assignee saw a deadline nobody had set.
+    const start = value.due_date ? toMySQLDateTime(value.due_date) : null;
     const starred = value.priority_star ? 1 : 0;
 
     await connection.beginTransaction();
