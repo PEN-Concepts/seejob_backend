@@ -1307,6 +1307,47 @@ async function ensureUserTokenVersionColumn(connection) {
   tokenVersionEnsured = true;
 }
 
+// EMPLOYEE SHUT-OFF. A dedicated timestamp, deliberately NOT an existing status
+// column: this codebase already overloads those (status = 1 means "complete" on
+// tasks and "active" on job), so reusing one risks colliding with whatever else
+// reads it. A timestamp is also the value the audit trail wants anyway.
+//
+// NULL  = has access. NOT NULL = shut off, and when.
+// Restore clears it. Both directions also bump token_version, so existing
+// tokens die on their next request rather than waiting for expiry.
+let shutOffEnsured = false;
+async function ensureUserShutOffColumn(connection) {
+  if (shutOffEnsured) return;
+  const [[row]] = await connection.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = 'shut_off_at'`
+  );
+  if (!row) {
+    await connection.query('ALTER TABLE `user` ADD COLUMN shut_off_at DATETIME NULL DEFAULT NULL');
+  }
+  shutOffEnsured = true;
+}
+
+// The audit trail for the above. Rows are NEVER deleted — a restore ADDS a row
+// recording the restore, it does not remove the shut-off that preceded it.
+let shutOffAuditEnsured = false;
+async function ensureShutOffAuditTable(connection) {
+  if (shutOffAuditEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS employee_access_audit (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      subject_user_id INT NOT NULL,
+      actor_user_id INT NOT NULL,
+      account_owner_id INT NULL,
+      action VARCHAR(24) NOT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_eaa_subject (subject_user_id, created_at),
+      KEY idx_eaa_account (account_owner_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  shutOffAuditEnsured = true;
+}
+
 // One FCM token = one device install → make it globally UNIQUE so a registration
 // race can never leave duplicate rows (the duplicate-push cause). Dedupe first
 // (keep the newest row per token), then add the index. Idempotent.
@@ -1601,6 +1642,8 @@ module.exports = {
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,
+  ensureUserShutOffColumn,
+  ensureShutOffAuditTable,
   ensureDeviceTokenUnique,
   dropUserMobileUniqueIndex,
   ensureSuggestedItemsTable,

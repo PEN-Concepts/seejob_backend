@@ -74,22 +74,47 @@ function authenticateToken(req, res, next) {
     // (the token is still cryptographically valid) so a DB blip can't lock everyone
     // out — revoke simply re-checks on the next request.
     try {
+      // Three-step column probe. shut_off_at and token_version are both added by
+      // migrations, so this must keep working against a database where either is
+      // still absent — that is what lets the code ship before the ALTER TABLE.
       let row;
       try {
         [[row]] = await pool.query(
-          "SELECT status, token_version FROM `user` WHERE id = ? LIMIT 1",
+          "SELECT status, token_version, shut_off_at FROM `user` WHERE id = ? LIMIT 1",
           [decoded.id]
         );
       } catch (colErr) {
-        // token_version column not present yet → status-only check.
-        [[row]] = await pool.query(
-          "SELECT status FROM `user` WHERE id = ? LIMIT 1",
-          [decoded.id]
-        );
+        try {
+          [[row]] = await pool.query(
+            "SELECT status, token_version FROM `user` WHERE id = ? LIMIT 1",
+            [decoded.id]
+          );
+        } catch (colErr2) {
+          [[row]] = await pool.query(
+            "SELECT status FROM `user` WHERE id = ? LIMIT 1",
+            [decoded.id]
+          );
+        }
       }
 
       if (row) {
         if (Number(row.status) === 0) {
+          return res
+            .status(401)
+            .json({ code: "REVOKED", message: "Your access has been revoked." });
+        }
+
+        // EMPLOYEE SHUT-OFF. A boss has ended this person's access from the
+        // employee file. Deliberately checked HERE, alongside status and ahead of
+        // the sliding renewal below: a shut-off phone quietly refreshing its own
+        // token is this feature failing silently, which is the worst shape the
+        // failure could take. Because this runs on EVERY request, the worst-case
+        // delay between the boss pressing the button and the next request being
+        // refused is one request — the token's remaining lifetime is irrelevant.
+        //
+        // Same 401 REVOKED shape as the other two, so every client already knows
+        // to clear the token and return to /login. No new client handling needed.
+        if (row.shut_off_at) {
           return res
             .status(401)
             .json({ code: "REVOKED", message: "Your access has been revoked." });
@@ -119,11 +144,66 @@ function authenticateToken(req, res, next) {
         }
       }
     } catch (_) {
-      /* transient DB error → fail open; revoke re-checks on the next request */
+      /* TRANSIENT DB ERROR → FAIL OPEN, DELIBERATELY AND CONSISTENTLY.
+       *
+       * The status check has always failed open here: the token is still
+       * cryptographically valid, and a DB blip that locked out every user on
+       * every device is a worse outcome than a revoked session surviving a few
+       * seconds longer. shut_off_at fails open THE SAME WAY, on purpose.
+       *
+       * A mix would be worse than either choice. If shut_off_at failed closed
+       * while status failed open, a DB blip would sign out the whole company
+       * while leaving genuinely revoked accounts working — the exact inverse of
+       * what anyone would want, and impossible to reason about in an incident.
+       *
+       * The cost is bounded: revoke re-checks on the very next request, so a
+       * shut-off person regains access only for as long as the database is
+       * unreachable, during which almost nothing else works either. */
     }
 
     next();
   });
 }
 
-module.exports = { authenticateToken, signSession, getTokenVersion };
+/**
+ * Is this user row shut off? Used by every sign-in path, so all of them ask the
+ * one question the same way and a new sign-in path has an obvious thing to call.
+ *
+ * Takes a row OR a user id. Tolerant of the un-migrated column: if shut_off_at
+ * does not exist yet the query throws and this returns false, matching the
+ * ship-before-the-ALTER-TABLE behaviour of getTokenVersion above.
+ */
+function rowIsShutOff(row) {
+  return !!(row && row.shut_off_at);
+}
+
+async function isUserShutOff(userId, connection) {
+  const q = connection || pool;
+  try {
+    const [[row]] = await q.query(
+      "SELECT shut_off_at FROM `user` WHERE id = ? LIMIT 1",
+      [userId]
+    );
+    return rowIsShutOff(row);
+  } catch (_) {
+    // Column not present, or a transient error. Fails OPEN, consistently with
+    // the revoke check in authenticateToken — see the long note there.
+    return false;
+  }
+}
+
+// The one message every sign-in path gives a shut-off user. Deliberately says
+// what happened rather than "wrong password": the person has not mistyped
+// anything and retrying will never work. It does NOT name the company that did
+// it — a user row can be linked to several companies.
+const SHUT_OFF_MESSAGE =
+  "Your access to See Job Run has been turned off. Contact your employer.";
+
+module.exports = {
+  authenticateToken,
+  signSession,
+  getTokenVersion,
+  rowIsShutOff,
+  isUserShutOff,
+  SHUT_OFF_MESSAGE,
+};

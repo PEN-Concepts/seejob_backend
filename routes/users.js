@@ -648,6 +648,17 @@ router.post("/login-pin", async (req, res) => {
       });
     }
 
+    // SHUT OFF. The PIN path trusts a device cookie, which is exactly the door a
+    // departed employee still has a key to — a phone in a pocket signs in with
+    // four digits and no email. So this guard matters most here.
+    if (await auth.isUserShutOff(user.id, connection)) {
+      return res.status(200).json({
+        code: "401",
+        message: auth.SHUT_OFF_MESSAGE,
+        data: {},
+      });
+    }
+
     const payload = {
       id: user.id,
       name: user.name,
@@ -762,6 +773,18 @@ router.post("/login", async (req, res) => {
       return res.status(200).json({
         code: "401",
         message: "Your account is inactive",
+        data: {},
+      });
+    }
+
+    // SHUT OFF. Sits beside the inactive-account check because it is the same
+    // kind of refusal, and AFTER it so an inactive account keeps its existing
+    // message. Checked before the password comparison: a correct password must
+    // not be the difference between the two answers a shut-off person sees.
+    if (await auth.isUserShutOff(user.id, connection)) {
+      return res.status(200).json({
+        code: "401",
+        message: auth.SHUT_OFF_MESSAGE,
         data: {},
       });
     }
@@ -933,6 +956,17 @@ router.post("/login-otp-request", async (req, res) => {
       return res.status(200).json({ code: "401", message: "Your account is inactive", data: {} });
     }
 
+    // SHUT OFF. Refused before the OTP is generated or sent, so a shut-off
+    // person never receives a code at all — the sign-in ends here rather than
+    // two steps later. Nothing is written to the user row on this path.
+    if (await auth.isUserShutOff(user.id, connection)) {
+      return res.status(200).json({
+        code: "401",
+        message: auth.SHUT_OFF_MESSAGE,
+        data: {},
+      });
+    }
+
     const otp = generateOTP();
 
     await connection.query(
@@ -1017,6 +1051,19 @@ router.post("/login-otp-verify", async (req, res) => {
       return res.status(200).json({
         code: "401",
         message: "Your account is inactive",
+        data: {},
+      });
+    }
+
+    // SHUT OFF. Belt and braces: the request path above already refuses, so a
+    // shut-off person is never sent a fresh code. This catches a code issued in
+    // the moments BEFORE the shut-off and typed in after it — the small race the
+    // feature must not lose, and the reason the check is repeated rather than
+    // assumed handled upstream.
+    if (await auth.isUserShutOff(user.id, connection)) {
+      return res.status(200).json({
+        code: "401",
+        message: auth.SHUT_OFF_MESSAGE,
         data: {},
       });
     }
