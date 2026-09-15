@@ -193,6 +193,25 @@ async function ensureNotepadSchema(connection) {
     await addColumn(connection, 'check_list', 'note', 'TEXT NULL DEFAULT NULL');
   });
 
+  // ── Item 10: ALL-DAY IS ITS OWN STATE AND IS NEVER INFERRED.
+  //
+  // A task can already carry a date with no time, and the sheet says what
+  // that means: "Set a time on the date so the reminder knows when to alert
+  // you." That is a task due on a day whose reminder cannot fire precisely —
+  // it is NOT an all-day task. If no-time silently became all-day, every
+  // existing dated task would change meaning the moment this deployed, and a
+  // genuine midnight task would be indistinguishable from an all-day one.
+  //
+  // So it gets its own column. Additive, NOT NULL DEFAULT 0, matching the
+  // precedent already set by appointments.all_day: every existing row starts
+  // at 0 and all-day is something you opt into.
+  //
+  // NOTHING ANYWHERE MAY SET THIS FROM THE ABSENCE OF A TIME.
+  // test/checkListAllDay.test.js holds that line.
+  await run('check_list all_day column', async () => {
+    await addColumn(connection, 'check_list', 'all_day', 'TINYINT NOT NULL DEFAULT 0');
+  });
+
   // ── C9c: photos on a notepad row.
   //
   // check_list.photo is a single VARCHAR(255) filename and cannot hold a set.
