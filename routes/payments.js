@@ -10,7 +10,7 @@ const { requireAdmin } = require("../utils/adminGate");
 const { grantNotepadCreate } = require("../services/permissionLevels");
 const { sendEmail, isRealEmail } = require("../services/notify");
 const { previewAccountDeletion, cascadeDeleteAccount } = require("../services/accountDelete");
-const { ensureWebhookEventsTable, ensurePaymentReceiptsTable } = require("../services/dbMigrations");
+const { ensureWebhookEventsTable, ensurePaymentReceiptsTable, ensureCompedSubscriptionStatus, ensureCompAuditTable } = require("../services/dbMigrations");
 
 // Authorize.Net SDK
 const { APIControllers, APIContracts } = require("authorizenet");
@@ -2103,13 +2103,24 @@ router.get(
           ORDER BY u.name ASC`
       );
 
+      // THREE STATES, NOT ONE BADGE. This used to select active + past_due and
+      // call the lot "Paying", which hid two different things: a customer whose
+      // card has failed and is in grace, and (now) an account that is free on
+      // purpose. One paying plus three comped must never read as four paying.
+      //
+      // The row carries its own status through to the client, so the admin page
+      // can label each state rather than folding them into a colour. `comped`
+      // is LEFT JOINed to plans because a comped account may have no plan row —
+      // an INNER JOIN would have silently dropped every comped account from the
+      // page, which is exactly the kind of invisible free access being hunted.
       const [activeSubs] = await connection.query(
         `SELECT s.id AS sub_id, s.user_id, s.amount, s.billing_interval, s.status,
                 s.next_billing_at, s.authorize_subscription_id, s.created_at AS started_at,
+                s.past_due_since,
                 p.name AS plan_name, p.level AS plan_level
            FROM subscriptions s
-           JOIN plans p ON p.id = s.plan_id
-          WHERE s.status IN ('active', 'past_due')`
+           LEFT JOIN plans p ON p.id = s.plan_id
+          WHERE s.status IN ('active', 'past_due', 'comped')`
       );
 
       const [pastCounts] = await connection.query(
@@ -2281,10 +2292,42 @@ router.get(
           trialDaysLeftFromLogin = Math.max(0, Math.ceil((statusFirstLoginMs + TRIAL_DAYS * DAY_MS - Date.now()) / DAY_MS));
         }
         const pastDueSub = effSubs.find((s) => s.status === "past_due") || null;
+        const compedSub = effSubs.find((s) => s.status === "comped") || null;
+
+        // COMPED AND PAST_DUE EACH GET THEIR OWN STATE, ahead of "paying".
+        //
+        // comped: free on purpose. It must never be counted as revenue — one
+        //   paying plus three comped is ONE paying, not four.
+        // past_due: in grace. The card has failed; they are not currently
+        //   paying. Folding it into "paying" is what hid the whole problem.
+        //
+        // NOTE the asymmetry with the ACCESS GATE, which is deliberate and
+        // documented in utils/access.js: the gate grants access for 'active'
+        // and 'comped' but NOT 'past_due'. So a past_due account shows here as
+        // in-grace and is ALREADY restricted by the gate today. Displaying it
+        // as "paying" was the lie; the restriction is not new.
         let status4;
-        if (hasActiveSubscription) status4 = "paying";
+        if (compedSub) status4 = "comped";
+        else if (pastDueSub && !effSubs.some((s) => s.status === "active")) status4 = "past_due";
+        else if (hasActiveSubscription) status4 = "paying";
         else if (!statusHasLoggedIn) status4 = "invited";
         else status4 = trialDaysLeftFromLogin > 0 ? "trial" : "free";
+
+        // §4: the 14-day grace boundary, COMPUTED AND SHOWN, NOT ENFORCED.
+        // Matches the window the go-live re-verification dialog already uses —
+        // one grace period in the product, not two. Nothing reads this to
+        // restrict anyone; enforcing it is a separate, RED decision.
+        const GRACE_DAYS = 14;
+        let graceEndsAt = null;
+        let graceDaysLeft = null;
+        if (pastDueSub && pastDueSub.past_due_since) {
+          const since = new Date(pastDueSub.past_due_since).getTime();
+          if (!isNaN(since)) {
+            const end = since + GRACE_DAYS * DAY_MS;
+            graceEndsAt = new Date(end).toISOString();
+            graceDaysLeft = Math.ceil((end - Date.now()) / DAY_MS);
+          }
+        }
 
         // The Users/Paying/Active-Subs counters stay keyed to REAL own-subscription
         // rows (never an employee's inherited/mirrored status). own_sub_status is this
@@ -2300,6 +2343,12 @@ router.get(
           first_login_at: u.first_login_at || null,
           own_sub_status: ownSubStatus, // this account's OWN tier sub — drives the counters
           status_inherited: isEmployee && status4 === "paying" && !ownSubStatus, // displays owner's paying, not a payer itself
+          // §4 grace boundary — shown, never enforced. null unless past_due.
+          grace_ends_at: graceEndsAt,
+          grace_days_left: graceDaysLeft,
+          // So the page can label a comped account and say why, without anyone
+          // having to go and read a database to find out.
+          comped: !!compedSub,
           status4,
           past_due: !!pastDueSub,
           trial_days_left_from_login: trialDaysLeftFromLogin,
@@ -2866,6 +2915,135 @@ router.get(
     }
   }
 );
+
+
+// ── COMPED ACCOUNTS: free access, granted on purpose ─────────────────────
+//
+// Four people, not a promotion. No promo codes: for a handful of accounts a
+// code is more machinery than the problem needs, and a code is a thing that
+// gets shared, screenshotted and posted. The accounts are marked instead.
+//
+// OWNER ONLY, ENFORCED HERE. Hiding a control is not a permission. Both
+// endpoints check the caller against OWNER_EXEMPT_EMAILS on the request
+// itself, so a direct API call with any other token is refused regardless of
+// what the UI shows. Same rule as the employee shut-off.
+function isBackendOwner(req) {
+  // authenticateToken puts the decoded token on req.user; res.locals carries only
+  // the id. The OWNER set is deliberately NOT requireAdmin — an admin token must
+  // be refused here too, because granting free access is the account owner's
+  // decision alone.
+  const email = String((req.user && req.user.email) || "").trim().toLowerCase();
+  return OWNER_EXEMPT_EMAILS.has(email);
+}
+
+/** Grant permanent free access. Body: { user_id, reason } */
+router.post("/admin/comp/:userId", authenticateToken, async (req, res) => {
+  if (!isBackendOwner(req)) {
+    return res.status(403).json({ success: false, message: "Not allowed." });
+  }
+  const subjectId = Number(req.params.userId);
+  const reason = String((req.body && req.body.reason) || "").trim().slice(0, 500);
+  if (!subjectId) return res.status(400).json({ success: false, message: "Invalid user id" });
+  if (!reason) {
+    // The reason is not optional. In two years it is the only thing that
+    // explains why an account pays nothing.
+    return res.status(400).json({ success: false, message: "A reason is required." });
+  }
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureCompedSubscriptionStatus(connection);
+    await ensureCompAuditTable(connection);
+
+    const [[subject]] = await connection.query(
+      "SELECT id FROM `user` WHERE id = ? LIMIT 1", [subjectId]);
+    if (!subject) return res.status(404).json({ success: false, message: "No such user." });
+
+    const [[existing]] = await connection.query(
+      "SELECT id, status FROM subscriptions WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+      [subjectId]);
+
+    const previous = existing ? existing.status : null;
+
+    if (existing) {
+      await connection.query(
+        "UPDATE subscriptions SET status = 'comped' WHERE id = ?", [existing.id]);
+    } else {
+      // No subscription row at all — a comped account still needs one, so the
+      // access gate and the admin page have something to read.
+      await connection.query(
+        "INSERT INTO subscriptions (user_id, status, created_at) VALUES (?, 'comped', NOW())",
+        [subjectId]);
+    }
+
+    await connection.query(
+      `INSERT INTO subscription_comp_audit
+         (subject_user_id, actor_user_id, action, reason, previous_status)
+       VALUES (?, ?, 'comped', ?, ?)`,
+      [subjectId, Number(res.locals.id), reason, previous]);
+
+    logger.info(`comp granted to user ${subjectId} by ${Number(res.locals.id)}`);
+    return res.json({ success: true, status: "comped", previous_status: previous });
+  } catch (err) {
+    logger.error("comp grant error: " + err.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
+/** Revoke it. Returns the row to whatever it was, and NEVER deletes anything. */
+router.delete("/admin/comp/:userId", authenticateToken, async (req, res) => {
+  if (!isBackendOwner(req)) {
+    return res.status(403).json({ success: false, message: "Not allowed." });
+  }
+  const subjectId = Number(req.params.userId);
+  if (!subjectId) return res.status(400).json({ success: false, message: "Invalid user id" });
+
+  let connection;
+  try {
+    connection = await pool.getConnection();
+    await ensureCompedSubscriptionStatus(connection);
+    await ensureCompAuditTable(connection);
+
+    const [[existing]] = await connection.query(
+      "SELECT id, status FROM subscriptions WHERE user_id = ? AND status = 'comped' ORDER BY id DESC LIMIT 1",
+      [subjectId]);
+    if (!existing) {
+      return res.status(404).json({ success: false, message: "That account is not comped." });
+    }
+
+    // What it was BEFORE the comp, from the audit trail — so revoking restores
+    // rather than guessing. Falls back to 'canceled', which restricts rather
+    // than silently granting paid access.
+    const [[priorRow]] = await connection.query(
+      `SELECT previous_status FROM subscription_comp_audit
+        WHERE subject_user_id = ? AND action = 'comped' AND previous_status IS NOT NULL
+        ORDER BY id DESC LIMIT 1`,
+      [subjectId]);
+    const restoreTo = (priorRow && priorRow.previous_status) || 'canceled';
+
+    await connection.query(
+      "UPDATE subscriptions SET status = ? WHERE id = ?", [restoreTo, existing.id]);
+
+    // A REVOKE ADDS A ROW. It never removes the grant that preceded it.
+    await connection.query(
+      `INSERT INTO subscription_comp_audit
+         (subject_user_id, actor_user_id, action, reason, previous_status)
+       VALUES (?, ?, 'revoked', NULL, 'comped')`,
+      [subjectId, Number(res.locals.id)]);
+
+    logger.info(`comp revoked for user ${subjectId} by ${Number(res.locals.id)} -> ${restoreTo}`);
+    return res.json({ success: true, status: restoreTo });
+  } catch (err) {
+    logger.error("comp revoke error: " + err.message);
+    return res.status(500).json({ success: false, message: "Server error" });
+  } finally {
+    if (connection) connection.release();
+  }
+});
+
 
 module.exports = router;
 // Exposed for unit tests (ARB cancel error classification — account-delete safety).

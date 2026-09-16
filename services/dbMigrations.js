@@ -1354,6 +1354,60 @@ async function ensureOtpAttemptsColumn(connection) {
   otpAttemptsEnsured = true;
 }
 
+// COMPED SUBSCRIPTIONS — free access granted on purpose.
+//
+// `comped` is its own status alongside active / past_due / canceled. It is NOT
+// `active` with a note bolted on, and that distinction is load-bearing: a
+// comped account has no live processor record, and so does a BROKEN one. If
+// comped were just "active with a flag", reconciliation would have to skip on
+// "no processor record found", which would turn every data problem into silent
+// free access — the exact failure the reconciler exists to catch.
+//
+// The `subscriptions` table predates this migration system and is not created
+// here, so the column type is not knowable in advance. If `status` is an ENUM
+// it must learn the new value or every INSERT/UPDATE with it is rejected; if it
+// is a VARCHAR there is nothing to do. This inspects and adapts rather than
+// assuming, and is safe to run repeatedly either way.
+let compedStatusEnsured = false;
+async function ensureCompedSubscriptionStatus(connection) {
+  if (compedStatusEnsured) return;
+  const [[col]] = await connection.query(
+    `SELECT COLUMN_TYPE, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'subscriptions' AND COLUMN_NAME = 'status'`
+  );
+  if (col && String(col.DATA_TYPE).toLowerCase() === 'enum') {
+    const type = String(col.COLUMN_TYPE);
+    if (!/'comped'/i.test(type)) {
+      // Extend the existing set rather than redefining it, so no current value
+      // is lost and no row is rewritten.
+      const widened = type.replace(/^enum\((.*)\)$/i, "enum($1,'comped')");
+      await connection.query('ALTER TABLE subscriptions MODIFY COLUMN status ' + widened);
+    }
+  }
+  compedStatusEnsured = true;
+}
+
+// WHO granted it, WHEN, and WHY. In two years the reason is the only thing that
+// explains why an account pays nothing. Rows are NEVER deleted — revoking adds
+// a row recording the revocation, it does not remove the grant that preceded it.
+let compAuditEnsured = false;
+async function ensureCompAuditTable(connection) {
+  if (compAuditEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS subscription_comp_audit (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      subject_user_id INT NOT NULL,
+      actor_user_id INT NOT NULL,
+      action VARCHAR(16) NOT NULL,
+      reason VARCHAR(500) NULL,
+      previous_status VARCHAR(32) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_sca_subject (subject_user_id, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  compAuditEnsured = true;
+}
+
 // ── Chat system (group chat per Job/Lead + 1:1 DMs) ──────────────────────────
 // Four tables modeled on the existing task_assignees/tasks_images patterns.
 let chatTablesEnsured = false;
@@ -1627,6 +1681,8 @@ module.exports = {
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,
+  ensureCompedSubscriptionStatus,
+  ensureCompAuditTable,
   ensureOtpAttemptsColumn,
   ensureDeviceTokenUnique,
   dropUserMobileUniqueIndex,

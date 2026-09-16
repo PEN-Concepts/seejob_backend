@@ -104,8 +104,20 @@ async function getAccessInfo(userId, connection) {
 
       const role = userRows[0].role;
       const email = String(userRows[0].email || "").trim().toLowerCase();
+      // THE ACCESS GATE. This one predicate decides whether a user gets paid
+      // features. Note what it does NOT include: `past_due`. The admin page's
+      // "Paying" badge reads `status IN ('active','past_due')`, so the badge
+      // and this gate disagree on exactly that state — see the billing report.
+      //
+      // 'comped' is added here, and this is the ONLY access-control change in
+      // this work. A comped account is a deliberate free grant, so it must get
+      // what a paying subscription gets; anything less and it would fall
+      // through to the trial maths and be restricted the moment its 60 days ran
+      // out — the opposite of the intent. Kept as its own STATUS rather than a
+      // flag on 'active' so reconciliation can skip it because the status says
+      // so, never because no processor record was found.
       const [subRows] = await conn.query(
-        "SELECT id FROM subscriptions WHERE user_id = ? AND status = 'active' LIMIT 1",
+        "SELECT id FROM subscriptions WHERE user_id = ? AND status IN ('active','comped') LIMIT 1",
         [effectiveId]
       );
       const hasActiveSubscription = subRows.length > 0;
