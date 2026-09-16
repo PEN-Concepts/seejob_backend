@@ -247,52 +247,100 @@ function generateRandomPassword(length = 10) {
   return password;
 }
 
-async function sendOTPEmail(toEmail, otp) {
+// WHAT THIS EMAIL IS FOR decides what it says. The same function sends codes
+// for three different reasons and used to tell all three "Thank you for
+// registering with SeeJobRun" — registration copy on a sign-in email. A person
+// signing in to an account they have had for a year was being thanked for
+// joining, which reads as a template nobody checked, and reads that way to a
+// spam filter too.
+const OTP_PURPOSE = {
+  signin: {
+    subject: 'Your See Job Run sign-in code',
+    heading: 'Sign in to See Job Run',
+    lead: 'Enter this code to finish signing in.',
+  },
+  register: {
+    subject: 'Confirm your email for See Job Run',
+    heading: 'Confirm your email',
+    lead: 'Enter this code to finish setting up your account.',
+  },
+  recover: {
+    subject: 'Your See Job Run password reset code',
+    heading: 'Reset your password',
+    lead: 'Enter this code to choose a new password.',
+  },
+};
+
+// HTTPS, NOT HTTP. This was http:// and the host answers nothing on plain HTTP
+// — the request simply fails — so every mail client fell back to the alt text
+// and the email arrived with a broken image at the top. A transactional message
+// with a broken image is a textbook spam signal, and it was the FIRST thing in
+// the message. Over https the same file is a healthy 22KB.
+//
+// Kept as a hosted URL rather than a data: URI on purpose — Gmail does not
+// render data: URIs in images, so inlining would have swapped one invisible
+// logo for another. Gmail proxies and caches this one.
+const LOGO_URL = 'https://seejobrun.com/user-dashboard/assets/seeJobRun.png';
+
+/**
+ * @param {string} toEmail
+ * @param {string} otp
+ * @param {'signin'|'register'|'recover'} purpose  defaults to signin
+ */
+async function sendOTPEmail(toEmail, otp, purpose) {
+  const copy = OTP_PURPOSE[purpose] || OTP_PURPOSE.signin;
+
+  // A REAL PLAIN-TEXT ALTERNATIVE. There was one, but it was a single line
+  // ("Your OTP code is: N") that matched neither the subject nor the HTML.
+  // Transactional mail is expected to carry a text part that stands on its own,
+  // and a text part that disagrees with the HTML counts against you.
+  const text = [
+    copy.heading,
+    '',
+    copy.lead,
+    '',
+    `Code: ${otp}`,
+    '',
+    'This code expires in 3 minutes and can only be used once.',
+    "If you didn't ask for it, you can ignore this email — nothing will change.",
+    '',
+    'See Job Run',
+  ].join('\n');
+
   const mailOptions = {
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`, // sender name + email
     to: toEmail,
-    subject: "Your OTP Verification Code",
-    text: `Your OTP code is: ${otp}`,
-    html: `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>OTP Verification</title>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .logo-container { text-align: center; padding: 20px 0; }
-            .logo { max-width: 150px; height: auto; }
-            .header { background-color: #4CAF50; color: white; padding: 20px; text-align: center; }
-            .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; }
-            .otp-box { background-color: #e8f5e9; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; margin: 20px 0; }
-            .footer { text-align: center; margin-top: 20px; color: #777; font-size: 14px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="logo-container">
-              <img src="http://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
-            </div>
-            <div class="header">
-              <h1>SeeJobRun</h1>
-            </div>
-            <div class="content">
-              <h2>OTP Verification</h2>
-              <p>Hello,</p>
-              <p>Thank you for registering with SeeJobRun. Please use the following OTP code to verify your email address:</p>
-              <div class="otp-box">${otp}</div>
-              <p>This code will expire in 3 minutes. If you didn't request this verification, please ignore this email.</p>
-            </div>
-            <div class="footer">
-              <p>&copy; 2025 SeeJobRun. All rights reserved.</p>
-            </div>
-          </div>
-        </body>
-      </html>
-    `,
+    subject: copy.subject,
+    text,
+    // HOUSE STYLE, AND MOSTLY TEXT. The old template was built around a
+    // #4CAF50 banner — a bright green that appears nowhere in the product —
+    // with a second green panel behind the code. Two saturated blocks of a
+    // colour the brand does not use is promotional styling on a message that
+    // should look like a receipt. Gold #f0ad2b, dark #3a342c and cream #f1e9d5
+    // are the product's own palette; everything else is plain text on white.
+    html: `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${copy.heading}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f4f2ed;">
+    <div style="max-width:520px;margin:0 auto;padding:28px 20px;font-family:Arial,Helvetica,sans-serif;color:#2a2419;line-height:1.55;">
+      <div style="text-align:center;padding-bottom:18px;">
+        <img src="${LOGO_URL}" alt="See Job Run" width="132" style="width:132px;height:auto;border:0;">
+      </div>
+      <div style="background:#ffffff;border:1px solid #ded5bd;border-radius:10px;padding:26px 24px;">
+        <h1 style="margin:0 0 10px;font-size:19px;font-weight:bold;color:#3a342c;">${copy.heading}</h1>
+        <p style="margin:0 0 20px;font-size:15px;color:#615840;">${copy.lead}</p>
+        <div style="background:#f1e9d5;border:1px solid #c99a22;border-radius:8px;padding:16px;text-align:center;font-size:30px;font-weight:bold;letter-spacing:7px;color:#2a2419;">${otp}</div>
+        <p style="margin:20px 0 0;font-size:14px;color:#615840;">This code expires in <strong>3 minutes</strong> and can only be used once.</p>
+        <p style="margin:8px 0 0;font-size:14px;color:#615840;">If you didn&rsquo;t ask for it, you can ignore this email &mdash; nothing will change.</p>
+      </div>
+      <p style="margin:18px 0 0;text-align:center;font-size:12px;color:#8d836a;">See Job Run</p>
+    </div>
+  </body>
+</html>`,
   };
 
   // THIS USED TO SWALLOW ITS OWN FAILURE. It caught the error, logged it and
@@ -322,7 +370,7 @@ async function sendPasswordEmail(toEmail, tempPassword) {
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`, // Sender name + email
     to: toEmail,
     subject: "Your Temporary Password",
-    text: `Your password is: ${tempPassword}\n\nPlease log in using this password at: http://seejobrun.com/user-dashboard/signup`,
+    text: `Your password is: ${tempPassword}\n\nPlease log in using this password at: https://seejobrun.com/user-dashboard/signup`,
     html: `
       <!DOCTYPE html>
       <html>
@@ -346,7 +394,7 @@ async function sendPasswordEmail(toEmail, tempPassword) {
         <body>
           <div class="container">
             <div class="logo-container">
-              <img src="http://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
+              <img src="https://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
             </div>
             <div class="header">
               <h1>SeeJobRun</h1>
@@ -357,7 +405,7 @@ async function sendPasswordEmail(toEmail, tempPassword) {
               <p>We have received a request to reset your password. Here is your temporary password:</p>
               <div class="password-box">${tempPassword}</div>
               <p>Please log in using this password:</p>
-              <a href="http://seejobrun.com/user-dashboard/signup" class="login-link">Go to Login Page</a>
+              <a href="https://seejobrun.com/user-dashboard/signup" class="login-link">Go to Login Page</a>
               <div class="warning">
                 <strong>Important:</strong> Please change this temporary password immediately after logging in for security reasons.
               </div>
@@ -408,7 +456,7 @@ async function sendRecoveryEmail(toEmail, otp) {
         <body>
           <div class="container">
             <div class="logo-container">
-              <img src="http://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
+              <img src="https://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
             </div>
             <div class="header">
               <h1>SeeJobRun</h1>
@@ -595,7 +643,7 @@ router.post("/register", async (req, res) => {
       // silently changing that would turn a mail blip into a failed signup.
       // The old fire-and-forget behaviour is preserved HERE, on purpose, and
       // is its own decision to revisit.
-      try { await sendOTPEmail(r.email, otp); }
+      try { await sendOTPEmail(r.email, otp, 'register'); }
       catch (mailErr) { logger.error("Registration OTP email failed: " + mailErr.message); }
     }
 
@@ -1038,7 +1086,7 @@ router.post("/login-otp-request", async (req, res) => {
     // in the log above, which sendOTPEmail already writes. The user gets what
     // they can act on — it didn't send, try again, or ask the account owner.
     try {
-      await sendOTPEmail(normalizedEmail, otp);
+      await sendOTPEmail(normalizedEmail, otp, 'signin');
     } catch (mailErr) {
       // User id, never the address. The address is the caller's own input and
       // repeating it into the log adds nothing but a personal detail at rest.
@@ -2536,7 +2584,7 @@ router.post("/resendotp", async (req, res) => {
     // SCOPE GUARD — see the note on the registration path. This is the
     // change-password path, not the OTP login path. Its prior behaviour is
     // preserved deliberately.
-    try { await sendOTPEmail(signedin_useremail, otp); }
+    try { await sendOTPEmail(signedin_useremail, otp, 'recover'); }
     catch (mailErr) { logger.error("Change-password OTP email failed: " + mailErr.message); }
 
     return res.status(200).json({
