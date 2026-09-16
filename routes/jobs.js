@@ -174,7 +174,7 @@ const materialSchema = Joi.object({
 });
 
 // Shared, provider-switchable transport (see services/mailer.js).
-const transporter = require('../services/mailer').transporter;
+const transporter = require('../services/mailer');
 
 // Optional: verify transporter
 transporter.verify((err, success) => {

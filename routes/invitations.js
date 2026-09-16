@@ -2319,7 +2319,7 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
 // row. send_invite=true emails an invitation (status 'Pending');
 // send_invite=false just stores them (status 'Saved').
 // Shared, provider-switchable transport (see services/mailer.js).
-const inviteMailer = require('../services/mailer').transporter;
+const inviteMailer = require('../services/mailer');
 
 async function sendContactInviteEmail(toEmail, inviterName) {
   // The invited person's SeeJobRun profile ALREADY exists (created the moment they

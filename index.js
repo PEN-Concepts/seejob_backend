@@ -15,6 +15,8 @@ const { repaletteOrphanedColors, reassignActiveDiverse } = require("./services/j
 const userRoute = require("./routes/users");
 const contactRoute = require("./routes/contacts");
 const publicRoute = require("./routes/publics");
+const sesNotifications = require("./routes/sesNotifications");
+const adminSuppressions = require("./routes/adminSuppressions");
 const publicjobs = require("./routes/jobs");
 const tasks = require("./routes/tasks");
 const publicnotepad = require("./routes/notepads");
@@ -109,6 +111,14 @@ app.use(cookieParser());
 app.use(`${api}/user`, userRoute);
 app.use(`${api}/contact`, contactRoute);
 app.use(`${api}/public`, publicRoute);
+// SES bounce/complaint notifications from SNS. PUBLIC and UNAUTHENTICATED by
+// necessity — SNS cannot authenticate — so the SIGNATURE is the whole of the
+// security. Mounted OUTSIDE the /api prefix because it is a machine endpoint,
+// not part of the app API, and it parses its own body: SNS posts text/plain,
+// which the global express.json() above does not touch, so req.rawBody would
+// be empty here.
+app.use("/webhooks", sesNotifications);
+app.use(`${api}/admin`, adminSuppressions);
 app.use(`${api}/jobs`, publicjobs);
 app.use(`${api}/notepads`, publicnotepad);
 app.use(`${api}/invitations`, publicinvitation);

@@ -195,7 +195,7 @@ const localupload = multer({ storage: storage });
 
 // Shared, provider-switchable transport (SMTP today, SES via env flip). See
 // services/mailer.js — replaces the per-file inline SMTP transport.
-const transporter = require('../services/mailer').transporter;
+const transporter = require('../services/mailer');
 
 // Optional: verify transporter
 transporter.verify((err, success) => {
