@@ -135,6 +135,32 @@ const { execFileSync } = require('child_process');
     ok(row.reason === 'hard_bounce', 'with reason hard_bounce', row.reason);
     ok(/550/.test(row.detail || ''), 'and the diagnostic kept for support', String(row.detail).slice(0, 40));
 
+    // ================= CONTENT TYPE ======================================
+    head('CONTENT TYPE AND MIDDLEWARE ORDER');
+    // SNS posts text/plain today, and the route mounts its own text parser
+    // because the global express.json() will not engage on that type. The
+    // question is what happens if AWS ever posts application/json, or if
+    // someone reorders middleware so the global parser consumes the stream
+    // first. A verifier receiving an empty body would REJECT EVERYTHING and
+    // look exactly like a working one until real mail stopped flowing.
+    //
+    // It does not break, and the reason is structural: an SNS signature is
+    // computed over a CANONICAL RECONSTRUCTION of named fields, not over the
+    // raw bytes. So unlike the Authorize.Net HMAC, this verification never
+    // needs req.rawBody — it works from the parsed object however it was
+    // parsed. Asserted here so a future middleware change has to break a test
+    // rather than break production quietly.
+    const asJson = envelope({ MessageId: 'msg-ct-json', __inner: {
+      notificationType: 'Bounce',
+      bounce: { bounceType: 'Permanent', bounceSubType: 'General',
+        bouncedRecipients: [{ emailAddress: 'ctjson@example.com', diagnosticCode: 'smtp; 550' }] } } });
+    asJson.Signature = sign(asJson);
+    const rJson = await post(asJson, 'application/json');
+    ok(rJson.status === 200,
+      'a notification posted as application/json is still accepted', 'HTTP ' + rJson.status);
+    ok(await isSup('ctjson@example.com'),
+      'AND STILL PROCESSED — verification does not depend on the raw body or on which parser ran');
+
     // ================= IDEMPOTENCE =======================================
     head('THE SAME NOTIFICATION AGAIN — SNS DELIVERS AT LEAST ONCE');
     const r2 = await post(good);
