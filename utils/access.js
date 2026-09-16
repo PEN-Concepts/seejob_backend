@@ -17,6 +17,9 @@ const pool = require("../config/connection");
 const logger = require("../common/logger");
 
 const TRIAL_DAYS = 60;
+// Grace for a failed card. 14 days, matching the window the go-live
+// re-verification dialog already uses — one grace period in the product, not two.
+const GRACE_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Roles that are internal/admin and must never be trial-gated.
@@ -87,6 +90,8 @@ async function getAccessInfo(userId, connection) {
       trialEndsAt: null,
       daysLeft: 0,
       hasActiveSubscription: false,
+      inGrace: false,
+      graceEndsAt: null,
     };
     try {
       // Employees (category 1) share their account OWNER's access tier — an
@@ -105,22 +110,71 @@ async function getAccessInfo(userId, connection) {
       const role = userRows[0].role;
       const email = String(userRows[0].email || "").trim().toLowerCase();
       // THE ACCESS GATE. This one predicate decides whether a user gets paid
-      // features. Note what it does NOT include: `past_due`. The admin page's
-      // "Paying" badge reads `status IN ('active','past_due')`, so the badge
-      // and this gate disagree on exactly that state — see the billing report.
+      // features. Three states reach it, for three different reasons:
       //
-      // 'comped' is added here, and this is the ONLY access-control change in
-      // this work. A comped account is a deliberate free grant, so it must get
-      // what a paying subscription gets; anything less and it would fall
-      // through to the trial maths and be restricted the moment its 60 days ran
-      // out — the opposite of the intent. Kept as its own STATUS rather than a
-      // flag on 'active' so reconciliation can skip it because the status says
-      // so, never because no processor record was found.
+      //   active  — paying.
+      //   comped  — free on purpose. Its own STATUS rather than a flag on
+      //             'active', so reconciliation skips it because the status
+      //             says so, never because no processor record was found.
+      //   past_due INSIDE ITS WINDOW — see below.
+      //
+      // WHEN GRACE LAPSES, NOTHING HERE HAS TO ACT. The row simply stops
+      // matching, hasActiveSubscription goes false, and the existing
+      // fall-through lands the account in expired_free — the same free tier a
+      // lapsed trial reaches. That is the intended end state, and it needs no
+      // code of its own: one rule for everyone, however long they paid.
+      //
+      // GRACE. A declined card is not a decision to leave — it is almost always
+      // a card that expired and nobody noticed. Before this, `past_due` fell
+      // straight through to the expired-trial path and landed in expired_free,
+      // so a paying customer lost their own jobs, budgets, schedule and contacts
+      // the moment the webhook arrived, with no warning and no window to fix it.
+      //
+      // Inside the window, access is IDENTICAL to active. Nothing hidden,
+      // nothing disabled.
+      //
+      // THIS WIDENS EXACTLY ONE STATE AND NOTHING ELSE. `canceled` is absent
+      // from this list on purpose, and so is an expired trial — neither gets a
+      // window. The only row that gains access is a `past_due` one still inside
+      // its own 14 days.
+      //
+      // past_due_since is set by the webhook as COALESCE(past_due_since, NOW())
+      // and cleared to NULL on payment, so it is sticky: repeated failure events
+      // cannot slide the deadline forward and quietly extend the grace.
+      //
+      // NULL past_due_since means a row that predates the column or was set
+      // outside the webhook. It is treated as IN grace, because this branch
+      // exists to stop wrongly ejecting people and must never itself become the
+      // thing that ejects one. The admin page surfaces it so it is visible
+      // rather than silent.
+      //
+      // ORDER BY FIELD so an `active` row always wins over a `past_due` one when
+      // an account somehow holds both.
       const [subRows] = await conn.query(
-        "SELECT id FROM subscriptions WHERE user_id = ? AND status IN ('active','comped') LIMIT 1",
+        `SELECT id, status, past_due_since
+           FROM subscriptions
+          WHERE user_id = ?
+            AND ( status IN ('active','comped')
+               OR ( status = 'past_due'
+                    AND ( past_due_since IS NULL
+                          OR past_due_since > (NOW() - INTERVAL ${GRACE_DAYS} DAY) ) ) )
+          ORDER BY FIELD(status, 'active', 'comped', 'past_due')
+          LIMIT 1`,
         [effectiveId]
       );
       const hasActiveSubscription = subRows.length > 0;
+
+      // Exposed so the admin page and any banner can say how long is left,
+      // without re-deriving the window somewhere else and drifting from it.
+      let inGrace = false;
+      let graceEndsAt = null;
+      if (subRows.length && String(subRows[0].status) === 'past_due') {
+        inGrace = true;
+        if (subRows[0].past_due_since) {
+          const since = new Date(subRows[0].past_due_since).getTime();
+          if (!isNaN(since)) graceEndsAt = new Date(since + GRACE_DAYS * DAY_MS).toISOString();
+        }
+      }
 
       const createdAt = userRows[0].created_at
         ? new Date(userRows[0].created_at)
@@ -171,7 +225,7 @@ async function getAccessInfo(userId, connection) {
         }
       }
 
-      return { mode, trialEndsAt, daysLeft, hasActiveSubscription, reverifyGraceUntil };
+      return { mode, trialEndsAt, daysLeft, hasActiveSubscription, reverifyGraceUntil, inGrace, graceEndsAt };
     } catch (err) {
       logger.error("getAccessInfo error: " + err.message);
       return fallback;
