@@ -83,4 +83,73 @@ async function sendMail(options) {
   return transporter.sendMail({ from: FROM, ...options });
 }
 
-module.exports = { transporter, sendMail, FROM, PROVIDER };
+// ── THE SUPPRESSION CHOKEPOINT ───────────────────────────────────────────
+//
+// This wraps transporter.sendMail ITSELF, not the helper above, and that is the
+// whole design. TEN of the thirteen files that send mail do
+// `require('../services/mailer').transporter` and call `.sendMail` on it
+// directly, bypassing the helper entirely. A check inside sendMail() would have
+// covered three files and missed the rest — including the OTP path.
+//
+// Wrapping the transporter means EVERY consumer inherits the check whichever
+// import style it uses, and a call site added next year inherits it without
+// anyone remembering this file exists. That is the difference between a
+// chokepoint and a patch.
+//
+// The suppression service is required lazily, inside the call, to avoid a
+// circular import (emailSuppression -> dbMigrations) at module load.
+const rawSendMail = transporter.sendMail.bind(transporter);
+
+transporter.sendMail = async function suppressionAwareSendMail(options) {
+  let suppression;
+  try {
+    suppression = require('./emailSuppression');
+  } catch (err) {
+    // If the module cannot load at all, SEND rather than block. Blocking every
+    // outbound email — login codes included — is a worse failure than sending
+    // one we should not have.
+    logger.error('[mailer] suppression module unavailable, sending unchecked: ' + err.message);
+    return rawSendMail(options);
+  }
+
+  const opts = options || {};
+  const recipients = suppression.extractAddresses(opts.to);
+  if (!recipients.length) return rawSendMail(opts);
+
+  const allowed = [];
+  const blocked = [];
+  for (const addr of recipients) {
+    // isSuppressed FAILS OPEN on a database error — see its comment.
+    if (await suppression.isSuppressed(addr)) blocked.push(addr);
+    else allowed.push(addr);
+  }
+
+  if (blocked.length) {
+    for (const addr of blocked) await suppression.recordBlocked(addr, opts.subject, 'suppressed');
+    logger.warn(
+      `[mailer] blocked ${blocked.length} suppressed recipient(s) on "${String(opts.subject || '').slice(0, 60)}"`
+    );
+  }
+
+  // EVERY recipient suppressed → do not send, and tell the caller rather than
+  // returning a fake success. The OTP route now reports a failed send honestly,
+  // so the user is told instead of being sent to watch an empty inbox.
+  if (!allowed.length) {
+    const err = new Error('All recipients are suppressed; message not sent.');
+    err.code = 'EMAIL_SUPPRESSED';
+    throw err;
+  }
+
+  // A partially suppressed send still goes to the rest — dropping the whole
+  // message because one CC bounced last month would punish the wrong people.
+  return rawSendMail({ ...opts, to: allowed.join(', ') });
+};
+
+// `verify` is re-exported because the consolidated routes hold the MODULE now,
+// not the raw transport, and three of them call transporter.verify() at boot to
+// log whether SMTP is reachable. Without this the consolidation would crash
+// those files on require — which it did, and the OTP suites caught it.
+// Bound to the transport so `this` is correct.
+const verify = transporter.verify.bind(transporter);
+
+module.exports = { transporter, sendMail, verify, FROM, PROVIDER, rawSendMail };

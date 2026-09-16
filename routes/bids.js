@@ -68,7 +68,7 @@ const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
 
 // ---- branded email (no-reply from See Job Run, reusing the SMTP system) ----
 // Shared, provider-switchable transport (see services/mailer.js).
-const mailer = require('../services/mailer').transporter;
+const mailer = require('../services/mailer');
 async function sendBidInviteEmail(toEmail, company, title, comments) {
   if (!toEmail) return;
   try {
