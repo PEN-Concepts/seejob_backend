@@ -65,11 +65,20 @@ async function isSuppressed(email, connection) {
     });
   } catch (err) {
     // FAILS OPEN, DELIBERATELY, and consistently with the rest of this
-    // codebase's access checks. If the table is missing or the database blips,
-    // the choice is between sending a mail we maybe should not have, and
-    // blocking every outbound email on the platform — including the login codes
-    // people need to get in. The first is recoverable; the second is an outage.
-    logger.error('suppression check failed, allowing send: ' + (err && err.message));
+    // codebase's access checks. Failing closed would stop every login code in
+    // the product over a transient blip. The first is recoverable; the second
+    // is an outage.
+    //
+    // BUT IT SAYS SO, LOUDLY. A guard that silently stops guarding is worse
+    // than no guard, because it is trusted. Every one of these lines means mail
+    // went to an address we may know is dead, and the bounce rate that SES
+    // suspends accounts over is climbing while this is happening. The marker is
+    // deliberately greppable.
+    logger.error(
+      '*** EMAIL SUPPRESSION GUARD FAILED OPEN *** mail was allowed WITHOUT a '
+      + 'suppression check — bounces and complaints are accumulating unchecked. '
+      + 'Cause: ' + (err && err.message)
+    );
     return false;
   }
 }
