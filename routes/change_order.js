@@ -19,9 +19,16 @@ async function sendInviteEmail(toEmail, clientName) {
   if (!toEmail) return;
   const safeTo = String(toEmail || '').trim();
   if (!safeTo) return;
+  // DEAD CODE — kept deliberately (CCP: "not deleted"), and given the correct
+  // reply-to anyway so it cannot ship wrong if it is ever reconnected.
+  // Nothing here resolves an owner: an email and a display name, no user id,
+  // no connection, and no caller anywhere in this repo's history. So per the
+  // CCP's instruction for that case it takes the app default. Whoever
+  // reconnects it must pass the owning GC and change this line.
   const mailOptions = {
     from: process.env.SMTP_USER,
     to: safeTo,
+    replyTo: defaultReplyTo(),
     subject: 'You have been invited',
     html: `<p>Hello ${clientName || ''},</p><p>You have been invited to See Job Run.</p>`,
   };
@@ -30,6 +37,7 @@ async function sendInviteEmail(toEmail, clientName) {
 
 // Shared, provider-switchable transport (see services/mailer.js).
 const transporter = require('../services/mailer').transporter;
+const { replyToForUser, defaultReplyTo } = require('../services/mailReplyTo');
 
 // ============ PUBLIC (no auth) routes for external client change order preview ============
 
@@ -230,9 +238,14 @@ router.post('/change-orders/:id/send-email', auth.authenticateToken, async (req,
       </tr>`;
     });
 
+    // USER-ORIGINATED: the GC whose change order this is owns the conversation.
+    // Resolved from the RECORD's creator, not the caller, so it stays right
+    // when an employee sends the boss's change order.
+    const replyTo = await replyToForUser(connection, co.created_by_user_id);
     const mailOptions = {
       from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
       to: co.client_email,
+      replyTo,
       subject: `Change Order from ${creatorName} â€” ${co.project_address || 'Your Project'}`,
       html: `
         <!DOCTYPE html>
@@ -2201,9 +2214,11 @@ router.post(
     `;
 
       // Send email with HTML content and no PDF attachment
+      // USER-ORIGINATED: sent to the job's contacts on the GC's behalf.
       await transporter.sendMail({
         from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
         to: contacts.join(","),
+        replyTo: await replyToForUser(connection, res.locals.id),
         subject: `Change Order Report for Job ${changeOrderId}`,
         text: `Change Order report for job ${changeOrderId}.`,
         html: htmlContent,

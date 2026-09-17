@@ -474,7 +474,7 @@ router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, requi
       currentTimestamp,
       createdBy,
     });
-    await sendInviteEmail(client_email, contactName);
+    await sendInviteEmail(client_email, contactName, createdBy, connection);
 
     return res.json({
       message: alreadyExists
@@ -498,10 +498,18 @@ router.post("/send-invite", auth.authenticateToken, denyExpiredFreeWrites, requi
   }
 });
 
-async function sendInviteEmail(toEmail, inviterName) {
+// inviterId threaded through so a job invitation replies to the GC who sent
+// it, not to a no-reply address. Last parameter, defaulting to null, so no
+// caller breaks silently; all three real callers pass it.
+async function sendInviteEmail(toEmail, inviterName, inviterId = null, conn = null) {
+  // USER-ORIGINATED: the GC inviting this person owns the conversation. The
+  // reader is being invited onto somebody's job and will reply to them.
+  const { replyToForUser } = require("../services/mailReplyTo");
+  const replyTo = inviterId ? await replyToForUser(conn || pool, inviterId) : undefined;
   const mailOptions = {
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`, // Sender name + email
     to: toEmail,
+    replyTo,
     subject: "Invitation to Join SeeJobRun",
     text: `Mr. ${inviterName} You are invited to join SeeJobRun. Please sign up and accept the invitation at: https://seejobrun.com/signup`,
     html: `
@@ -1893,7 +1901,7 @@ router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites
     );
 
     // 📧 Always send email (even if already invited)
-    await sendInviteEmail(client_email, contactName);
+    await sendInviteEmail(client_email, contactName, userId, connection);
 
     // 🟡 If already invited → do NOT insert again
     if (existingInvite.length > 0) {
@@ -1922,7 +1930,7 @@ router.post("/send-invite/:jobId", auth.authenticateToken, denyExpiredFreeWrites
   } catch (err) {
     // 🛡️ Race-condition protection
     if (err.code === "ER_DUP_ENTRY") {
-      await sendInviteEmail(client_email, contactName);
+      await sendInviteEmail(client_email, contactName, userId, connection);
       return res.json({
         message: "Invite email sent again. Record already exists.",
         alreadyExists: true,

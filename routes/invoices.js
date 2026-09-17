@@ -9,6 +9,7 @@ const access = require("../utils/access");
 const { blockExpiredOwnRecord, requirePlan, isSameAccount } = require("../utils/access");
 const { ensureInvoicesTable, ensureInvoiceDocumentSchema, assignJobNumberIfMissing } = require("../services/dbMigrations");
 const mailer = require("../services/mailer");
+const { replyToForUser } = require("../services/mailReplyTo");
 
 // Client-facing preview base (mirrors the quotes public link).
 const PUBLIC_BASE = "https://seejobrun.com/user-dashboard";
@@ -352,7 +353,12 @@ router.post("/:jobId/:invoiceId/send", pdfUpload.single("pdf"), blockExpiredOwnR
     if (req.file && req.file.buffer && req.file.buffer.length) {
       attachments.push({ filename: `invoice-${num5}.pdf`, content: req.file.buffer, contentType: "application/pdf" });
     }
-    await mailer.sendMail({ to, subject: `Invoice #${num5} from ${fromName}`, html, attachments });
+    // USER-ORIGINATED: an invoice is the GC's conversation with their client.
+    // Resolved from the JOB's creator (the same value companyBlock above is
+    // built from), not the caller, so an employee sending it still replies to
+    // the business. "When can I pay this" must not reach a no-reply box.
+    const replyTo = await replyToForUser(connection, req._jobCreatedBy);
+    await mailer.sendMail({ to, replyTo, subject: `Invoice #${num5} from ${fromName}`, html, attachments });
     // First send stamps sent_at + moves Draft → Sent (never downgrades Viewed/Paid).
     await connection.query(
       "UPDATE job_invoices SET sent_at = COALESCE(sent_at, NOW()), status = CASE WHEN status = 'Draft' OR status IS NULL THEN 'Sent' ELSE status END WHERE id = ?",

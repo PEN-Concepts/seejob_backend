@@ -22,7 +22,31 @@ function getMailer() {
   return require('./mailer').transporter;
 }
 
-async function sendEmail(to, subject, text, html) {
+/**
+ * REPLY-TO IS A PARAMETER HERE, NEVER A DEFAULT.
+ *
+ * This helper has two callers that want two different answers:
+ *   dispatchScheduleNotification -> the GC whose schedule changed
+ *   payments reverification      -> MAIL_REPLY_TO, because it is app mail
+ *
+ * A default would silently give one of them the other's answer, and the one it
+ * would get wrong is the customer-facing one. So a caller that passes nothing
+ * THROWS — loudly, at the call site, the first time it is exercised — rather
+ * than sending a schedule notice that replies to the wrong company.
+ *
+ * That throw is a programming error, not a send failure: it fires before any
+ * message is built. Genuine send failures still return false and never throw,
+ * which is what the "sends are best-effort" contract at the top of this file
+ * means and what schedule saves depend on.
+ */
+async function sendEmail(to, subject, text, html, replyTo) {
+  if (!replyTo || !String(replyTo).trim()) {
+    throw new Error(
+      '[notify] sendEmail requires replyTo. Pass the owning GC for user-originated ' +
+        'mail, or mailReplyTo.defaultReplyTo() for app mail. There is no default here ' +
+        'because the two callers need different answers.',
+    );
+  }
   try {
     await getMailer().sendMail({
       from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
@@ -30,6 +54,7 @@ async function sendEmail(to, subject, text, html) {
       subject,
       text,
       html: html || undefined,
+      replyTo,
     });
     return true;
   } catch (e) {
@@ -160,7 +185,12 @@ async function dispatchScheduleNotification(conn, { userId, jobName, items, send
         const html = `<p>Hello${user.name ? ' ' + user.name : ''},</p>` +
           `<p>${summary.replace(/\n/g, '<br/>')}</p>` +
           `<p>— SeeJobRun</p>`;
-        await sendEmail(user.email, 'Your job schedule was updated', summary, html);
+        // The GC WHO EDITED THE SCHEDULE owns this conversation — the reader is
+        // a worker on that company's job, and a reply ("I can't make Tuesday")
+        // has to reach the person who moved the date.
+        const { replyToForUser } = require('./mailReplyTo');
+        const replyTo = await replyToForUser(db, senderId);
+        await sendEmail(user.email, 'Your job schedule was updated', summary, html, replyTo);
       }
       return;
     }

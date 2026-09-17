@@ -63,15 +63,37 @@ function buildSesTransport() {
   return nodemailer.createTransport({ SES: { ses, aws } });
 }
 
+// What transport is ACTUALLY in use, as opposed to what MAIL_PROVIDER asked
+// for. These differ exactly when the fallback below fires, and that difference
+// is the thing a cutover has to be able to see.
+let ACTIVE_PROVIDER = PROVIDER;
+let FELL_BACK = false;
+
 let transporter;
 try {
   transporter = PROVIDER === 'ses' ? buildSesTransport() : buildSmtpTransport();
-  logger.info(`[mailer] using ${PROVIDER} transport`);
+  // Positive confirmation on EVERY boot, so "did the cutover take?" is answered
+  // by one grep instead of by inferring it from mail still arriving.
+  logger.info(`[mailer] using ${ACTIVE_PROVIDER} transport (MAIL_PROVIDER=${PROVIDER})`);
 } catch (err) {
-  // Never let a mis-configured provider take the app down on boot — fall back to
-  // SMTP and log loudly so it's caught.
-  logger.error(`[mailer] failed to init ${PROVIDER} transport; falling back to smtp: ${err.message}`);
+  // The fallback STAYS — a mis-configured provider must never take the app
+  // down on boot, and login runs through here.
+  //
+  // But a silent fallback is how a cutover fails without anyone noticing: SES
+  // throws, the app keeps sending over Namecheap, mail still arrives, and
+  // everything looks healthy. So this SHOUTS, the same way the suppression
+  // guard does — error level, a greppable marker, and a line that names the
+  // CONSEQUENCE ("the cutover did not take effect") rather than the symptom
+  // ("failed to init"). The symptom is on the second line for whoever fixes it.
+  ACTIVE_PROVIDER = 'smtp';
+  FELL_BACK = true;
   transporter = buildSmtpTransport();
+  logger.error(
+    `[mailer] MAIL_PROVIDER_FALLBACK — THE ${PROVIDER.toUpperCase()} CUTOVER DID NOT TAKE EFFECT. ` +
+      `Mail is still going out over the OLD smtp sender (${process.env.SMTP_HOST || 'unset'}), not ${PROVIDER}. ` +
+      `Every message sent from this boot uses the legacy transport.`,
+  );
+  logger.error(`[mailer] MAIL_PROVIDER_FALLBACK cause: ${err && err.message}`);
 }
 
 /**
@@ -101,6 +123,32 @@ async function sendMail(options) {
 const rawSendMail = transporter.sendMail.bind(transporter);
 
 transporter.sendMail = async function suppressionAwareSendMail(options) {
+  // ── THE REPLY-TO CHOKEPOINT ──────────────────────────────────────────
+  //
+  // Same reasoning as the suppression check below, and the same place for the
+  // same reason: this wraps the TRANSPORT, so every consumer inherits it
+  // whichever import style it uses, on whichever transport the cutover
+  // selected, and a call site added next year inherits it without anyone
+  // remembering this file exists.
+  //
+  // A site that knows whose conversation it is passes replyTo explicitly. One
+  // that does not — our own app mail, and anything added later — gets
+  // MAIL_REPLY_TO. The default is deliberately not a throw: a message that
+  // replies to us is recoverable, a message that fails to send is not, and
+  // login runs through here.
+  //
+  // FIRST, before the suppression module is even loaded. It used to sit after
+  // the require, which left the "suppression unavailable" path below sending
+  // with no reply-to at all — the exact hole this is here to close.
+  const opts = { ...(options || {}) };
+  if (!opts.replyTo) {
+    try {
+      opts.replyTo = require('./mailReplyTo').defaultReplyTo();
+    } catch (e) {
+      opts.replyTo = 'info@seejobrun.com';
+    }
+  }
+
   let suppression;
   try {
     suppression = require('./emailSuppression');
@@ -109,10 +157,9 @@ transporter.sendMail = async function suppressionAwareSendMail(options) {
     // outbound email — login codes included — is a worse failure than sending
     // one we should not have.
     logger.error('[mailer] suppression module unavailable, sending unchecked: ' + err.message);
-    return rawSendMail(options);
+    return rawSendMail(opts);
   }
 
-  const opts = options || {};
   const recipients = suppression.extractAddresses(opts.to);
   if (!recipients.length) return rawSendMail(opts);
 
@@ -152,4 +199,17 @@ transporter.sendMail = async function suppressionAwareSendMail(options) {
 // Bound to the transport so `this` is correct.
 const verify = transporter.verify.bind(transporter);
 
-module.exports = { transporter, sendMail, verify, FROM, PROVIDER, rawSendMail };
+module.exports = {
+  transporter,
+  sendMail,
+  verify,
+  FROM,
+  // What was ASKED for. Kept under its original name so existing callers and
+  // tests are unchanged.
+  PROVIDER,
+  // What is actually SENDING. Equal to PROVIDER unless the init fell back.
+  // A cutover check should read these two, not just the first.
+  ACTIVE_PROVIDER,
+  FELL_BACK,
+  rawSendMail,
+};

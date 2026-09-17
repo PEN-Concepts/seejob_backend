@@ -12,6 +12,7 @@ const { isFullAccess, isSubcontractor, isAccountOwner } = require('../services/n
 const { notepadMyTasksEnabled } = require('../services/featureFlags');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
+const { replyToForUser } = require('../services/mailReplyTo');
 const { getSectionAccess } = require('../services/notepadAccess');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 
@@ -1003,7 +1004,11 @@ router.post('/sections/:id/share', auth.authenticateToken, async (req, res) => {
           `</table>` +
           `<p style="color:#999;font-size:12px;margin-top:16px">This is a read-only snapshot shared from See Job Run. It won't update if the notepad changes.</p>` +
           `</div>`;
-        await mailer.sendMail({ to, subject: `Notepad: ${title}`, html, text: textBody });
+        // USER-ORIGINATED: a notepad snapshot is sent by one person to another
+        // on the company's behalf, and the reader will reply to whoever sent
+        // it — not to a no-reply address.
+        const replyTo = await replyToForUser(connection, signedin_user);
+        await mailer.sendMail({ to, replyTo, subject: `Notepad: ${title}`, html, text: textBody });
         return res.status(200).json({ success: true, message: 'Notepad sent by email.' });
       }
 
