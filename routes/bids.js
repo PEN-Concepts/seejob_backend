@@ -68,13 +68,20 @@ const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } });
 
 // ---- branded email (no-reply from See Job Run, reusing the SMTP system) ----
 // Shared, provider-switchable transport (see services/mailer.js).
-const mailer = require('../services/mailer').transporter;
-async function sendBidInviteEmail(toEmail, company, title, comments) {
+const mailer = require('../services/mailer');
+// gcId threaded through from the create-bid-request handler (the CCP's
+// instruction) so the invite replies to the contractor who asked for the bid.
+// A subcontractor reading this WILL reply with questions about scope — that is
+// the entire point of a bid request — and those replies must reach the GC.
+async function sendBidInviteEmail(toEmail, company, title, comments, gcId = null, conn = null) {
   if (!toEmail) return;
   try {
+    const { replyToForUser } = require('../services/mailReplyTo');
+    const replyTo = gcId ? await replyToForUser(conn || pool, gcId) : undefined;
     await mailer.sendMail({
       from: `"See Job Run" <${process.env.SMTP_USER}>`,
       to: toEmail,
+      replyTo,
       subject: `You have a bid request from ${company || "a contractor"}`,
       text: `${company || "A contractor"} sent you a bid request: "${title}". ${comments || ""}\n\nOpen it in See Job Run: ${APP_URL}`,
       html: `<p><strong>${company || "A contractor"}</strong> sent you a bid request:</p>
@@ -136,7 +143,7 @@ router.post("/", auth.authenticateToken, async (req, res) => {
       `SELECT email FROM user WHERE id IN (${contractor_ids.map(() => "?").join(",")})`,
       contractor_ids.map((c) => Number(c))
     );
-    for (const row of emails) await sendBidInviteEmail(row.email, company, title, comments);
+    for (const row of emails) await sendBidInviteEmail(row.email, company, title, comments, gcId, conn);
 
     res.status(201).json({ success: true, bid_request_id: bidId });
   } catch (err) {

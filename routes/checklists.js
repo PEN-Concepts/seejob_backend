@@ -12,6 +12,7 @@ const { isFullAccess, isSubcontractor, isAccountOwner } = require('../services/n
 const { notepadMyTasksEnabled } = require('../services/featureFlags');
 const chat = require('../services/chat');
 const mailer = require('../services/mailer');
+const { replyToForUser } = require('../services/mailReplyTo');
 const { getSectionAccess } = require('../services/notepadAccess');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 
@@ -402,8 +403,30 @@ const toMySQLDate = (date) => {
   return `${yyyy}-${mm}-${dd}`;
 };
 
+/**
+ * A bare YYYY-MM-DD is parsed by new Date() as UTC midnight (ECMAScript
+ * requires it). Reading LOCAL parts off that then gives the PREVIOUS day in
+ * any negative-offset zone: 3 Oct becomes 2 Oct in California, so framing
+ * booked for the 3rd read as the 2nd.
+ *
+ * So a date-only string is built as LOCAL midnight from its own parts. A
+ * string that carries a time is untouched: V8 already parses that as local.
+ *
+ * This does NOT resolve the model question. due_date is a DATETIME and still
+ * cannot distinguish "3 Oct, all day" from "3 Oct at midnight" — both are
+ * stored as 00:00:00. That decision is still open; this only stops the day
+ * from moving.
+ */
+function parseDateInput(input) {
+  if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.trim())) {
+    const [y, m, d] = input.trim().split('-').map(Number);
+    return new Date(y, m - 1, d, 0, 0, 0, 0);
+  }
+  return new Date(input);
+}
+
 const toMySQLDateTime = (date) => {
-  const d = new Date(date);
+  const d = parseDateInput(date);
   const yyyy = d.getFullYear();
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
@@ -981,7 +1004,11 @@ router.post('/sections/:id/share', auth.authenticateToken, async (req, res) => {
           `</table>` +
           `<p style="color:#999;font-size:12px;margin-top:16px">This is a read-only snapshot shared from See Job Run. It won't update if the notepad changes.</p>` +
           `</div>`;
-        await mailer.sendMail({ to, subject: `Notepad: ${title}`, html, text: textBody });
+        // USER-ORIGINATED: a notepad snapshot is sent by one person to another
+        // on the company's behalf, and the reader will reply to whoever sent
+        // it — not to a no-reply address.
+        const replyTo = await replyToForUser(connection, signedin_user);
+        await mailer.sendMail({ to, replyTo, subject: `Notepad: ${title}`, html, text: textBody });
         return res.status(200).json({ success: true, message: 'Notepad sent by email.' });
       }
 
@@ -1101,11 +1128,18 @@ router.post('/create', auth.authenticateToken, async (req, res) => {
 
       const finalPriority = priority ?? 'low';
       const finalStatus = status ?? 'new';
-      const finalDueDate = due_date
-        ? toMySQLDateTime(due_date)
-        : normalizedType === 'task'
-          ? toMySQLDateTime(new Date())
-          : null;
+      // NO DATE MEANS NO DATE.
+      //
+      // This used to fall through to toMySQLDateTime(new Date()) for task-type
+      // items, so EVERY notepad line added without a date was stamped with the
+      // moment it was typed. Not a display default — written straight into
+      // check_list.due_date on INSERT, which is why it survived a refresh, drove
+      // the "late" calculation, and re-sorted the list around values nobody
+      // had entered.
+      //
+      // Undated is a valid, common and intended state. If the user gave no
+      // date, store null.
+      const finalDueDate = due_date ? toMySQLDateTime(due_date) : null;
 
       const sql = `
         INSERT INTO check_list

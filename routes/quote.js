@@ -19,8 +19,17 @@ const PDFDocument = require("pdfkit");
 const pdf = require("html-pdf");
 const { v4: uuidv4 } = require("uuid");
 
+// DEAD CODE — kept deliberately (CCP: "not deleted"), and given the correct
+// reply-to anyway so it cannot ship wrong if it is ever reconnected.
+//
+// Nothing resolves an owner here: the function receives an email and a display
+// name, no user id and no connection, and it has NO CALLER anywhere in this
+// repo's history. So per the CCP's instruction for that case, it takes the app
+// default rather than inventing a GC it has no way to identify. Whoever
+// reconnects it must pass the inviting GC and change this line.
 async function sendInviteEmail(toEmail, inviterName) {
   const mailOptions = {
+    replyTo: defaultReplyTo(),
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
     to: toEmail,
     subject: "Invitation to Join SeeJobRun",
@@ -79,6 +88,7 @@ async function sendInviteEmail(toEmail, inviterName) {
 
 // Shared, provider-switchable transport (see services/mailer.js).
 const transporter = require('../services/mailer').transporter;
+const { replyToForUser, defaultReplyTo } = require('../services/mailReplyTo');
 
 // ── D2: Quote Manager backend plan/permission gate ──────────────────────────
 // The frontend (auth-guard.service.ts) allows the Quote Manager route when the
@@ -366,9 +376,15 @@ router.post('/quotes/:id/send-email', auth.authenticateToken, requireQuoteAccess
       </tr>`;
     });
 
+    // USER-ORIGINATED: the GC whose quote this is owns the conversation. A
+    // client replying "can you do it for less" must reach them, not us.
+    // Resolved from the QUOTE's creator rather than the caller, so it is still
+    // right when an employee sends the boss's quote.
+    const replyTo = await replyToForUser(connection, quote.created_by_user_id);
     const mailOptions = {
       from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
       to: quote.client_email,
+      replyTo,
       subject: `Quote from ${creatorName} â€” ${quote.project_address || 'Your Project'}`,
       html: `
         <!DOCTYPE html>
@@ -2134,10 +2150,13 @@ router.post(
 </html>
     `;
 
-      // Send email with HTML content and no PDF attachment
+      // Send email with HTML content and no PDF attachment.
+      // USER-ORIGINATED: this report goes to the job's contacts on the GC's
+      // behalf, so a reply belongs to the GC sending it.
       await transporter.sendMail({
         from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
         to: contacts.join(","),
+        replyTo: await replyToForUser(connection, res.locals.id),
         subject: `Change Order Report for Job ${quoteId}`,
         text: `Change Order report for job ${quoteId}.`,
         html: htmlContent,

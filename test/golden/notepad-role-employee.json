@@ -1,0 +1,43 @@
+{
+  "success": true,
+  "access": {
+    "is_account_owner": false,
+    "can_delegate": false,
+    "can_create_notepad": true,
+    "allowlist_len": 0
+  },
+  "pads": [
+    {
+      "title": "My Notepad",
+      "scope": "private",
+      "origin": "manual",
+      "has_job": false,
+      "has_lead": false,
+      "job_name": null,
+      "received": false,
+      "item_titles": []
+    },
+    {
+      "title": "No Job Assigned",
+      "scope": "private",
+      "origin": "auto",
+      "has_job": false,
+      "has_lead": false,
+      "job_name": null,
+      "received": false,
+      "item_titles": []
+    },
+    {
+      "title": "Shared with Eve",
+      "scope": "private",
+      "origin": "manual",
+      "has_job": false,
+      "has_lead": false,
+      "job_name": null,
+      "received": false,
+      "item_titles": [
+        "Shared item"
+      ]
+    }
+  ]
+}

@@ -7,6 +7,7 @@ const PDFDocument = require('pdfkit');
 const pool = require('../config/connection');
 const logger = require('../common/logger');
 const mailer = require('../services/mailer');
+const { replyToForOwnerId } = require('./mailReplyTo');
 
 const money = (n) => '$' + (Number(n) || 0).toFixed(2);
 
@@ -122,9 +123,19 @@ async function sendSignedCopy(row, kind) {
         <p>The ${label} <b>#${number}</b> from ${row.company_name || 'your contractor'} has been <b>signed</b>${row.client_signed_name ? ' by ' + row.client_signed_name : ''}.</p>
         <p>A signed PDF copy is attached for your records.</p>
       </div>`;
+    // THE ONE SITE WHERE THE TRIGGER IS NOT THE OWNER.
+    //
+    // This runs from PUBLIC, UNAUTHENTICATED e-sign endpoints: the person who
+    // triggered it is the CLIENT who just signed. Using "the triggering user"
+    // here would either resolve to nobody or, worse, point the reply at the
+    // client themselves. The conversation belongs to the GC whose document
+    // this is, which is created_by_user_id — the same field creatorEmail is
+    // read from just above.
+    const replyTo = await replyToForOwnerId(pool, row.created_by_user_id);
     await mailer.sendMail({
       to: to || creatorEmail,
       cc: to && creatorEmail && creatorEmail !== to ? creatorEmail : undefined,
+      replyTo,
       subject: `Signed ${label} #${number}`,
       html,
       attachments: [{ filename: `${kind === 'change_order' ? 'change-order' : 'quote'}-${number}-signed.pdf`, content: buf, contentType: 'application/pdf' }],

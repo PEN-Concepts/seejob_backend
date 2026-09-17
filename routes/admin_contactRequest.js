@@ -18,7 +18,25 @@ const crypto = require("crypto");
 
 // Shared, provider-switchable transport (SMTP today, SES via env flip). See
 // services/mailer.js — replaces the per-file inline SMTP transport.
-const transporter = require('../services/mailer').transporter;
+const transporter = require('../services/mailer');
+const { formatAddress } = require('../services/mailReplyTo');
+
+/**
+ * Where the public contact form and demo request land.
+ *
+ * Was the literal "poul@oakcoast.net" in two places. Now configurable, and
+ * DEFAULTING TO EXACTLY THAT ADDRESS so nothing changes until someone sets the
+ * variable. Moving it is about being able to change it without a deploy, not
+ * about changing it now.
+ *
+ * NOTE: the same address also appears in utils/access.js as an
+ * OWNER_EXEMPT_EMAILS entry. That is a BILLING exemption and has nothing to do
+ * with where mail is delivered — the two are deliberately not linked, and
+ * changing ENQUIRY_INBOX must not touch it.
+ */
+function enquiryInbox() {
+  return String(process.env.ENQUIRY_INBOX || 'poul@oakcoast.net').trim();
+}
 
 // Optional: verify transporter
 transporter.verify((err, success) => {
@@ -34,8 +52,13 @@ async function sendContactEmail(data) {
 
   const mailOptions = {
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
-    to: "poul@oakcoast.net",
+    to: enquiryInbox(),
     subject: "New Contact Form Submission",
+    // INBOUND ENQUIRY. This message comes TO us from a stranger, so the
+    // conversation is with THEM: hitting reply must open a message to the
+    // person who wrote in, not to our own inbox. Their address is only ever
+    // used as a header here — nothing is sent to it.
+    replyTo: formatAddress(`${firstName || ""} ${lastName || ""}`.trim(), email) || undefined,
 
     html: `
       <div style="font-family: Arial; max-width: 600px; margin: auto;">
@@ -463,8 +486,11 @@ async function sendDemoEmail(data) {
 
   const mailOptions = {
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
-    to: "poul@oakcoast.net",
+    to: enquiryInbox(),
     subject: "New Demo Request",
+    // INBOUND ENQUIRY — same as the contact form. Reply goes to whoever asked
+    // for the demo.
+    replyTo: formatAddress(`${firstName || ""} ${lastName || ""}`.trim(), email) || undefined,
     html: `
       <div style="font-family: Arial; max-width: 600px; margin: auto;">
         <div style="background:#2196F3;color:#fff;padding:15px;text-align:center;">

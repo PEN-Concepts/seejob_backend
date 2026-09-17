@@ -25,6 +25,7 @@ const { requireNotepadMyTasks, publicFlags, mergeArmed, clientInviteArmed } = re
 const notify = require('../services/notify');
 const { logDestructiveJob } = require('../services/destructiveLog');
 const mailer = require('../services/mailer');
+const { replyToForUser } = require('../services/mailReplyTo');
 const multer = require('multer');
 const path = require('path');
 
@@ -54,6 +55,9 @@ const {
   ensureNoJobNotepad,
   ensurePrivatePadsForDelegatedWork,
 } = require('../services/notepadAccess');
+// §3 — the ONE resolved value for "who is this row assigned to". Everything
+// the row renders (state, name, self-flag) is a projection of this call.
+const { assignmentFields } = require('../services/notepadAssignee');
 
 // Contact categories (utils/access.js documents the model):
 //   1 = employee-class (includes Family/Friend)  2 = contractor / subcontractor
@@ -343,17 +347,19 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
         if (!bySection.has(key)) bySection.set(key, []);
         bySection.get(key).push({
           ...it,
-          // §3 pill state, computed once here so both platforms agree.
+          // §3 pill state, NAME and assignee object — all projections of ONE
+          // resolved value (services/notepadAssignee), computed once here so
+          // both platforms agree.
           //   'none'      -> gold-outline "Delegate"
           //   'delegated' -> green "Delegated"
-          //   'done'      -> green "✓ <first name>"
-          delegate_state: !it.delegated_task_id
-            ? 'none'
-            : Number(it.task_assignee_completed) === 1
-              ? 'done'
-              : 'delegated',
-          delegated_first_name: firstNameOf(it.delegated_to_name),
-          is_self_assigned: it.delegated_to != null && Number(it.delegated_to) === uid,
+          //   'done'      -> green "<first name> ✓"
+          //
+          // This used to read delegated_task_id for the state and
+          // delegated_to_name for the label, independently. A row with a task
+          // id and no resolvable person therefore came out green AND blank.
+          // Now the state cannot be green unless the name resolved, because
+          // both answers come from the same call.
+          ...assignmentFields(it, uid),
           can_edit: Number(it.created_by) === uid, // default rule: your own typing only
           // C9b/C9c — what the row's indicators read from.
           note: it.note || null,
@@ -397,8 +403,14 @@ router.get('/hub', auth.authenticateToken, requireNotepadMyTasks, async (req, re
           bySection.get(target).push({
             ...it,
             section_id: target,
-            delegate_state: Number(it.task_assignee_completed) === 1 ? 'done' : 'delegated',
-            delegated_first_name: firstNameOf(it.delegated_to_name),
+            // Same one resolved value as the owner's copy above. These rows are
+            // selected by `c.delegated_to = uid` so they always resolve, but
+            // deriving them the same way is the point: there is no second
+            // opinion about who a row is assigned to anywhere in this file.
+            ...assignmentFields(it, uid),
+            // …except this one. A borrowed row is BY DEFINITION assigned to the
+            // caller, and the phone renders is_self_assigned as the word "Me".
+            // On someone else's pad it must read their name, not "Me".
             is_self_assigned: false,
             // 3b: check off, note and photo. Nothing else. They did not write
             // these words and they are not the boss of this task.
@@ -1095,6 +1107,9 @@ router.post('/sections/:id/live-share', auth.authenticateToken, requireNotepadMy
           try {
             await mailer.sendMail({
               to: invitedEmail,
+              // USER-ORIGINATED: a client invited to a notepad replies to the
+              // GC who shared it with them.
+              replyTo: await replyToForUser(connection, uid),
               subject: `You've been given access to "${title}" on See Job Run`,
               text: `You have been given access to the list "${title}" on See Job Run. Sign in with this email address to see it.`,
               html: `<p>You have been given access to the list <strong>${String(title).replace(/</g, '&lt;')}</strong> on See Job Run.</p><p>Sign in with this email address to see it. It stays live — anything the sender changes, you see.</p>`,

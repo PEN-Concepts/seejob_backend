@@ -1328,6 +1328,112 @@ async function ensureDeviceTokenUnique(connection) {
   deviceTokenUniqueEnsured = true;
 }
 
+// OTP ATTEMPT CAP. Counts WRONG guesses against the code currently on the
+// row. At five the code is invalidated — not the account, which is the whole
+// point: burning a code costs the attacker their guess budget, while locking
+// an account would let anyone shut a contractor out of the product just by
+// guessing at their address five times.
+//
+// Before this existed there was NO cap, NO lockout and NO delay: a four-digit
+// code (10,000 possibilities) could be ground down at roughly eleven requests
+// a second for the full three minutes it stayed alive — about a one-in-five
+// chance per code, repeatable. Five attempts makes it one in two thousand.
+//
+// Reset to 0 whenever a NEW code is issued and whenever a code is used
+// successfully, so the counter always belongs to the code on the row.
+let otpAttemptsEnsured = false;
+async function ensureOtpAttemptsColumn(connection) {
+  if (otpAttemptsEnsured) return;
+  const [[row]] = await connection.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = 'otp_attempts'`
+  );
+  if (!row) {
+    await connection.query('ALTER TABLE `user` ADD COLUMN otp_attempts INT NOT NULL DEFAULT 0');
+  }
+  otpAttemptsEnsured = true;
+}
+
+// EMAIL SUPPRESSION. Addresses we must never send to again.
+//
+// SES suspends an account whose hard-bounce rate exceeds 5% or whose complaint
+// rate exceeds 0.1%. Repeatedly mailing a dead address, or mailing someone who
+// has pressed "spam", is how a sending domain's reputation is destroyed — and
+// the domain being protected here is seejobrun.com, which is the one we own.
+//
+// NOTHING IS EVER DELETED FROM THIS TABLE. Releasing an address is a WRITE
+// (released_at / released_by), not a delete, so the history of why someone was
+// suppressed survives the release. An address is suppressed when a row exists
+// AND released_at IS NULL.
+//
+// The unique key is on `email`, which is stored lowercased and trimmed by the
+// service layer, so a re-bounce after a release updates the existing row rather
+// than colliding — see emailSuppression.suppress().
+let emailSuppressionsEnsured = false;
+async function ensureEmailSuppressionsTable(connection) {
+  if (emailSuppressionsEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS email_suppressions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(190) NOT NULL,
+      reason ENUM('hard_bounce','complaint','manual') NOT NULL,
+      detail TEXT NULL,
+      source VARCHAR(40) NOT NULL DEFAULT 'ses_sns',
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      released_at DATETIME NULL,
+      released_by INT NULL,
+      UNIQUE KEY uniq_suppressed_email (email),
+      KEY idx_supp_active (released_at, email)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  emailSuppressionsEnsured = true;
+}
+
+// Every SNS message we accept, recorded by its MessageId. This is what makes
+// processing IDEMPOTENT: SNS delivers at-least-once and WILL redeliver, so the
+// same bounce can arrive several times. It also gives us somewhere to record a
+// processing failure, since the endpoint must still answer 200 — a non-200
+// makes SNS retry for hours and buries the real problem.
+let sesEventsEnsured = false;
+async function ensureSesEventsTable(connection) {
+  if (sesEventsEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS ses_notification_events (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      message_id VARCHAR(190) NOT NULL,
+      notification_type VARCHAR(40) NULL,
+      bounce_type VARCHAR(40) NULL,
+      recipients TEXT NULL,
+      outcome VARCHAR(40) NOT NULL,
+      error TEXT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uniq_sns_message (message_id),
+      KEY idx_ses_created (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  sesEventsEnsured = true;
+}
+
+// Mail we did NOT send because the address was suppressed. Without this a
+// suppressed address looks identical to a send that silently vanished, and the
+// first question support asks is "did it go out?".
+let blockedSendsEnsured = false;
+async function ensureBlockedSendsTable(connection) {
+  if (blockedSendsEnsured) return;
+  await connection.query(`
+    CREATE TABLE IF NOT EXISTS email_blocked_sends (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      email VARCHAR(190) NOT NULL,
+      subject VARCHAR(255) NULL,
+      reason VARCHAR(40) NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      KEY idx_blocked_email (email, created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+  blockedSendsEnsured = true;
+}
+
 // ── Chat system (group chat per Job/Lead + 1:1 DMs) ──────────────────────────
 // Four tables modeled on the existing task_assignees/tasks_images patterns.
 let chatTablesEnsured = false;
@@ -1601,6 +1707,10 @@ module.exports = {
   ensureChatBackfill,
   ensureChatMergeConvertedLeadChats,
   ensureUserTokenVersionColumn,
+  ensureEmailSuppressionsTable,
+  ensureSesEventsTable,
+  ensureBlockedSendsTable,
+  ensureOtpAttemptsColumn,
   ensureDeviceTokenUnique,
   dropUserMobileUniqueIndex,
   ensureSuggestedItemsTable,

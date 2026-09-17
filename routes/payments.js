@@ -9,6 +9,7 @@ const { getAccessMode, OWNER_EXEMPT_EMAILS } = require("../utils/access");
 const { requireAdmin } = require("../utils/adminGate");
 const { grantNotepadCreate } = require("../services/permissionLevels");
 const { sendEmail, isRealEmail } = require("../services/notify");
+const { defaultReplyTo } = require("../services/mailReplyTo");
 const { previewAccountDeletion, cascadeDeleteAccount } = require("../services/accountDelete");
 const { ensureWebhookEventsTable, ensurePaymentReceiptsTable } = require("../services/dbMigrations");
 
@@ -2806,7 +2807,10 @@ router.post(
         const firstName = String(r.name || "").trim().split(/\s+/)[0] || "there";
         const deadline = r.due ? r.due : "";
         const msg = buildReverifyEmail(emailType, { firstName, migrationDate, deadline });
-        const okSend = await sendEmail(r.email, msg.subject, msg.text, msg.html);
+        // APP MAIL. A re-verification notice is from us about the reader's own
+        // account, not from a GC on whose behalf we are writing, so a reply
+        // belongs to us and not to any contractor.
+        const okSend = await sendEmail(r.email, msg.subject, msg.text, msg.html, defaultReplyTo());
         try {
           await connection.query(
             `INSERT INTO reverification_email_log (user_id, email_type, recipient_email, status, triggered_by)

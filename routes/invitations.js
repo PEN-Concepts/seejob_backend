@@ -49,6 +49,22 @@ const { checkLicense, checkAllLicenses, ensureCslbColumns } = require("../servic
 const { ensureContactStatusColumn } = require("../services/dbMigrations");
 
 //get contacts
+// getuserbycategory and getuserbysubcategory were DELETED here.
+//
+// They were unscoped duplicates: their WHERE clause was the caller-supplied
+// category alone, with no company, owner or contact join, so they returned
+// matching users across every company. routes/contacts.js carries the SAME
+// two paths, correctly scoped through getContactScope/visibleUserPredicate —
+// someone fixed the exposure there and missed these copies.
+//
+// Nothing called either one: no component, template, service method or URL
+// string anywhere in the frontend, and no internal caller here. Import
+// Contractors posts licence numbers to /bulk-create-from-licenses and does
+// not browse users at all.
+//
+// If you need this shape, use the routes/contacts.js versions. Do not
+// re-add an unscoped copy.
+
 router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
   let connection;
   try {
@@ -684,44 +700,8 @@ router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
 });
 
 
-router.get("/getuserbycategory/:id", auth.authenticateToken, async (req, res) => {
-    const id = req.params.id;
-    let connection;
-    try {
-        connection = await pool.getConnection();
-        query = "SELECT u.id, u.name, u.email, u.mobile FROM user u where u.category = ? order by u.id asc";
-        const [rows] = await connection.query(query, [id]);
-        res.status(200).json({ code: "200", message: "getuserbycategory data successfully", data: rows });
-        return;
-    } catch (error) {
-        logger.error(`${error}`)
-        res.status(200).json({ code: "500", data: {}, message: "Something went wrong" });
-        return;
-    } finally {
-        if (connection) connection.release();
-    }
-
-});
 
 
-router.get("/getuserbysubcategory/:id", auth.authenticateToken, async (req, res) => {
-    const id = req.params.id;
-    let connection;
-    try {
-        connection = await pool.getConnection();
-        query = "SELECT u.id, u.name, u.email, u.mobile FROM user u where u.subcategory = ? order by u.id asc";
-        const [rows] = await connection.query(query, [id]);
-        res.status(200).json({ code: "200", message: "getuserbysubcategory data successfully", data: rows });
-        return;
-    } catch (error) {
-        logger.error(`${error}`)
-        res.status(200).json({ code: "500", data: {}, message: "Something went wrong" });
-        return;
-    } finally {
-        if (connection) connection.release();
-    }
-
-});
 // routes/right.js or your main routes file
 
 router.get('/rights', auth.authenticateToken, async (req, res) => {
@@ -2339,17 +2319,26 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
 // row. send_invite=true emails an invitation (status 'Pending');
 // send_invite=false just stores them (status 'Saved').
 // Shared, provider-switchable transport (see services/mailer.js).
-const inviteMailer = require('../services/mailer').transporter;
+const inviteMailer = require('../services/mailer');
 
-async function sendContactInviteEmail(toEmail, inviterName) {
+// inviterId threaded through so the invitation replies to the GC who sent it,
+// not to a no-reply address. It is the last parameter and defaults to null so
+// no existing caller breaks silently; both real callers pass it.
+async function sendContactInviteEmail(toEmail, inviterName, inviterId = null, conn = null) {
   // The invited person's SeeJobRun profile ALREADY exists (created the moment they
   // were added as a contact), so the link goes to SIGN-IN (email + one-time code),
   // NOT a sign-up / create-account flow. Applies to EVERY invited type — client,
   // subcontractor, employee — so no one is confused by a "Sign Up" prompt.
   const signInUrl = 'https://seejobrun.com/user-dashboard/login';
+  // USER-ORIGINATED: the GC who added this contact owns the conversation. The
+  // reader was just added to somebody's company and will reply with "who is
+  // this?" — that has to reach them, not a no-reply box.
+  const { replyToForUser } = require('../services/mailReplyTo');
+  const replyTo = inviterId ? await replyToForUser(conn || pool, inviterId) : undefined;
   await inviteMailer.sendMail({
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
     to: toEmail,
+    replyTo,
     subject: 'You have been added to SeeJobRun',
     text: `${inviterName} added you to SeeJobRun. Your account is ready — sign in with your email (${toEmail}) and the one-time code we'll send you: ${signInUrl}`,
     html: `<p>Hello,</p><p><strong>${inviterName}</strong> added you to SeeJobRun. Your account is ready.</p><p><a href="${signInUrl}">Click here to sign in</a> with your email (<strong>${toEmail}</strong>) — we'll email you a one-time sign-in code.</p>`,
@@ -2471,7 +2460,7 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       }
       const [[me]] = await connection.query('SELECT name FROM user WHERE id = ?', [userId]);
       try {
-        await sendContactInviteEmail(email, me ? me.name : 'A SeeJobRun user');
+        await sendContactInviteEmail(email, me ? me.name : 'A SeeJobRun user', userId, connection);
       } catch (mailErr) {
         logger.error('Invite email failed:', mailErr);
         return res.json({ contact_user_id: contactUserId, status: targetStatus, email_sent: false, message: 'Contact saved, but the invitation email could not be sent. Try Resend Invitation later.' });
@@ -2689,7 +2678,7 @@ router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req,
     }
 
     const [[me]] = await connection.query('SELECT name FROM user WHERE id = ?', [userId]);
-    await sendContactInviteEmail(contactUser.email, me ? me.name : 'A SeeJobRun user');
+    await sendContactInviteEmail(contactUser.email, me ? me.name : 'A SeeJobRun user', userId, connection);
     res.json({ message: 'Invitation sent', status: 'Pending' });
   } catch (err) {
     logger.error('resend-invite error:', err);

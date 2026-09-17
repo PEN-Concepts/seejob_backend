@@ -261,14 +261,29 @@ router.get(
       const userId = (req.user && req.user.id) ? req.user.id : res.locals.id;
       connection = await pool.getConnection();
 
+      // TENANT ISOLATION.
+      //
+      // This query used to open with a third branch:
+      //
+      //     SELECT id, name, email FROM user WHERE role = 12 AND status = 1
+      //
+      // which carried NO company, user or ownership clause at all. It returned
+      // every role-12 user in the database, so the UNION resolved to "every
+      // subcontractor on the platform" and the two scoped branches below were
+      // redundant. Any user who could open a Budget page saw other companies'
+      // subcontractor names and emails, and their Budget pages showed ours.
+      //
+      // It was DELETED rather than given a company clause. The branches below
+      // already return exactly the caller's own contacts, so removing it takes
+      // away only records the caller was never entitled to see. A narrower
+      // query with fewer moving parts is the point: there is now one way to be
+      // in this list, not two.
+      //
+      // Do not add an unscoped branch back for convenience. If this list needs
+      // to be wider, widen it from the CONTACT side, where ownership is
+      // actually expressed.
       const [rows] = await connection.query(
         `(
-          SELECT id, name, email
-          FROM user
-          WHERE role = 12 AND status = 1
-        )
-        UNION
-        (
           SELECT u.id, u.name, u.email
           FROM contact c
           INNER JOIN user u ON u.id = c.request_user2

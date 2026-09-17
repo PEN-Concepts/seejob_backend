@@ -9,7 +9,7 @@ const { addUserSchema } = require("../models/user");
 const auth = require("../services/authentication");
 const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS, getAccessMode, hasLevelAtLeast } = require("../utils/access");
-const { ensureOwnerTypeColumns, ensureContactAuthorityColumn } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureContactAuthorityColumn, ensureOtpAttemptsColumn } = require("../services/dbMigrations");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const path = require("path");
 const multer = require("multer");
@@ -195,7 +195,7 @@ const localupload = multer({ storage: storage });
 
 // Shared, provider-switchable transport (SMTP today, SES via env flip). See
 // services/mailer.js — replaces the per-file inline SMTP transport.
-const transporter = require('../services/mailer').transporter;
+const transporter = require('../services/mailer');
 
 // Optional: verify transporter
 transporter.verify((err, success) => {
@@ -206,14 +206,35 @@ transporter.verify((err, success) => {
   }
 });
 
-// Function to generate a random OTP
+// OTP_DIGITS stays at 4 in THIS change, deliberately. Moving to six digits
+// requires the clients to accept a variable length first, and shipping the
+// length change ahead of them would lock every user out of the product at once.
+// The GENERATOR is switched here because that part is backend-only and safe.
+const OTP_DIGITS = 4;
+
+// Five wrong guesses and the code dies. The CODE — never the account.
+const OTP_MAX_ATTEMPTS = 5;
+
+/**
+ * WAS Math.random(), which is a finding in its own right rather than a tidy-up.
+ *
+ * Math.random() is not a cryptographic generator: V8 runs an xorshift128+
+ * stream per context and its outputs are not independent — given enough
+ * observed values the internal state can be recovered and SUBSEQUENT values
+ * predicted. Anyone who can see a handful of codes (their own, requested
+ * repeatedly) may therefore be attacking something far weaker than the
+ * 1-in-10,000 the digit count implies.
+ *
+ * crypto.randomInt draws from the OS CSPRNG and rejection-samples, so the
+ * distribution is uniform across the range with no modulo bias.
+ *
+ * padStart keeps the width fixed: randomInt can return 7, and "0007" is a
+ * valid code where "7" is not. Losing leading zeros would quietly shrink the
+ * space and break the comparison against the stored value.
+ */
 function generateOTP() {
-  const digits = "0123456789";
-  let OTP = "";
-  for (let i = 0; i < 4; i++) {
-    OTP += digits[Math.floor(Math.random() * 10)];
-  }
-  return OTP;
+  const max = Math.pow(10, OTP_DIGITS);
+  return String(crypto.randomInt(0, max)).padStart(OTP_DIGITS, "0");
 }
 
 function generateRandomPassword(length = 10) {
@@ -226,59 +247,121 @@ function generateRandomPassword(length = 10) {
   return password;
 }
 
-async function sendOTPEmail(toEmail, otp) {
+// WHAT THIS EMAIL IS FOR decides what it says. The same function sends codes
+// for three different reasons and used to tell all three "Thank you for
+// registering with SeeJobRun" — registration copy on a sign-in email. A person
+// signing in to an account they have had for a year was being thanked for
+// joining, which reads as a template nobody checked, and reads that way to a
+// spam filter too.
+const OTP_PURPOSE = {
+  signin: {
+    subject: 'Your See Job Run sign-in code',
+    heading: 'Sign in to See Job Run',
+    lead: 'Enter this code to finish signing in.',
+  },
+  register: {
+    subject: 'Confirm your email for See Job Run',
+    heading: 'Confirm your email',
+    lead: 'Enter this code to finish setting up your account.',
+  },
+  recover: {
+    subject: 'Your See Job Run password reset code',
+    heading: 'Reset your password',
+    lead: 'Enter this code to choose a new password.',
+  },
+};
+
+// HTTPS, NOT HTTP. This was http:// and the host answers nothing on plain HTTP
+// — the request simply fails — so every mail client fell back to the alt text
+// and the email arrived with a broken image at the top. A transactional message
+// with a broken image is a textbook spam signal, and it was the FIRST thing in
+// the message. Over https the same file is a healthy 22KB.
+//
+// Kept as a hosted URL rather than a data: URI on purpose — Gmail does not
+// render data: URIs in images, so inlining would have swapped one invisible
+// logo for another. Gmail proxies and caches this one.
+const LOGO_URL = 'https://seejobrun.com/user-dashboard/assets/seeJobRun.png';
+
+/**
+ * @param {string} toEmail
+ * @param {string} otp
+ * @param {'signin'|'register'|'recover'} purpose  defaults to signin
+ */
+async function sendOTPEmail(toEmail, otp, purpose) {
+  const copy = OTP_PURPOSE[purpose] || OTP_PURPOSE.signin;
+
+  // A REAL PLAIN-TEXT ALTERNATIVE. There was one, but it was a single line
+  // ("Your OTP code is: N") that matched neither the subject nor the HTML.
+  // Transactional mail is expected to carry a text part that stands on its own,
+  // and a text part that disagrees with the HTML counts against you.
+  const text = [
+    copy.heading,
+    '',
+    copy.lead,
+    '',
+    `Code: ${otp}`,
+    '',
+    'This code expires in 3 minutes and can only be used once.',
+    "If you didn't ask for it, you can ignore this email — nothing will change.",
+    '',
+    'See Job Run',
+  ].join('\n');
+
   const mailOptions = {
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`, // sender name + email
     to: toEmail,
-    subject: "Your OTP Verification Code",
-    text: `Your OTP code is: ${otp}`,
-    html: `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>OTP Verification</title>
-          <style>
-            body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-            .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .logo-container { text-align: center; padding: 20px 0; }
-            .logo { max-width: 150px; height: auto; }
-            .header { background-color: #4CAF50; color: white; padding: 20px; text-align: center; }
-            .content { background-color: #f9f9f9; padding: 30px; border: 1px solid #ddd; }
-            .otp-box { background-color: #e8f5e9; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; margin: 20px 0; }
-            .footer { text-align: center; margin-top: 20px; color: #777; font-size: 14px; }
-          </style>
-        </head>
-        <body>
-          <div class="container">
-            <div class="logo-container">
-              <img src="http://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
-            </div>
-            <div class="header">
-              <h1>SeeJobRun</h1>
-            </div>
-            <div class="content">
-              <h2>OTP Verification</h2>
-              <p>Hello,</p>
-              <p>Thank you for registering with SeeJobRun. Please use the following OTP code to verify your email address:</p>
-              <div class="otp-box">${otp}</div>
-              <p>This code will expire in 3 minutes. If you didn't request this verification, please ignore this email.</p>
-            </div>
-            <div class="footer">
-              <p>&copy; 2025 SeeJobRun. All rights reserved.</p>
-            </div>
-          </div>
-        </body>
-      </html>
-    `,
+    subject: copy.subject,
+    text,
+    // HOUSE STYLE, AND MOSTLY TEXT. The old template was built around a
+    // #4CAF50 banner — a bright green that appears nowhere in the product —
+    // with a second green panel behind the code. Two saturated blocks of a
+    // colour the brand does not use is promotional styling on a message that
+    // should look like a receipt. Gold #f0ad2b, dark #3a342c and cream #f1e9d5
+    // are the product's own palette; everything else is plain text on white.
+    html: `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${copy.heading}</title>
+  </head>
+  <body style="margin:0;padding:0;background:#f4f2ed;">
+    <div style="max-width:520px;margin:0 auto;padding:28px 20px;font-family:Arial,Helvetica,sans-serif;color:#2a2419;line-height:1.55;">
+      <div style="text-align:center;padding-bottom:18px;">
+        <img src="${LOGO_URL}" alt="See Job Run" width="132" style="width:132px;height:auto;border:0;">
+      </div>
+      <div style="background:#ffffff;border:1px solid #ded5bd;border-radius:10px;padding:26px 24px;">
+        <h1 style="margin:0 0 10px;font-size:19px;font-weight:bold;color:#3a342c;">${copy.heading}</h1>
+        <p style="margin:0 0 20px;font-size:15px;color:#615840;">${copy.lead}</p>
+        <div style="background:#f1e9d5;border:1px solid #c99a22;border-radius:8px;padding:16px;text-align:center;font-size:30px;font-weight:bold;letter-spacing:7px;color:#2a2419;">${otp}</div>
+        <p style="margin:20px 0 0;font-size:14px;color:#615840;">This code expires in <strong>3 minutes</strong> and can only be used once.</p>
+        <p style="margin:8px 0 0;font-size:14px;color:#615840;">If you didn&rsquo;t ask for it, you can ignore this email &mdash; nothing will change.</p>
+      </div>
+      <p style="margin:18px 0 0;text-align:center;font-size:12px;color:#8d836a;">See Job Run</p>
+    </div>
+  </body>
+</html>`,
   };
 
+  // THIS USED TO SWALLOW ITS OWN FAILURE. It caught the error, logged it and
+  // returned normally, so the promise NEVER rejected and the caller's .catch()
+  // was dead code. The OTP request route then reported "OTP sent" whatever had
+  // happened, and a user was sent to watch an inbox that would never receive
+  // anything. The only trace was one line on a server they cannot read.
+  //
+  // It now PROPAGATES. The log line stays, because the real reason — bad
+  // credentials, quota, a refused host, a provider rejection — belongs on the
+  // server and nowhere else. What the caller gets is the failure itself, so it
+  // can decide what the user is told.
+  //
+  // NO EMAIL ADDRESS IS LOGGED HERE, deliberately. A caller that needs to
+  // identify the recipient logs the user id instead.
   try {
     await transporter.sendMail(mailOptions);
     logger.info("OTP email sent successfully!");
   } catch (error) {
     logger.error("Error sending OTP email:", error);
+    throw error;
   }
 }
 
@@ -287,7 +370,7 @@ async function sendPasswordEmail(toEmail, tempPassword) {
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`, // Sender name + email
     to: toEmail,
     subject: "Your Temporary Password",
-    text: `Your password is: ${tempPassword}\n\nPlease log in using this password at: http://seejobrun.com/user-dashboard/signup`,
+    text: `Your password is: ${tempPassword}\n\nPlease log in using this password at: https://seejobrun.com/user-dashboard/signup`,
     html: `
       <!DOCTYPE html>
       <html>
@@ -311,7 +394,7 @@ async function sendPasswordEmail(toEmail, tempPassword) {
         <body>
           <div class="container">
             <div class="logo-container">
-              <img src="http://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
+              <img src="https://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
             </div>
             <div class="header">
               <h1>SeeJobRun</h1>
@@ -322,7 +405,7 @@ async function sendPasswordEmail(toEmail, tempPassword) {
               <p>We have received a request to reset your password. Here is your temporary password:</p>
               <div class="password-box">${tempPassword}</div>
               <p>Please log in using this password:</p>
-              <a href="http://seejobrun.com/user-dashboard/signup" class="login-link">Go to Login Page</a>
+              <a href="https://seejobrun.com/user-dashboard/signup" class="login-link">Go to Login Page</a>
               <div class="warning">
                 <strong>Important:</strong> Please change this temporary password immediately after logging in for security reasons.
               </div>
@@ -373,7 +456,7 @@ async function sendRecoveryEmail(toEmail, otp) {
         <body>
           <div class="container">
             <div class="logo-container">
-              <img src="http://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
+              <img src="https://seejobrun.com/user-dashboard/assets/seeJobRun.png" alt="SeeJobRun Logo" class="logo">
             </div>
             <div class="header">
               <h1>SeeJobRun</h1>
@@ -554,7 +637,14 @@ router.post("/register", async (req, res) => {
       await sendPasswordEmail(r.email, plainPassword);
     } else {
       // Send ONLY OTP
-      await sendOTPEmail(r.email, otp);
+      // SCOPE GUARD, NOT AN OVERSIGHT. sendOTPEmail now propagates, but this
+      // is the REGISTRATION path, not the OTP login path this change is scoped
+      // to. Registration has always completed even when its mail failed, and
+      // silently changing that would turn a mail blip into a failed signup.
+      // The old fire-and-forget behaviour is preserved HERE, on purpose, and
+      // is its own decision to revisit.
+      try { await sendOTPEmail(r.email, otp, 'register'); }
+      catch (mailErr) { logger.error("Registration OTP email failed: " + mailErr.message); }
     }
 
     // ðŸ”¥ LEAVES LOGIC (ONLY FOR EMPLOYEES)
@@ -590,9 +680,29 @@ router.post("/register", async (req, res) => {
   } catch (error) {
     if (process.env.SJR_DEBUG_REGISTER) console.error('REGISTER ERR:', error && error.stack ? error.stack : error);
     if (error.code === "ER_DUP_ENTRY") {
+      // THIS IS NOW THE ONLY WAY SIGNUP LEARNS AN EMAIL IS TAKEN, since
+      // /check-email was deleted as an enumeration oracle. So it has to say
+      // something a person can act on, not "Email and Mobile must be unique",
+      // which named two fields, identified neither, and offered no way out.
+      //
+      // Keyed off the index MySQL actually rejected on rather than assuming:
+      // `user.mobile` once carried a UNIQUE index and a migration dropped it,
+      // so in practice this is always the email — but reading the error keeps
+      // that true if an index is ever added back.
+      //
+      // NOT AN ENUMERATION LEAK. Registration has to refuse a duplicate to
+      // function at all; the address was typed by whoever is holding the form,
+      // and they learn only about the one they submitted. That is categorically
+      // different from an endpoint that answers the question for any address,
+      // unauthenticated, eleven times a second.
+      const dupKey = String((error && error.sqlMessage) || "").toLowerCase();
+      const isEmailDup = dupKey.includes("email") || !dupKey.includes("mobile");
       return res.status(409).json({
         code: "409",
-        message: "Email and Mobile must be unique",
+        field: isEmailDup ? "email" : "mobile",
+        message: isEmailDup
+          ? "That email is already registered. Sign in instead."
+          : "That mobile number is already registered. Sign in instead.",
         data: {},
       });
     }
@@ -919,6 +1029,10 @@ router.post("/login-otp-request", async (req, res) => {
 
   try {
     connection = await pool.getConnection();
+    // The counter column is added by migration; ensure it before anything
+    // on this path reads or writes it, so the route works on a database
+    // that has not been migrated yet.
+    try { await ensureOtpAttemptsColumn(connection); } catch (e) {}
     const [rows] = await connection.query(
       "SELECT id, status FROM user WHERE email = ? LIMIT 1",
       [normalizedEmail]
@@ -935,19 +1049,61 @@ router.post("/login-otp-request", async (req, res) => {
 
     const otp = generateOTP();
 
-    await connection.query(
-      "UPDATE user SET otp = ?, otp_status = 1, updated_at = NOW(), updated_by = ? WHERE id = ?",
-      [otp, Number(user.id), Number(user.id)]
-    );
+    // otp_attempts = 0: the counter belongs to the code currently on the row, so
+    // issuing a new one starts its budget fresh. Without this a user who burned
+    // a code could never use the replacement.
+    //
+    // FALLS BACK IF THE COLUMN IS MISSING. The migration call above is wrapped
+    // in a try, so a failed ALTER (permissions, a locked table) would otherwise
+    // make this statement throw and turn "request a code" into a 500 for EVERY
+    // user — an outage worse than the hole being closed. The counter is a safety
+    // feature and must never become the thing that breaks sign-in.
+    try {
+      await connection.query(
+        "UPDATE user SET otp = ?, otp_status = 1, otp_attempts = 0, updated_at = NOW(), updated_by = ? WHERE id = ?",
+        [otp, Number(user.id), Number(user.id)]
+      );
+    } catch (colErr) {
+      logger.error('OTP request: otp_attempts unavailable, issuing without it: ' + (colErr && colErr.message));
+      await connection.query(
+        "UPDATE user SET otp = ?, otp_status = 1, updated_at = NOW(), updated_by = ? WHERE id = ?",
+        [otp, Number(user.id), Number(user.id)]
+      );
+    }
 
-    // Send the email in the background — don't make the user wait on SMTP
-    sendOTPEmail(normalizedEmail, otp).catch((mailErr) => {
-      logger.error(`OTP email failed for ${normalizedEmail}:`, mailErr);
-    });
+    // AWAIT THE SEND, AND SAY SO IF IT FAILS.
+    //
+    // This used to be fire-and-forget with a comment reading "don't make the
+    // user wait on SMTP". The intent was reasonable; the effect was that a
+    // total mail outage looked identical to success. The user was told to
+    // check an inbox nothing would ever arrive in, and the only record was a
+    // log line on a server they cannot read.
+    //
+    // Waiting costs a moment on the happy path. Not waiting cost an evening.
+    //
+    // WHAT THE CLIENT IS TOLD IS DELIBERATELY GENERIC. No SMTP detail, no
+    // provider, no bounce reason: those describe our infrastructure and belong
+    // in the log above, which sendOTPEmail already writes. The user gets what
+    // they can act on — it didn't send, try again, or ask the account owner.
+    try {
+      await sendOTPEmail(normalizedEmail, otp, 'signin');
+    } catch (mailErr) {
+      // User id, never the address. The address is the caller's own input and
+      // repeating it into the log adds nothing but a personal detail at rest.
+      logger.error(`OTP email send failed for user id ${Number(user.id)}: ${mailErr && mailErr.message}`);
+      return res.status(200).json({
+        code: "502",
+        message: "We could not send your code. Try again shortly, or contact your account owner.",
+        data: {},
+      });
+    }
 
     return res.status(200).json({ code: "200", message: "OTP sent", data: {} });
   } catch (error) {
-    logger.error(`- ${normalizedEmail} - ${new Date()} - Login OTP request error:`, error);
+    // The address was being written into this log line on EVERY error. Dropped:
+    // it identifies nobody the id cannot, and it put an address in the log on
+    // paths that had nothing to do with mail.
+    logger.error(`- ${new Date()} - Login OTP request error:`, error);
     return res.status(200).json({ code: "500", message: "Internal Server Error", data: {} });
   } finally {
     if (connection) connection.release();
@@ -980,6 +1136,10 @@ router.post("/login-otp-verify", async (req, res) => {
 
   try {
     connection = await pool.getConnection();
+    // The counter column is added by migration; ensure it before anything
+    // on this path reads or writes it, so the route works on a database
+    // that has not been migrated yet.
+    try { await ensureOtpAttemptsColumn(connection); } catch (e) {}
 
     const [rows] = await connection.query(
       `SELECT 
@@ -1004,9 +1164,89 @@ router.post("/login-otp-verify", async (req, res) => {
     );
 
     if (!rows.length) {
+      // EXPIRED IS NOT THE SAME AS WRONG, and telling someone "invalid or
+      // expired" when their code was simply stale sends them hunting for a
+      // typo that isn't there. Especially when mail is slow: a code can land
+      // already dead, and the old message gave no hint of that.
+      //
+      // THE VERIFICATION ABOVE IS UNTOUCHED. This is a second, read-only
+      // lookup that runs ONLY after the authoritative query has already
+      // refused, purely to choose the wording. It grants nothing: it can only
+      // report on a code the caller has already supplied, which they must
+      // hold to be asking in the first place.
+      //
+      // THE ATTEMPT CAP LIVES HERE TOO. Five wrong guesses against a live code
+      // and the code is invalidated — the CODE, never the account. Locking the
+      // account would let anyone shut a contractor out of the product by
+      // guessing at their address five times, which is a worse bug than the one
+      // being fixed.
+      //
+      // Before this, a wrong guess cost the attacker nothing at all: the code
+      // survived every failure until its three-minute expiry, so a four-digit
+      // space could be ground down at the request rate for the full window.
+      let expired = false;
+      let burned = false;
+      try {
+        await ensureOtpAttemptsColumn(connection);
+
+        const [[state]] = await connection.query(
+          `SELECT id, otp_status, otp_attempts,
+                  (updated_at < (NOW() - INTERVAL 3 MINUTE)) AS is_stale,
+                  (LPAD(CAST(otp AS CHAR), ?, '0') = ?) AS code_matches
+             FROM user WHERE email = ? LIMIT 1`,
+          [OTP_DIGITS, normalizedOtpDigits, normalizedEmail]
+        );
+
+        if (state) {
+          if (Number(state.otp_status) !== 1) {
+            // No live code on the row: already used, or burned by a previous
+            // run of this very branch. Reads as expired, which it effectively is.
+            expired = true;
+          } else if (Number(state.is_stale) === 1) {
+            expired = true;
+          } else if (Number(state.code_matches) !== 1) {
+            // A WRONG guess against a LIVE code. Charge it.
+            //
+            // Counted and burned in ONE statement so parallel guesses cannot
+            // race past the cap: without this, N simultaneous requests could
+            // each read 4 and each decide they were the fifth.
+            //
+            // ORDER MATTERS AND IS NOT COSMETIC. MySQL evaluates SET clauses
+            // left to right, and a later clause sees the NEW value of a column
+            // already assigned. With the increment written first, the guards'
+            // `otp_attempts + 1` read the ALREADY-incremented value and burned
+            // the code an attempt early — a cap of four, not five. The guards
+            // therefore come FIRST, while otp_attempts still holds the
+            // pre-increment count, so `+ 1` means "the attempt being made now".
+            await connection.query(
+              `UPDATE \`user\`
+                  SET otp_status = IF(otp_attempts + 1 >= ?, 0, otp_status),
+                      otp        = IF(otp_attempts + 1 >= ?, '', otp),
+                      otp_attempts = otp_attempts + 1
+                WHERE id = ? AND otp_status = 1`,
+              [OTP_MAX_ATTEMPTS, OTP_MAX_ATTEMPTS, Number(state.id)]
+            );
+            const [[after]] = await connection.query(
+              'SELECT otp_status FROM `user` WHERE id = ? LIMIT 1',
+              [Number(state.id)]
+            );
+            burned = !!after && Number(after.otp_status) !== 1;
+          }
+        }
+      } catch (e) {
+        // Neither the wording nor the counter is worth a 500 to the user.
+        logger.error('OTP verify attempt accounting failed: ' + (e && e.message));
+      }
+
+      // A BURNED CODE AND AN EXPIRED CODE READ IDENTICALLY, on purpose. Both
+      // mean "this code is dead, ask for another", and saying which would tell
+      // an attacker whether they had exhausted the budget or simply run out of
+      // time. Neither message discloses attempts used or remaining.
       return res.status(200).json({
         code: "400",
-        message: "Invalid or expired OTP.",
+        message: (expired || burned)
+          ? "That code has expired. Codes last 3 minutes — request a new one."
+          : "That code is not correct. Check the digits and try again.",
         data: {},
       });
     }
@@ -1058,10 +1298,20 @@ router.post("/login-otp-verify", async (req, res) => {
     // ===============================
     // Clear OTP
     // ===============================
-    await connection.query(
-      "UPDATE user SET otp_status = 0, otp = '', updated_at = NOW(), updated_by = ? WHERE id = ?",
-      [id, id]
-    );
+    // Same fallback as the request path: a missing counter column must never
+    // stop a CORRECT code from signing someone in.
+    try {
+      await connection.query(
+        "UPDATE user SET otp_status = 0, otp = '', otp_attempts = 0, updated_at = NOW(), updated_by = ? WHERE id = ?",
+        [id, id]
+      );
+    } catch (colErr) {
+      logger.error('OTP verify: otp_attempts unavailable on clear: ' + (colErr && colErr.message));
+      await connection.query(
+        "UPDATE user SET otp_status = 0, otp = '', updated_at = NOW(), updated_by = ? WHERE id = ?",
+        [id, id]
+      );
+    }
 
     // ===============================
     // Get User Rights (FIXED)
@@ -2331,7 +2581,11 @@ router.post("/resendotp", async (req, res) => {
       });
     }
 
-    await sendOTPEmail(signedin_useremail, otp);
+    // SCOPE GUARD — see the note on the registration path. This is the
+    // change-password path, not the OTP login path. Its prior behaviour is
+    // preserved deliberately.
+    try { await sendOTPEmail(signedin_useremail, otp, 'recover'); }
+    catch (mailErr) { logger.error("Change-password OTP email failed: " + mailErr.message); }
 
     return res.status(200).json({
       code: "200",
@@ -3595,16 +3849,27 @@ router.put("/approve-leave/:leaveId", auth.authenticateToken, async (req, res) =
   }
 });
 
-router.post('/check-email', async (req, res) => {
-  const { email } = req.body;
-  try {
-    const [rows] = await pool.query('SELECT id FROM user WHERE email = ?', [email]);
-    res.json({ exists: rows.length > 0 });
-  } catch (error) {
-    logger.error("Error checking email:", error);
-    res.status(500).json({ message: 'Error checking email' });
-  }
-});
+// ── DELETED: POST /check-email ───────────────────────────────────────────
+//
+// It took an email address and returned {"exists": true|false}. No token, no
+// rate limit, about 90ms a call. That is an account-enumeration oracle, and on
+// this platform a worse one than usual: logins here ARE subcontractors' and
+// clients' email addresses, so anyone could map which contractors are on See
+// Job Run and, joined to public information, infer who works with whom.
+// Measured on production before removal: roughly eleven addresses a second,
+// from anywhere, with nothing to stop it.
+//
+// ONLY THE SIGNUP FORM CALLED IT. Searched the web app, the mobile app and
+// this codebase: three call sites, all in the signup flow, no server-side
+// caller. Signup now learns about a duplicate from /register, which already
+// refuses on the email UNIQUE index and now says which field and what to do.
+//
+// DO NOT REINSTATE IT, and do not "fix" it with a rate limit or a CAPTCHA — a
+// rate-limited boolean is still a boolean. The honest-user benefit it gave
+// (learning while typing instead of on submit) is available from the submit
+// response without handing the user list to anyone who asks. If the behaviour
+// is ever genuinely needed, put it behind authentication and think hard about
+// who is allowed to ask.
 
 router.get("/check-device", async (req, res) => {
  
