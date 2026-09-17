@@ -2321,15 +2321,24 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
 // Shared, provider-switchable transport (see services/mailer.js).
 const inviteMailer = require('../services/mailer');
 
-async function sendContactInviteEmail(toEmail, inviterName) {
+// inviterId threaded through so the invitation replies to the GC who sent it,
+// not to a no-reply address. It is the last parameter and defaults to null so
+// no existing caller breaks silently; both real callers pass it.
+async function sendContactInviteEmail(toEmail, inviterName, inviterId = null, conn = null) {
   // The invited person's SeeJobRun profile ALREADY exists (created the moment they
   // were added as a contact), so the link goes to SIGN-IN (email + one-time code),
   // NOT a sign-up / create-account flow. Applies to EVERY invited type — client,
   // subcontractor, employee — so no one is confused by a "Sign Up" prompt.
   const signInUrl = 'https://seejobrun.com/user-dashboard/login';
+  // USER-ORIGINATED: the GC who added this contact owns the conversation. The
+  // reader was just added to somebody's company and will reply with "who is
+  // this?" — that has to reach them, not a no-reply box.
+  const { replyToForUser } = require('../services/mailReplyTo');
+  const replyTo = inviterId ? await replyToForUser(conn || pool, inviterId) : undefined;
   await inviteMailer.sendMail({
     from: `"SeeJobRun" <${process.env.SMTP_USER}>`,
     to: toEmail,
+    replyTo,
     subject: 'You have been added to SeeJobRun',
     text: `${inviterName} added you to SeeJobRun. Your account is ready — sign in with your email (${toEmail}) and the one-time code we'll send you: ${signInUrl}`,
     html: `<p>Hello,</p><p><strong>${inviterName}</strong> added you to SeeJobRun. Your account is ready.</p><p><a href="${signInUrl}">Click here to sign in</a> with your email (<strong>${toEmail}</strong>) — we'll email you a one-time sign-in code.</p>`,
@@ -2451,7 +2460,7 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
       }
       const [[me]] = await connection.query('SELECT name FROM user WHERE id = ?', [userId]);
       try {
-        await sendContactInviteEmail(email, me ? me.name : 'A SeeJobRun user');
+        await sendContactInviteEmail(email, me ? me.name : 'A SeeJobRun user', userId, connection);
       } catch (mailErr) {
         logger.error('Invite email failed:', mailErr);
         return res.json({ contact_user_id: contactUserId, status: targetStatus, email_sent: false, message: 'Contact saved, but the invitation email could not be sent. Try Resend Invitation later.' });
@@ -2669,7 +2678,7 @@ router.post('/resend-invite/:contactUserId', auth.authenticateToken, async (req,
     }
 
     const [[me]] = await connection.query('SELECT name FROM user WHERE id = ?', [userId]);
-    await sendContactInviteEmail(contactUser.email, me ? me.name : 'A SeeJobRun user');
+    await sendContactInviteEmail(contactUser.email, me ? me.name : 'A SeeJobRun user', userId, connection);
     res.json({ message: 'Invitation sent', status: 'Pending' });
   } catch (err) {
     logger.error('resend-invite error:', err);

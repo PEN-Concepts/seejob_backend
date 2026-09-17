@@ -123,6 +123,32 @@ async function sendMail(options) {
 const rawSendMail = transporter.sendMail.bind(transporter);
 
 transporter.sendMail = async function suppressionAwareSendMail(options) {
+  // ── THE REPLY-TO CHOKEPOINT ──────────────────────────────────────────
+  //
+  // Same reasoning as the suppression check below, and the same place for the
+  // same reason: this wraps the TRANSPORT, so every consumer inherits it
+  // whichever import style it uses, on whichever transport the cutover
+  // selected, and a call site added next year inherits it without anyone
+  // remembering this file exists.
+  //
+  // A site that knows whose conversation it is passes replyTo explicitly. One
+  // that does not — our own app mail, and anything added later — gets
+  // MAIL_REPLY_TO. The default is deliberately not a throw: a message that
+  // replies to us is recoverable, a message that fails to send is not, and
+  // login runs through here.
+  //
+  // FIRST, before the suppression module is even loaded. It used to sit after
+  // the require, which left the "suppression unavailable" path below sending
+  // with no reply-to at all — the exact hole this is here to close.
+  const opts = { ...(options || {}) };
+  if (!opts.replyTo) {
+    try {
+      opts.replyTo = require('./mailReplyTo').defaultReplyTo();
+    } catch (e) {
+      opts.replyTo = 'info@seejobrun.com';
+    }
+  }
+
   let suppression;
   try {
     suppression = require('./emailSuppression');
@@ -131,10 +157,9 @@ transporter.sendMail = async function suppressionAwareSendMail(options) {
     // outbound email — login codes included — is a worse failure than sending
     // one we should not have.
     logger.error('[mailer] suppression module unavailable, sending unchecked: ' + err.message);
-    return rawSendMail(options);
+    return rawSendMail(opts);
   }
 
-  const opts = options || {};
   const recipients = suppression.extractAddresses(opts.to);
   if (!recipients.length) return rawSendMail(opts);
 

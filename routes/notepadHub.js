@@ -25,6 +25,7 @@ const { requireNotepadMyTasks, publicFlags, mergeArmed, clientInviteArmed } = re
 const notify = require('../services/notify');
 const { logDestructiveJob } = require('../services/destructiveLog');
 const mailer = require('../services/mailer');
+const { replyToForUser } = require('../services/mailReplyTo');
 const multer = require('multer');
 const path = require('path');
 
@@ -1095,6 +1096,9 @@ router.post('/sections/:id/live-share', auth.authenticateToken, requireNotepadMy
           try {
             await mailer.sendMail({
               to: invitedEmail,
+              // USER-ORIGINATED: a client invited to a notepad replies to the
+              // GC who shared it with them.
+              replyTo: await replyToForUser(connection, uid),
               subject: `You've been given access to "${title}" on See Job Run`,
               text: `You have been given access to the list "${title}" on See Job Run. Sign in with this email address to see it.`,
               html: `<p>You have been given access to the list <strong>${String(title).replace(/</g, '&lt;')}</strong> on See Job Run.</p><p>Sign in with this email address to see it. It stays live — anything the sender changes, you see.</p>`,
