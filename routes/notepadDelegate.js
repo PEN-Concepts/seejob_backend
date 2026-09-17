@@ -29,13 +29,22 @@ const { getAccessMode, isSameAccount } = require('../utils/access');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 const { isFullAccess, getSectionAccess } = require('../services/notepadAccess');
 const { requireNotepadMyTasks } = require('../services/featureFlags');
+const { assignmentFields } = require('../services/notepadAssignee');
 const notify = require('../services/notify');
 
 const delegateSchema = Joi.object({
   // Required, always. A pad with a job pre-fills and LOCKS this client-side;
   // the server re-checks it regardless of what the client sent.
   job_id: Joi.number().integer().positive().required(),
-  assignee_id: Joi.number().integer().positive().allow(null).optional(),
+  // REQUIRED, always (CCP §2). This was `.allow(null).optional()`, and that one
+  // word is the whole defect: a request with no assignee created a real task,
+  // wrote its id to delegated_task_id, left delegated_to NULL, and answered
+  // 'delegated'. The row then rendered green and blank forever.
+  //
+  // Refused, NOT treated as an unassign. DELETE /items/:id/delegate already
+  // means "unassign" and returns 'none'. Giving one route two opposite
+  // meanings, chosen by whether a field is absent, is how this bug was born.
+  assignee_id: Joi.number().integer().positive().required(),
   due_date: Joi.date().allow(null, '').optional(),
   // §11 "ADD: a Notes field for a note to the assignee." Lands as the first
   // message in the task's two-way thread.
@@ -79,6 +88,23 @@ router.post('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks
   const itemId = Number(req.params.id);
   if (!itemId) return res.status(400).json({ success: false, message: 'Invalid item id' });
 
+  // §2 — ONE answer for "no assignee", whatever shape it arrives in.
+  //
+  // Joi alone would refuse all of these, but with three different messages:
+  // absent is '"assignee_id" is required', null is '"assignee_id" must be a
+  // number', 0 is '...must be a positive number'. The checklist asks for
+  // IDENTICAL behaviour, and a caller cannot act on a message that changes
+  // depending on how they failed to send a person. So this normalises first
+  // and Joi's `.required()` below stays as defence in depth.
+  const rawAssignee = (req.body || {}).assignee_id;
+  if (rawAssignee === undefined || rawAssignee === null || rawAssignee === '' || !(Number(rawAssignee) > 0)) {
+    return res.status(400).json({
+      success: false,
+      code: 'ASSIGNEE_REQUIRED',
+      message: 'Pick who this is for. A task with nobody on it is not an assignment.',
+    });
+  }
+
   const { error, value } = delegateSchema.validate(req.body || {});
   if (error) return res.status(400).json({ success: false, message: error.details[0].message });
 
@@ -120,7 +146,29 @@ router.post('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks
       return res.status(403).json({ success: false, message: 'That job is not in your account.' });
     }
 
-    const assigneeId = value.assignee_id ? Number(value.assignee_id) : null;
+    // §2 — THE PERSON IS RESOLVED BEFORE ANYTHING IS WRITTEN.
+    //
+    // "If the person cannot be resolved, no task is created and no column is
+    // written." Resolving first is what makes that true by construction: we
+    // are outside the transaction here, so a failure costs nothing to undo.
+    //
+    // Resolvable means the same thing here as it does on the read side — a
+    // `user` row that exists AND has a name to print. services/notepadAssignee
+    // holds that definition; it is not restated here, because two copies of a
+    // rule is how the three-checks problem started.
+    const assigneeId = Number(value.assignee_id);
+    const [[assigneeRow]] = await connection.query(
+      'SELECT id, name FROM `user` WHERE id = ? LIMIT 1',
+      [assigneeId],
+    );
+    if (!assigneeRow || !String(assigneeRow.name || '').trim()) {
+      return res.status(404).json({
+        success: false,
+        code: 'ASSIGNEE_NOT_FOUND',
+        message: 'That person could not be found.',
+      });
+    }
+
     // NO DATE MEANS NO DATE — the same defect as the notepad item create, in a
     // second place. This used to fall back to new Date(), so delegating without
     // picking a date scheduled the task for the moment you pressed the button,
@@ -154,12 +202,13 @@ router.post('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks
       );
       taskId = Number(r.insertId);
 
-      if (assigneeId) {
-        await connection.query('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)', [
-          taskId,
-          assigneeId,
-        ]);
-      }
+      // Unconditional now. assigneeId is a resolved person by this point, so
+      // the old `if (assigneeId)` could only ever have been false on the path
+      // this CCP closes — the one that produced a task with nobody on it.
+      await connection.query('INSERT IGNORE INTO task_assignees (task_id, user_id) VALUES (?, ?)', [
+        taskId,
+        assigneeId,
+      ]);
 
       // §11 the note to the assignee opens the two-way thread.
       const note = String(value.note || '').trim();
@@ -178,6 +227,12 @@ router.post('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks
       // The notepad row STAYS. Delegating is not completing: the boss ticks his
       // own box when he agrees (§3). We only record the link so the pill can
       // read the assignee's separate signal.
+      //
+      // THE INVARIANT, and it is this CCP's deliverable:
+      //   delegated_task_id and delegated_to are set together or cleared
+      //   together. Neither is ever written without the other.
+      // One statement, inside the transaction that also created the task, so
+      // there is no interleaving in which one lands and the other does not.
       await connection.query(
         'UPDATE check_list SET delegated_task_id = ?, delegated_to = ? WHERE id = ?',
         [taskId, assigneeId, itemId],
@@ -209,13 +264,32 @@ router.post('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks
       }
     }
 
+    // §2 — delegate_state STOPS BEING ASSERTED.
+    //
+    // This used to return the literal 'delegated' whatever had happened, which
+    // is how a row with a NULL delegated_to still reported itself green. The
+    // response now describes the STORED ROW: we read it back and run it through
+    // the same resolver the hub read uses, so the answer the client gets after
+    // writing and the answer it gets on the next refresh cannot disagree.
+    const [[stored]] = await connection.query(
+      `SELECT c.delegated_task_id, c.delegated_to,
+              du.name AS delegated_to_name,
+              t.assignee_completed AS task_assignee_completed
+         FROM check_list c
+         LEFT JOIN \`user\` du ON du.id = c.delegated_to
+         LEFT JOIN tasks t     ON t.id  = c.delegated_task_id
+        WHERE c.id = ? LIMIT 1`,
+      [itemId],
+    );
+
     res.status(201).json({
       success: true,
       task_id: taskId,
-      delegated_to: assigneeId,
-      // 'delegated' = green pill. It only becomes '✓ <first name>' once the
-      // assignee checks it off themselves.
-      delegate_state: 'delegated',
+      delegated_to: stored ? stored.delegated_to : null,
+      // 'delegated' = green pill. It only becomes '<first name> ✓' once the
+      // assignee checks it off themselves. Both this and the name come out of
+      // one resolved value (§3) rather than three independent checks.
+      ...assignmentFields(stored, uid),
     });
   } catch (err) {
     logger.error('notepad delegate error: ' + err.message);
