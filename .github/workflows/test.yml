@@ -74,6 +74,10 @@ jobs:
             test/jobAccessTaskAssignees.test.js
             test/budgetSubcontractorScope.test.js
             test/supportTicketScope.test.js
+            test/checkListAllDay.test.js
+            test/dashboardDayStream.test.js
+            test/dashboardStallSnooze.test.js
+            test/dashboardActivityReview.test.js
           "
           FAILED=""
           for s in $SUITES; do
