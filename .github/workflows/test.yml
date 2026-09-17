@@ -1,0 +1,87 @@
+name: Tests
+
+# THE BACKEND HAD NO TEST WORKFLOW AT ALL — only deploy.yml. Roughly seventy
+# suites existed and none of them ran on a pull request or on main, so every
+# one of them was a file somebody had to remember to execute by hand.
+#
+# THE ROLE BASELINE IS THE POINT OF THIS WORKFLOW.
+#
+# test/notepadRoleBaseline.test.js records what a CLIENT, an EMPLOYEE and a
+# SUBCONTRACTOR can see of the Notepads hub, as stored goldens, and fails if any
+# of the three moves. That turns "who can see what" from something audited once,
+# by hand, when somebody asks, into something that fails a build the day it
+# stops being true.
+#
+# It is the guard named in BACKLOG-notepads.md against
+# job-access-implies-notepad-visibility being half-built by accident: any change
+# that widens an employee's or a subcontractor's view shows up here as a golden
+# diff rather than as a surprise in production.
+#
+# DELIBERATELY NARROW, AND SAYING SO. This runs the permission and visibility
+# suites, not all seventy. A gate that takes twenty minutes gets disabled; a
+# gate that runs the suites protecting who-sees-what gets kept. Add to SUITES
+# below as suites earn their place — the list is the contract, not the ceiling.
+#
+# Each suite spins up a real MySQL via mysql-memory-server, so the first run on
+# a cold runner pays a download. That is the cost of testing against real SQL
+# instead of a mock that cannot disagree with the database.
+#
+# DELIBERATELY ABSENT: test/clientAllTasksScope.test.js. It passed when it was
+# written (465f502, 11 Aug) and fails 0/4 on main today, so it cannot go in a
+# gate without making the gate red on day one — which is how gates get turned
+# off. It is a STALE FIXTURE, not a leak: it has zero references to
+# `task_assignees`, while GET /jobs/all-tasks now resolves assignment through
+# `t.id IN (SELECT task_id FROM task_assignees ...)`. The table does not exist
+# in its in-memory database, so the query returns nothing FOR EVERY ROLE —
+# including the owner, who should see five. A scoping leak would show a client
+# seeing MORE, not everyone seeing zero. Reported for its own fix; add it here
+# the day it is green.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  permissions:
+    name: Role baseline and permission suites
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Role baseline — client, employee, subcontractor
+        run: node test/notepadRoleBaseline.test.js
+
+      - name: Permission and destructive-path suites
+        run: |
+          set -e
+          SUITES="
+            test/notepadDeleteAuthority.test.js
+            test/notepadAccess.functional.test.js
+            test/taskDeleteAuthority.test.js
+            test/denyRestrictedJobData.test.js
+            test/jobAccessTaskAssignees.test.js
+            test/budgetSubcontractorScope.test.js
+            test/supportTicketScope.test.js
+          "
+          FAILED=""
+          for s in $SUITES; do
+            if [ ! -f "$s" ]; then echo "::error::missing suite $s"; exit 1; fi
+            echo "── $s"
+            if node "$s"; then :; else FAILED="$FAILED $s"; fi
+          done
+          if [ -n "$FAILED" ]; then
+            echo "::error::failing suites:$FAILED"
+            exit 1
+          fi
