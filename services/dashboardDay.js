@@ -254,7 +254,12 @@ async function buildDayStream(connection, opts) {
         assignee_name: it.assign_to ? (userName.get(Number(it.assign_to)) || null) : null,
         starred: false,
         checkbox: true,
-        complete: String(it.status || '').toLowerCase() === 'complete',
+        // 'completed', not 'complete'. check_list.status only ever holds
+        // 'active', 'archived' or 'completed' — the notepad writes 'completed'
+        // and nothing in the codebase writes the short form. Comparing to
+        // 'complete' was therefore ALWAYS false, so an item ticked on the
+        // notepad rendered unticked on the dashboard.
+        complete: String(it.status || '').toLowerCase() === 'completed',
         is_inspection: false,
         day_index: null, day_total: null,
       });
