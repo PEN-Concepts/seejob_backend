@@ -382,7 +382,10 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
             WHERE (${where.join(' OR ')})
               AND c.due_date IS NOT NULL
               AND DATE(c.due_date) < ?
-              AND (c.status IS NULL OR LOWER(c.status) <> 'complete')`,
+              -- 'completed', not 'complete' (see dashboardDay.js). This filter
+              -- never matched, so items already ticked off kept appearing in
+              -- PAST DUE.
+              AND (c.status IS NULL OR LOWER(c.status) <> 'completed')`,
           [...params, today],
         );
         pastDue.push(...rows.map((r) => ({

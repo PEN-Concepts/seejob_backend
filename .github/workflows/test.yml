@@ -78,6 +78,7 @@ jobs:
             test/dashboardDayStream.test.js
             test/dashboardStallSnooze.test.js
             test/dashboardActivityReview.test.js
+            test/dashboardCompletedSentinel.test.js
           "
           FAILED=""
           for s in $SUITES; do
