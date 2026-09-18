@@ -180,6 +180,38 @@ async function buildDayStream(connection, opts) {
          FROM spartan_goals WHERE user_id = ?`,
       [uid],
     );
+    /*
+     * A COMPLETED GOAL MUST READ AS COMPLETED.
+     *
+     * This file referenced spartan_goal_log zero times, so a ticked goal came
+     * back unticked on the next load and the tick appeared to vanish — the
+     * write alone would not have been enough. Matched on goal_id, user_id AND
+     * log_date: the table's unique key is (goal_id, log_date) only, and a goal
+     * is per-user, so scoping by user here is the stricter of the two and the
+     * one that cannot show another account's tick.
+     *
+     * 'completed' is the sentinel BE #40 settled on — the same spelling, for
+     * the same reason. Compared case-insensitively because the column is a
+     * free VARCHAR, not an enum.
+     *
+     * A goal with no log row for that date is simply not in the set, which is
+     * complete: false. If the table is unreadable nothing is complete; a
+     * missing tick is survivable, a 500 on the dashboard is not.
+     */
+    const doneOn = new Set();
+    try {
+      const days = Array.from(byDay.keys());
+      if (days.length) {
+        const [logs] = await connection.query(
+          `SELECT goal_id, DATE_FORMAT(log_date, '%Y-%m-%d') AS d
+             FROM spartan_goal_log
+            WHERE user_id = ? AND log_date IN (?) AND LOWER(status) = 'completed'`,
+          [uid, days],
+        );
+        for (const r of logs) doneOn.add(Number(r.goal_id) + '|' + r.d);
+      }
+    } catch (e) { /* log unreadable — nothing reads complete, never a crash */ }
+
     for (const day of byDay.keys()) {
       const [y, m, d] = day.split('-').map(Number);
       const dow = new Date(y, m - 1, d).getDay();
@@ -202,6 +234,8 @@ async function buildDayStream(connection, opts) {
           assignee_name: null,
           starred: false,
           checkbox: true,
+          // Read back from spartan_goal_log — see doneOn above.
+          complete: doneOn.has(Number(g.id) + '|' + day),
           shield: true,             // §7: Spartan red shield on the right
           is_inspection: false,
           day_index: null, day_total: null,
@@ -303,7 +337,22 @@ async function buildDayStream(connection, opts) {
           address: jobAddress.get(jid) || '',
           assignee_name: r.assignee_user_id ? (userName.get(Number(r.assignee_user_id)) || null) : null,
           starred: false,
-          checkbox: true,
+          /*
+           * NO CHECKBOX ON AN INSPECTION ROW. Ruled 2026-09-18.
+           *
+           * job_schedule_items has no completion column, and all three
+           * candidate targets write to a DIFFERENT record than the one being
+           * ticked — one of them cascades dates and returns notification
+           * payloads. A tick that quietly does more than it says is the thing
+           * we are avoiding, so the row simply does not offer one.
+           *
+           * Set HERE and not in the template: the row builder is what every
+           * surface reads, so a second surface cannot render a checkbox this
+           * one refuses. Do not add a column, do not write to
+           * gantt_stage_progress, do not touch the linked tasks row. Whatever
+           * completing an inspection should mean gets its own CCP.
+           */
+          checkbox: false,
           is_inspection: Number(r.is_inspection) === 1,
           // §8: 1-based position among the WORKING days it covers.
           day_index: total > 1 ? idx + 1 : null,
