@@ -19,18 +19,44 @@
  */
 
 /**
- * BLANK IS NOT ZERO.
+ * IS THIS CELL EMPTY? — the STORAGE question, and only that.
  *
- * A cell containing 0 is ANSWERED — a line can genuinely cost nothing. Only
- * empty is missing. `sub_cost` is nullable in the schema precisely so the two
- * are distinguishable, so nothing on this path may coerce NULL to 0.
+ * Used by blankToNull() on the write path so an empty input reaches the column
+ * as NULL instead of as '' (which MySQL stores in a DECIMAL as 0.00). NULL and
+ * 0 stay distinct in the database and this function is what keeps them so.
  *
  * Note the deliberate absence of a falsy check: `!value` would treat 0, '' and
- * null identically and silently defeat the whole rule.
+ * null identically and defeat the storage distinction.
+ *
+ * THIS IS NOT THE FLAG RULE. For "does this cell need Poul's attention", see
+ * isUnset() below — since §9 the two answers differ for a zero.
  */
 function isBlank(value) {
   if (value === null || value === undefined) return true;
   return String(value).trim() === '';
+}
+
+/**
+ * §9 — ZERO COUNTS AS MISSING. This REVERSES §3.1.
+ *
+ * Poul's ruling: in a budget, a line worth nothing is a line nobody has got to
+ * yet. Empty and zero read the same to him, so they read the same to the app —
+ * same pill, same row tint, same count, same effect on the Lock gate.
+ *
+ * THE STORAGE FIX STAYS. blankToNull() still writes NULL for an empty cell and
+ * 0 for a typed zero; the three-layer coercion fix is untouched. All that
+ * changed is how the FLAG rule reads them, which is why this is one function
+ * and not another hunt through the stack.
+ *
+ * THE CONSEQUENCE, on the record: a genuinely free line cannot exist. A
+ * giveaway or an owner-supplied item at no cost stays red and blocks locking.
+ * Poul has accepted that. If a zero in the data ever looks deliberate, report
+ * it — do not add an exception here.
+ */
+function isUnset(value) {
+  if (isBlank(value)) return true;
+  const n = Number(value);
+  return Number.isFinite(n) && n === 0;
 }
 
 /**
@@ -53,8 +79,9 @@ function subcontractorAnswered(row) {
 /** Which of the three cells are empty on this line. */
 function missingFields(row) {
   const out = [];
-  if (isBlank(row && row.amount)) out.push('amount');
-  if (isBlank(row && row.sub_cost)) out.push('sub_cost');
+  // §9: empty OR zero. Subcontractor is unaffected — see §3.2 below.
+  if (isUnset(row && row.amount)) out.push('amount');
+  if (isUnset(row && row.sub_cost)) out.push('sub_cost');
   if (!subcontractorAnswered(row)) out.push('subcontractor');
   return out;
 }
@@ -120,6 +147,7 @@ function blankToNull(value) {
 
 module.exports = {
   isBlank,
+  isUnset,
   blankToNull,
   subcontractorAnswered,
   missingFields,
