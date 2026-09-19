@@ -185,6 +185,33 @@ const note = (m) => rec.push('  · ' + m);
       'CHECK 16: it returns ALL NINE, not six — status = 1 is dropped and the live columns are joined',
       'got ' + (drop.body || []).length);
 
+    /* ── §8.7 UNTICKING CLEARS THE NOTE, in the COLUMN ─────────────────
+       Asserted against the database and not the UI, because the note is the
+       reason the line is held: with no hold there is no reason, and a stale
+       note would mislead Poul next month. */
+    await conn.query('DELETE FROM division_lineitems');
+    const saveLine = (body) => request(app).post('/api/budget/divisions/1/lineitems')
+      .set('Authorization', tok).send({ job_id: 10, job_type: 'job', items: [body] });
+
+    await saveLine({ lineitem_description: 'held', amount: 100, sub_cost: 50, is_tbd: 1, tbd_note: 'WAITING ON BID' });
+    let [[stored]] = await conn.query("SELECT id, is_tbd, tbd_note FROM division_lineitems WHERE lineitem_description = 'held'");
+    ok(stored && Number(stored.is_tbd) === 1 && stored.tbd_note === 'WAITING ON BID',
+      '§8: a ticked line stores its note in the column',
+      JSON.stringify(stored));
+
+    await saveLine({ id: stored.id, lineitem_description: 'held', amount: 100, sub_cost: 50, is_tbd: 0, tbd_note: 'WAITING ON BID' });
+    [[stored]] = await conn.query("SELECT is_tbd, tbd_note FROM division_lineitems WHERE lineitem_description = 'held'");
+    ok(stored && Number(stored.is_tbd) === 0 && stored.tbd_note === null,
+      '§8.7: unticking CLEARS tbd_note in the database — even when the caller still sends one',
+      JSON.stringify(stored));
+
+    /* §8.6 TBD with no note is valid and is stored as such. */
+    await saveLine({ lineitem_description: 'held, no reason', amount: 100, sub_cost: 50, is_tbd: 1 });
+    const [[bare]] = await conn.query("SELECT is_tbd, tbd_note FROM division_lineitems WHERE lineitem_description = 'held, no reason'");
+    ok(bare && Number(bare.is_tbd) === 1 && bare.tbd_note === null,
+      '§8.6: TBD with NO note is accepted and stored — the tick is what flags the line',
+      JSON.stringify(bare));
+
     note('Check 11 non-vacuity is run by budgetLockGate.novacuity.js, which');
     note('removes the server gate and expects THIS file to fail.');
   } catch (e) {
