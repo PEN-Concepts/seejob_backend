@@ -464,9 +464,24 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
           });
         } else {
           // TWO OR MORE roll up to the container with a count.
+          //
+          // §F THE CHILDREN TRAVEL WITH THE ROLLUP. A rolled-up row expands
+          // in place on the dashboard — Poul sees which two items are past
+          // due before deciding whether to leave the screen for them. That
+          // is only possible if the row already knows them; a second request
+          // on tap would put a spinner in front of the answer.
+          //
+          // Same shape as a single-item row, so the client opens a child by
+          // exactly the same path it opens a named row.
           pastDueRows.push({
             kind: 'rollup', label: job.name, sub: 'notepad', color: job.color,
             count: list.length, job_id: jid, section_id: list[0].section_id, item_id: null,
+            items: list.map((p) => ({
+              label: p.name,
+              job_id: jid,
+              section_id: p.section_id == null ? null : Number(p.section_id),
+              item_id: Number(p.id),
+            })),
           });
         }
       }
