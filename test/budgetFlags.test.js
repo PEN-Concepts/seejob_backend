@@ -91,17 +91,35 @@ const note = (m) => rec.push('  · ' + m);
 
     ok(flags.lineFlags(line()).flagged === false, 'a complete line is not flagged');
 
-    // CHECK 1 — blank is missing, zero is not.
+    /* CHECK 1 — REVERSED BY §9. Was "blank is missing, zero is not"; Poul
+       ruled that in a budget a line worth nothing is a line nobody has got
+       to yet. Empty and zero now read the same. */
     ok(flags.lineFlags(line({ sub_cost: null })).missing.includes('sub_cost'),
       'CHECK 1: an EMPTY sub cost is missing');
-    ok(!flags.lineFlags(line({ sub_cost: 0 })).missing.includes('sub_cost'),
-      'CHECK 1: a sub cost of ZERO is answered — a line can genuinely cost nothing');
-    ok(!flags.lineFlags(line({ sub_cost: '0' })).missing.includes('sub_cost'),
-      "…and '0' as a string is answered too");
+    ok(flags.lineFlags(line({ sub_cost: 0 })).missing.includes('sub_cost'),
+      'CHECK 1 (§9): a sub cost of ZERO is ALSO missing');
+    ok(flags.lineFlags(line({ sub_cost: '0' })).missing.includes('sub_cost'),
+      "…and '0' as a string too");
+    ok(flags.lineFlags(line({ sub_cost: '0.00' })).missing.includes('sub_cost'),
+      "…and '0.00', which is what a DECIMAL column hands back");
     ok(flags.lineFlags(line({ sub_cost: '' })).missing.includes('sub_cost'),
-      "…while '' is missing");
-    ok(!flags.lineFlags(line({ amount: 0 })).missing.includes('amount'),
-      'a client budget of zero is answered');
+      "…and '' of course");
+    ok(flags.lineFlags(line({ amount: 0 })).missing.includes('amount'),
+      'CHECK 1 (§9): a client budget of zero is missing');
+    ok(!flags.lineFlags(line({ amount: 0.01, sub_cost: 0.01 })).flagged,
+      'non-vacuity: a line with real money on it is NOT flagged — the rule is not just "always true"');
+
+    /* THE STORAGE DISTINCTION SURVIVES §9 and is a DIFFERENT question. The
+       flag rule treats NULL and 0 alike; the COLUMN must still tell them
+       apart, because blankToNull is what stops an empty input becoming 0.00
+       behind Poul's back. Do not delete this as redundant. */
+    ok(flags.blankToNull('') === null, 'STORAGE: an empty string saves as NULL');
+    ok(flags.blankToNull(null) === null, 'STORAGE: null saves as NULL');
+    ok(flags.blankToNull(0) === 0, 'STORAGE: a typed ZERO saves as 0, not NULL');
+    ok(flags.isBlank(0) === false,
+      'STORAGE: isBlank() still says 0 is not empty — it answers the storage question');
+    ok(flags.isUnset(0) === true,
+      'FLAG RULE: isUnset() says 0 needs attention — the two questions differ, on purpose');
 
     // CHECK 2 — subcontractor is ALWAYS required.
     ok(flags.lineFlags(line({ subcontractor_id: null })).missing.includes('subcontractor'),

@@ -142,10 +142,22 @@ const note = (m) => rec.push('  · ' + m);
     ok(r.status === 200, 'an in-house line does not block', r.status + ' ' + JSON.stringify(r.body).slice(0, 100));
     await unlock();
 
-    // ── blank is not zero, at the gate ─────────────────────────────────
+    /* ── §9: ZERO BLOCKS, at the gate ──────────────────────────────────
+       REVERSED. This asserted that a line costing zero was answered and did
+       not block. Poul ruled the other way: in a budget, a line worth nothing
+       is a line nobody has got to yet. The consequence, accepted: a
+       genuinely free line cannot be locked. */
     await setLines([{ d: 'costs nothing', amount: 0, sub: 0, subId: 9 }]);
     r = await lock();
-    ok(r.status === 200, 'a line costing ZERO is answered and does not block', String(r.status));
+    ok(r.status === 409 && Number(r.body.outstanding) === 1,
+      '§9: a line costing ZERO is MISSING and blocks the lock',
+      r.status + ' ' + JSON.stringify(r.body).slice(0, 120));
+
+    await setLines([{ d: 'real money', amount: 100, sub: 50, subId: 9 }]);
+    r = await lock();
+    ok(r.status === 200,
+      'non-vacuity: a line with real money on it still locks — zero is the trigger, not everything',
+      String(r.status));
     await unlock();
 
     // ── CHECK 13: saving is never blocked ──────────────────────────────
