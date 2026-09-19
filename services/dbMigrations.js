@@ -155,6 +155,41 @@ async function ensureAllowanceColumn(connection) {
   allowanceEnsured = true;
 }
 
+// ---- TBD: the manual half of "this line is not settled" ----
+// `is_tbd` is Poul's own mark, independent of whether any cell is empty: a line
+// with every number filled can still be unsettled because he is waiting on a
+// bid. `tbd_note` is his twenty characters of why, rendered inline beside the
+// item name — the cap is TWENTY and it is enforced here, in the API and in the
+// UI, because a longer note pushes the item name off the row.
+//
+// NOTHING IS BACKFILLED. Every existing line is not-TBD, which is correct.
+//
+// ROLLBACK (no down-migration mechanism exists in this schema — this is the
+// hand-written pair, proven on a throwaway database before merge):
+//   ALTER TABLE division_lineitems DROP COLUMN tbd_note;
+//   ALTER TABLE division_lineitems DROP COLUMN is_tbd;
+let tbdColumnsEnsured = false;
+async function ensureBudgetTbdColumns(connection) {
+  if (tbdColumnsEnsured) return;
+  const [flag] = await connection.query(
+    `SHOW COLUMNS FROM division_lineitems LIKE 'is_tbd'`
+  );
+  if (!flag.length) {
+    await connection.query(
+      `ALTER TABLE division_lineitems ADD COLUMN is_tbd TINYINT NOT NULL DEFAULT 0`
+    );
+  }
+  const [note] = await connection.query(
+    `SHOW COLUMNS FROM division_lineitems LIKE 'tbd_note'`
+  );
+  if (!note.length) {
+    await connection.query(
+      `ALTER TABLE division_lineitems ADD COLUMN tbd_note VARCHAR(20) NULL DEFAULT NULL`
+    );
+  }
+  tbdColumnsEnsured = true;
+}
+
 // Job Budget summary-card percentages, stored per line item like `contingency`
 // (same value across a job's rows, updated by job_id). overhead_percent (O&P,
 // calc off Building Cost) + gl_percent (General liability, calc off Client
@@ -1733,6 +1768,7 @@ module.exports = {
   ensureSubCostColumn,
   ensureInHouseColumn,
   ensureAllowanceColumn,
+  ensureBudgetTbdColumns,
   ensureBudgetPercentColumns,
   ensurePaymentsTables,
   ensureBudgetLockTables,

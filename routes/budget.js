@@ -3,10 +3,11 @@ const router = express.Router();
 const pool = require("../config/connection");
 const auth = require("../services/authentication");
 const logger = require("../common/logger");
-const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureAllowanceColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureSubCostColumn, ensureInHouseColumn, ensureAllowanceColumn, ensureBudgetPercentColumns, ensurePaymentsTables, ensureSuggestedItemsTable, seedSuggestedItems, ensureBudgetLockTables, ensureBudgetTbdColumns, ensureChangeOrderBudgetColumns, ensureChangeOrderPaymentTables } = require("../services/dbMigrations");
 const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, isSameAccount, getAccessMode } = require("../utils/access");
 const { requireAccountOwner } = require("../utils/adminGate");
 const { requireOwnsJob } = require("../utils/ownership");
+const { countFlagged, withFlags, tbdNoteError, blankToNull, TBD_NOTE_MAX } = require("../services/budgetFlags");
 
 // Payment methods a subcontractor payment can be recorded under.
 const PAYMENT_METHODS = new Set(["check", "cash", "credit_card", "venmo", "wire"]);
@@ -282,21 +283,46 @@ router.get(
       // Do not add an unscoped branch back for convenience. If this list needs
       // to be wider, widen it from the CONTACT side, where ownership is
       // actually expressed.
+      /*
+       * §7 THE DROPDOWN SHOWED SIX OF FIFTY-ONE. Three reasons, all fixed here.
+       *
+       * 1. DEAD JOIN COLUMNS. This joined c.request_user1 / c.request_user2.
+       *    NOTHING WRITES THOSE. Every INSERT INTO contact in this codebase
+       *    writes request_by / request_to (invitations.js:229 and the six
+       *    others), so both branches matched almost nothing — the six that did
+       *    were legacy rows from before the column rename. The unscoped branch
+       *    removed for tenant isolation was, by accident, the only one that
+       *    had been returning anything, which is why this looked fine until it
+       *    was taken out.
+       *
+       * 2. status = 1 DROPPED, per Poul's ruling. It excluded every contact
+       *    who had not completed an invitation handshake — people he works
+       *    with every week and would expect to pick.
+       *
+       * 3. role = 12 REPLACED BY category = 2. Role is the login class;
+       *    category is what the contact IS. Filtering on role missed
+       *    subcontractors stored with a different role but the right category.
+       *
+       * Tenant isolation is UNCHANGED and still comes from the contact side:
+       * both branches are scoped to this caller's own contact rows. No
+       * unscoped branch is reintroduced — see the note above, which still
+       * stands.
+       */
       const [rows] = await connection.query(
         `(
           SELECT u.id, u.name, u.email
           FROM contact c
-          INNER JOIN user u ON u.id = c.request_user2
-          WHERE c.request_user1 = ?
-            AND u.role = 12 AND u.status = 1
+          INNER JOIN user u ON u.id = c.request_to
+          WHERE c.request_by = ?
+            AND u.category = 2
         )
         UNION
         (
           SELECT u.id, u.name, u.email
           FROM contact c
-          INNER JOIN user u ON u.id = c.request_user1
-          WHERE c.request_user2 = ?
-            AND u.role = 12 AND u.status = 1
+          INNER JOIN user u ON u.id = c.request_by
+          WHERE c.request_to = ?
+            AND u.category = 2
         )
         ORDER BY name ASC, id ASC`,
         [userId, userId]
@@ -432,17 +458,22 @@ router.get("/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.
     await ensureSubCostColumn(connection);
     await ensureInHouseColumn(connection);
     await ensureAllowanceColumn(connection);
+    await ensureBudgetTbdColumns(connection);
     await ensureBudgetPercentColumns(connection);
     const [rows] = await connection.query(
       `SELECT id, division_id, lineitem_description, amount, sub_cost, csi_number, job_id,
-              subcontractor_id, in_house, is_allowance, foreman_percent, paid_amount,
+              subcontractor_id, in_house, is_allowance, is_tbd, tbd_note,
+              foreman_percent, paid_amount,
               contingency, overhead_percent, profit_percent, gl_percent
        FROM division_lineitems
        WHERE job_id = ? AND owner_type = ?
        ORDER BY division_id ASC, id ASC`,
       [Number(job_id), ownerType]
     );
-    return res.json(rows);
+    // Each row carries the SERVER's answer about whether it is settled, so the
+    // page renders that rather than re-deriving the rule and drifting from the
+    // gate that actually decides whether the budget can be locked.
+    return res.json(withFlags(rows));
   } catch (err) {
     logger.error("Error fetching all lineitems", err);
     return res.status(500).json({ message: "Failed to fetch lineitems" });
@@ -615,6 +646,25 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
       return res.status(400).json({ message: "items array is required" });
     }
 
+    /*
+     * TWENTY CHARACTERS, REJECTED NOT TRUNCATED, and checked BEFORE any
+     * database work. The column is VARCHAR(20) and the input is capped, but
+     * neither is the rule — this is, because this is what a caller hits when
+     * they bypass the page. Silently shortening someone's words is worse
+     * than refusing them.
+     */
+    for (const it of items) {
+      const noteErr = tbdNoteError(it && it.tbd_note);
+      if (noteErr) {
+        return res.status(400).json({
+          success: false,
+          code: "TBD_NOTE_TOO_LONG",
+          max: TBD_NOTE_MAX,
+          message: noteErr,
+        });
+      }
+    }
+
     // Basic payload validation
     for (const it of items) {
       if (it == null || typeof it !== 'object') {
@@ -642,12 +692,24 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           id: it.id ? Number(it.id) : null,
           csi_number: it.csi_number ?? null,
           lineitem_description: it.lineitem_description ?? null,
-          amount: it.amount ?? null,
-          sub_cost: it.sub_cost ?? null,
+          /*
+           * BLANK STAYS BLANK. An empty input arrives as '' and must be stored
+           * as NULL, not as '' and certainly not as 0 — a cell containing 0 is
+           * ANSWERED (a line can genuinely cost nothing) and only empty is
+           * missing. `?? null` alone does not do this: it passes '' straight
+           * through, and MySQL then coerces '' to 0.00 in a DECIMAL column,
+           * which would silently answer every blank cell and defeat the entire
+           * flag rule from three layers down.
+           */
+          amount: blankToNull(it.amount),
+          sub_cost: blankToNull(it.sub_cost),
           contingency: it.contingency ?? null,
           in_house: it.in_house ? 1 : 0,
           // Allowance flag — explicit per-line checkbox, never inferred.
           is_allowance: it.is_allowance ? 1 : 0,
+          // TBD — the manual half of "not settled", independent of any cell.
+          is_tbd: it.is_tbd ? 1 : 0,
+          tbd_note: it.is_tbd ? (blankToNull(it.tbd_note)) : null,
           overhead_percent: it.overhead_percent ?? 0,
           // NULL preserved for a legacy (never-split) budget; an explicit number
           // (including 0) once the owner sets Profit %.
@@ -675,7 +737,7 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           const updateSql = `UPDATE division_lineitems
             SET csi_number = ?, lineitem_description = ?, amount = ?, sub_cost = ?, contingency = ?,
                 overhead_percent = ?, profit_percent = ?, gl_percent = ?,
-                subcontractor_id = ?, in_house = ?, is_allowance = ?, foreman_percent = ?, paid_amount = ?
+                subcontractor_id = ?, in_house = ?, is_allowance = ?, is_tbd = ?, tbd_note = ?, foreman_percent = ?, paid_amount = ?
             WHERE id = ? AND division_id = ? AND job_id = ? AND owner_type = ?`;
 
           const updateValues = [
@@ -690,6 +752,8 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.subcontractor_id,
             normalized.in_house,
             normalized.is_allowance,
+            normalized.is_tbd,
+            normalized.tbd_note,
             normalized.foreman_percent,
             normalized.paid_amount,
             normalized.id,
@@ -807,9 +871,9 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
           const insertSql = `INSERT INTO division_lineitems
             (division_id, job_id, owner_type, csi_number, lineitem_description, amount, sub_cost, contingency,
              overhead_percent, profit_percent, gl_percent,
-             subcontractor_id, in_house, is_allowance, foreman_percent, paid_amount,
+             subcontractor_id, in_house, is_allowance, is_tbd, tbd_note, foreman_percent, paid_amount,
              created_at, created_by)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW(),?)`;
 
           const insertValues = [
             Number(divisionId),
@@ -826,6 +890,8 @@ router.post("/divisions/:divisionId/lineitems", auth.authenticateToken, blockExp
             normalized.subcontractor_id,
             normalized.in_house,
             normalized.is_allowance,
+            normalized.is_tbd,
+            normalized.tbd_note,
             normalized.foreman_percent,
             normalized.paid_amount,
             created_by ?? null,
@@ -1489,6 +1555,42 @@ router.post("/lock", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body
   try {
     connection = await pool.getConnection();
     await ensureBudgetLockTables(connection);
+
+    /*
+     * §4 A BUDGET CANNOT BE LOCKED WHILE ANYTHING IS RED.
+     *
+     * The gate lives HERE and not only on the button, because a hidden button
+     * is not a rule — the test for this calls the endpoint directly.
+     *
+     * It is a PRECONDITION on the existing lock, not a new notion of "final":
+     * what locking does is untouched — the snapshot, the read-only line items,
+     * the change-order path, the audit row. Only whether it is allowed to
+     * start has changed.
+     *
+     * TBD blocks too. A line with every number filled and TBD ticked still
+     * stops the lock: to lock, the tick comes off, which means the number is
+     * decided.
+     *
+     * UNLOCK IS DELIBERATELY NOT GUARDED THIS WAY — unlocking is how you get
+     * back in to fix the flagged lines. A symmetric guard there would trap the
+     * owner out of his own budget.
+     */
+    await ensureBudgetTbdColumns(connection);
+    const [flagRows] = await connection.query(
+      `SELECT amount, sub_cost, subcontractor_id, in_house, is_tbd
+         FROM division_lineitems WHERE job_id = ? AND owner_type = ?`,
+      [Number(job_id), ownerType]
+    );
+    const outstanding = countFlagged(flagRows);
+    if (outstanding > 0) {
+      return res.status(409).json({
+        success: false,
+        code: "BUDGET_HAS_FLAGGED_LINES",
+        outstanding,
+        message: `${outstanding} line${outstanding === 1 ? '' : 's'} still to resolve before this budget can be locked.`,
+      });
+    }
+
     const name = await userDisplayName(connection, userId);
     await connection.query(
       `INSERT INTO budget_locks (job_id, owner_type, locked, snapshot, locked_by, locked_by_name, locked_at, updated_at)

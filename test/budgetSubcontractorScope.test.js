@@ -41,7 +41,7 @@ const note = (m) => rec.push('  · ' + m);
     const jwt = require('jsonwebtoken');
 
     await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT NULL, status INT DEFAULT 1, category INT NULL, created_by INT NULL, created_at DATETIME NULL)");
-    await conn.query("CREATE TABLE contact (id INT PRIMARY KEY AUTO_INCREMENT, request_user1 INT, request_user2 INT, status VARCHAR(20) NULL, created_at DATETIME NULL, updated_at DATETIME NULL)");
+    await conn.query("CREATE TABLE contact (id INT PRIMARY KEY AUTO_INCREMENT, request_by INT, request_to INT, request_user1 INT NULL, request_user2 INT NULL, status VARCHAR(20) NULL, created_at DATETIME NULL, updated_at DATETIME NULL)");
     await conn.query("CREATE TABLE subscriptions (id INT PRIMARY KEY AUTO_INCREMENT, user_id INT, plan_id INT NULL, status VARCHAR(30), created_at DATETIME NULL)");
     await conn.query("CREATE TABLE plan_features (id INT PRIMARY KEY AUTO_INCREMENT, plan_id INT NULL, feature_key VARCHAR(60))");
     // Both owners are paying customers so the budget feature gate lets them in;
@@ -64,7 +64,14 @@ const note = (m) => rec.push('  · ' + m);
 
     // Contact links. Acme owns 101 and 102; Beta owns 201 and 202. 300 belongs
     // to nobody — it must appear for nobody.
-    await conn.query(`INSERT INTO contact (request_user1, request_user2, created_at) VALUES
+    // RE-POINTED to the LIVE columns. This seeded request_user1/request_user2,
+    // which NOTHING in the app writes — every INSERT INTO contact uses
+    // request_by/request_to. So the suite was proving isolation against a
+    // query that matched almost nothing in production, which is precisely how
+    // the six-of-fifty-one bug survived. What it ASSERTS is unchanged: Acme
+    // sees only Acme's, Beta only Beta's, and an unlinked user appears for
+    // nobody.
+    await conn.query(`INSERT INTO contact (request_by, request_to, created_at) VALUES
       (100,101,NOW()), (102,100,NOW()),
       (200,201,NOW()), (202,200,NOW())`);
 
