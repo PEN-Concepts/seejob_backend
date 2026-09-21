@@ -133,6 +133,33 @@ async function visibleLeadsForUser(connection, userId) {
   return rows;
 }
 
+/**
+ * WHO OWNS ONE SPECIFIC job OR lead — for an ownership CHECK, not a read.
+ *
+ * The snooze endpoint needs to know whether a target id belongs to the
+ * caller's account before it writes a row naming that id. That is a
+ * different question from "which rows may I see", and it deliberately
+ * selects ONLY the owner column: no name, no colour, nothing that reaches
+ * the caller. The handler compares and 403s.
+ *
+ * It lives here rather than in the route so that `routes/dashboard.js`
+ * contains no direct query against the job table at all. That is what
+ * makes the structural guard absolute instead of a rule with an exemption
+ * — and a rule with an exemption is one someone widens later.
+ *
+ * @returns {number|null} the resolved account owner, or null if no such row
+ */
+async function targetAccountOwner(connection, targetType, targetId) {
+  const table = targetType === 'job' ? '`job`' : 'leads';
+  const ownerCol = targetType === 'job' ? 'created_by' : 'user_id';
+  const [[found]] = await connection.query(
+    `SELECT ${ownerCol} AS owner_id FROM ${table} WHERE id = ? LIMIT 1`,
+    [Number(targetId)],
+  );
+  if (!found) return null;
+  return resolveAccountOwner(connection, Number(found.owner_id));
+}
+
 module.exports = {
   EMPLOYEE_CATEGORY,
   ACCOUNT_MEMBER_SQL,
@@ -140,4 +167,5 @@ module.exports = {
   jobScopeWhere,
   visibleJobsForUser,
   visibleLeadsForUser,
+  targetAccountOwner,
 };

@@ -98,12 +98,54 @@ app.use(
 );
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Global request logger for all APIs
+/**
+ * GLOBAL REQUEST LOG — WHO TOUCHED WHAT.
+ *
+ * WHAT WAS WRONG. This middleware sits before the route mounts and therefore
+ * before `auth.authenticateToken` runs, so `req.user` was always undefined
+ * and `res.locals.id` always unset: every line read `user=anonymous`. The
+ * path was recorded and the identity never was. When the dashboard tenant
+ * leak was found, "did a real client ever receive those job names" could not
+ * be answered from thirty days of logs, and would not have been answerable
+ * for any future incident either.
+ *
+ * ONE LOGGER, POSITIONED EARLY, WRITING LATE.
+ *
+ * Registered here so it sees EVERY request — including ones rejected before
+ * any route runs, which a logger mounted behind authentication would miss.
+ * But it writes on `res.on('finish')`, by which time auth has populated
+ * `req.user` and the status code is known. That is how both halves are true
+ * at once: full coverage and a real identity, from a single hook.
+ *
+ * Two loggers (one before, one after) was the alternative and would have
+ * doubled every line; a middleware placed after auth would have been blind
+ * to 401s, and a sweep of 401s is exactly how you notice someone probing.
+ *
+ * CATEGORY IS LOGGED ALONGSIDE THE ID, deliberately. The question that could
+ * not be answered was "was any of these a category 3". An id alone makes
+ * that a second lookup against a `user` table that may have changed —
+ * re-categorised, or deleted — since the request happened.
+ *
+ * WHAT IS DELIBERATELY NOT LOGGED. No request body, no query string, no
+ * headers, no token. The path is taken from `originalUrl` with the query
+ * string cut off, because query strings on this API carry job ids, emails
+ * and share tokens. This is an audit trail that sits in a file for thirty
+ * days, not a debugger.
+ */
 app.use((req, res, next) => {
-  const userId = (req.user && req.user.id) || res.locals.id || 'anonymous';
-  logger.info(
-    `API: ${req.method} ${req.originalUrl} user=${userId} - ${new Date()}`
-  );
+  const started = Date.now();
+  res.on('finish', () => {
+    // req.user is the verified JWT payload, set by authenticateToken.
+    const u = req.user;
+    const who = u && u.id
+      ? `user=${u.id} category=${u.category == null ? 'unknown' : u.category}`
+      : 'user=- auth=none';
+    // Path only. NEVER req.originalUrl — it carries the query string.
+    const pathOnly = String(req.originalUrl || '').split('?')[0];
+    logger.info(
+      `API: ${req.method} ${pathOnly} ${res.statusCode} ${who} ${Date.now() - started}ms`
+    );
+  });
   next();
 });
 app.use(cookieParser());
