@@ -255,6 +255,10 @@ const note = (m) => rec.push('  · ' + m);
 
   console.log('\nDEAD JOB ON A NOTEPAD — Section A + §2\n');
   console.log(rec.join('\n'));
-  console.log(`\n${pass} passed, ${fail} failed\n`);
+  // NO TRAILING NEWLINE. sweep.sh reads the summary with `tail -1`; a
+  // trailing \n makes the last line empty and the suite reports as ERR —
+  // invisible in the sweep rather than counted. Caught by the sweep doing
+  // exactly that to this file.
+  console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

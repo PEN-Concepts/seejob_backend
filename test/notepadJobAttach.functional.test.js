@@ -45,7 +45,20 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       appointment_id INT NULL, filed_at DATETIME NULL, kept TINYINT DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     await conn.query("CREATE TABLE teams (id INT PRIMARY KEY, team_name VARCHAR(120), team_color VARCHAR(20))");
-    await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, created_by INT NULL, name VARCHAR(150), color VARCHAR(30) NULL, status INT DEFAULT 1)");
+    // FIXTURE WIDENED, NOT AN ASSERTION WEAKENED. The section job join is
+    // scoped with jobScopeWhere() now, and that predicate reads two things
+    // this fixture did not have: `j.client_id` (clause 2, "an account member
+    // is the client on it") and the `tasks` table (clause 3, "an active job
+    // with a task assigned to an account member").
+    //
+    // Without them the query throws `Unknown column 'j.client_id'`, the
+    // route's catch swallows it into a 500, and the read comes back empty —
+    // which reads exactly like a correct scoping result. THIS IS THE SAME
+    // TRAP the dashboard tenant-scope CCP hit on four fixtures. Diagnosed
+    // with a probe that patched logger.error, not guessed: the first guess
+    // here was `tasks` alone and it did not fix it.
+    await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, created_by INT NULL, client_id INT NULL, name VARCHAR(150), color VARCHAR(30) NULL, status INT DEFAULT 1)");
+    await conn.query("CREATE TABLE tasks (id INT PRIMARY KEY AUTO_INCREMENT, job_id INT NULL, user_id INT NULL, created_by INT NULL, task_type VARCHAR(20) NULL, status INT DEFAULT 0, archived_at DATETIME NULL)");
     await conn.query("CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(150), user_id INT NULL, status VARCHAR(10) NULL)");
     // 700 = owner; 800 = a DIFFERENT account (created_by NULL → own account root).
     await conn.query("INSERT INTO `user` (id,name,email,role,category) VALUES (700,'Owner Olly','olly@x.com',14,2),(800,'Foreign Fran','fran@x.com',14,2)");
