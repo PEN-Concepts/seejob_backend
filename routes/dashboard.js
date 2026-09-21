@@ -39,6 +39,8 @@ const {
   visibleJobsForUser,
   visibleLeadsForUser,
   jobScopeWhere,
+  ACTIVE_JOB_SQL,
+  SECTION_ON_LIVE_JOB_SQL,
   targetAccountOwner,
 } = require('../services/accountScope');
 const { buildDayStream, eachDay } = require('../services/dashboardDay');
@@ -489,7 +491,13 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
               -- 'completed', not 'complete' (see dashboardDay.js). This filter
               -- never matched, so items already ticked off kept appearing in
               -- PAST DUE.
-              AND (c.status IS NULL OR LOWER(c.status) <> 'completed')`,
+              AND (c.status IS NULL OR LOWER(c.status) <> 'completed')
+              -- §1 — a task on a FINISHED job is not late, it is done with.
+              -- The clause is built in accountScope, not written here: this
+              -- file is asserted at source level to contain no direct query
+              -- against the job table (test/dashboardScopeGuard.test.js), and
+              -- an inline EXISTS broke that guard on the first run.
+              AND ${SECTION_ON_LIVE_JOB_SQL('s')}`,
           [...params, today],
         );
         pastDue.push(...rows.map((r) => ({
@@ -510,7 +518,8 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
              FROM job_schedule_items i
              JOIN job_schedules sc ON sc.id = i.schedule_id
              JOIN \`job\` j ON j.id = sc.job_id
-            WHERE ${gScope.sql} AND (i.assignee_user_id IS NULL OR i.computed_start_date IS NULL)
+            WHERE ${gScope.sql} AND ${ACTIVE_JOB_SQL}
+              AND (i.assignee_user_id IS NULL OR i.computed_start_date IS NULL)
             GROUP BY sc.job_id`,
           gScope.params,
         );
@@ -519,7 +528,7 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
       try {
         const [rows] = await connection.query(
           `SELECT j.id FROM \`job\` j
-            WHERE ${gScope.sql}
+            WHERE ${gScope.sql} AND ${ACTIVE_JOB_SQL}
               AND NOT EXISTS (SELECT 1 FROM job_schedules sc WHERE sc.job_id = j.id)`,
           gScope.params,
         );

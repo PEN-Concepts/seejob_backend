@@ -23,7 +23,7 @@
  */
 
 const engine = require('./scheduleEngine');
-const { jobScopeWhere } = require('./accountScope');
+const { jobScopeWhere, ACTIVE_JOB_SQL } = require('./accountScope');
 
 /** 'YYYY-MM-DD' for a Date, in local time. */
 function fmt(d) {
@@ -142,8 +142,12 @@ async function buildDayStream(connection, opts) {
     // them, which put that contractor's job names on their dashboard.
     const scope = jobScopeWhere('j', owner);
     const [jobs] = await connection.query(
+      // §1 — ACTIVE ONLY. This map is what every day row resolves its job
+      // name, colour and address through, so a completed or archived job
+      // dropping out here drops its work off the day cards too. The filter is
+      // in the query, not the template.
       `SELECT j.id, j.name, j.color, j.job_address, j.job_city, j.job_state, j.job_zipcode
-         FROM \`job\` j WHERE ${scope.sql}`,
+         FROM \`job\` j WHERE ${scope.sql} AND ${ACTIVE_JOB_SQL}`,
       scope.params,
     );
     for (const j of jobs) {
@@ -366,7 +370,7 @@ async function buildDayStream(connection, opts) {
          FROM job_schedule_items i
          JOIN job_schedules sc ON sc.id = i.schedule_id
          JOIN \`job\` j ON j.id = sc.job_id
-        WHERE ${inspScope.sql} AND i.computed_start_date IS NOT NULL`,
+        WHERE ${inspScope.sql} AND ${ACTIVE_JOB_SQL} AND i.computed_start_date IS NOT NULL`,
       inspScope.params,
     );
     for (const r of rows) {

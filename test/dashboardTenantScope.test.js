@@ -60,7 +60,11 @@ const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0
     // enough that BOTH return 200 — see trap 1 above.
     await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), mobile VARCHAR(40) NULL, street VARCHAR(190) NULL, city VARCHAR(90) NULL, state VARCHAR(90) NULL, zipcode VARCHAR(20) NULL, website_link VARCHAR(190) NULL, subcategory INT NULL, role INT NULL, category INT NULL, created_by INT NULL, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, name VARCHAR(150), created_by INT NULL, status INT DEFAULT 1, color VARCHAR(20) NULL, client_id INT NULL, inspector_id INT NULL, job_address VARCHAR(190) NULL, job_city VARCHAR(90) NULL, job_state VARCHAR(90) NULL, job_zipcode VARCHAR(20) NULL, additional_client_name VARCHAR(190) NULL, additional_client_email VARCHAR(190) NULL, additional_client_mobile VARCHAR(40) NULL, created_at DATETIME NULL)");
-    await conn.query("CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(150), user_id INT NULL, created_at DATETIME NULL)");
+    // FIXTURE WIDENED — see the same note in dashboardStallSnooze. §1 reads
+    // leads.status and leads.bid_status; without them the query throws into a
+    // swallowing catch and every lead assertion passes vacuously on an empty
+    // list.
+    await conn.query("CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(150), user_id INT NULL, status INT NULL, bid_status VARCHAR(40) NULL, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE tasks (id INT PRIMARY KEY AUTO_INCREMENT, job_id INT, user_id INT, created_by INT, task_type VARCHAR(20), task_name VARCHAR(190) NULL, status INT DEFAULT 0, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE checklist_sections (id INT PRIMARY KEY AUTO_INCREMENT, owner_user_id INT NULL, shared_with_user_id INT NULL, type VARCHAR(20) NULL, title VARCHAR(190), sort_order INT DEFAULT 0, job_id INT NULL, lead_id INT NULL, origin VARCHAR(20) NULL, scope VARCHAR(20) NULL, account_owner_id INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NULL)");
     await conn.query("CREATE TABLE checklist_section_shares (id INT PRIMARY KEY AUTO_INCREMENT, section_id INT, user_id INT)");
