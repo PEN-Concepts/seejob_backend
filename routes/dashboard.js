@@ -39,6 +39,7 @@ const {
   visibleJobsForUser,
   visibleLeadsForUser,
   jobScopeWhere,
+  targetAccountOwner,
 } = require('../services/accountScope');
 const { buildDayStream, eachDay } = require('../services/dashboardDay');
 
@@ -198,15 +199,13 @@ router.post('/stall-snooze', auth.authenticateToken, async (req, res) => {
       // widen anything — the snooze only ever affects the caller's own view —
       // but it stops rows accruing for ids the caller has no business naming.
       const owner = await resolveAccountOwner(connection, uid);
-      const table = type === 'job' ? '`job`' : 'leads';
-      const ownerCol = type === 'job' ? 'created_by' : 'user_id';
-      const [[found]] = await connection.query(
-        `SELECT ${ownerCol} AS owner_id FROM ${table} WHERE id = ? LIMIT 1`, [targetId],
-      );
-      if (!found) {
+      // The ownership probe lives in accountScope so THIS FILE contains no
+      // direct query against the job table — see the structural guard in
+      // test/dashboardScopeGuard.test.js.
+      const targetOwner = await targetAccountOwner(connection, type, targetId);
+      if (targetOwner === null) {
         return res.status(404).json({ success: false, message: 'That job or lead does not exist.' });
       }
-      const targetOwner = await resolveAccountOwner(connection, Number(found.owner_id));
       if (Number(targetOwner) !== Number(owner)) {
         return res.status(403).json({ success: false, message: 'Not your account.' });
       }
