@@ -44,6 +44,24 @@ const NO_JOB_TITLE = 'No Job Assigned';
  * For notepad purposes the rule is simply: whoever created you owns the account
  * you belong to. Kept local so nothing about billing or entitlement moves.
  */
+/*
+ * ⚠ NEVER USE THIS AS A ROW SELECTOR. It answers a NOTEPAD question.
+ *
+ * The dashboard did exactly that — `SELECT ... FROM job WHERE created_by =
+ * accountOwnerOf(me)` — and because this promotes a subcontractor or a
+ * client to the contractor who invited them, it handed them that
+ * contractor's private job names and colours, none of which they could open
+ * from any screen.
+ *
+ * The distinction is which direction the answer points. notepadAccess asks
+ * "am I the owner?" and "am I on the allowlist?", where resolving to a
+ * parent DENIES. A `WHERE` clause keyed on the same value GRANTS.
+ *
+ * For "which rows may this user see", use services/accountScope.js:
+ * resolveAccountOwner() / jobScopeWhere() / visibleJobsForUser(). Those
+ * promote employees only, and apply the full account predicate the jobs
+ * list has always used.
+ */
 async function accountOwnerOf(connection, userId) {
   const uid = Number(userId);
   const resolved = Number(await resolveOwnerId(uid, connection));
