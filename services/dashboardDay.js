@@ -198,17 +198,36 @@ async function buildDayStream(connection, opts) {
      * complete: false. If the table is unreadable nothing is complete; a
      * missing tick is survivable, a 500 on the dashboard is not.
      */
+    /*
+     * SKIPPED IS A THIRD STATE, NOT THE ABSENCE OF THE FIRST.
+     *
+     * The phone dashboard has always been able to mark a goal 'skipped' —
+     * a saved status with its own glyph and an un-skip — and the day card
+     * could not see it, so the same goal read "missed" on the web and
+     * "skipped" on the phone. Skipping a habit on purpose is genuinely a
+     * different thing from failing to do it, and the row now says which.
+     *
+     * Both states are read in ONE query. Two queries over the same table
+     * for two spellings of the same column would drift the first time
+     * either changed.
+     */
     const doneOn = new Set();
+    const skippedOn = new Set();
     try {
       const days = Array.from(byDay.keys());
       if (days.length) {
         const [logs] = await connection.query(
-          `SELECT goal_id, DATE_FORMAT(log_date, '%Y-%m-%d') AS d
+          `SELECT goal_id, LOWER(status) AS st, DATE_FORMAT(log_date, '%Y-%m-%d') AS d
              FROM spartan_goal_log
-            WHERE user_id = ? AND log_date IN (?) AND LOWER(status) = 'completed'`,
+            WHERE user_id = ? AND log_date IN (?)
+              AND LOWER(status) IN ('completed', 'skipped')`,
           [uid, days],
         );
-        for (const r of logs) doneOn.add(Number(r.goal_id) + '|' + r.d);
+        for (const r of logs) {
+          const key = Number(r.goal_id) + '|' + r.d;
+          if (r.st === 'completed') doneOn.add(key);
+          else skippedOn.add(key);
+        }
       }
     } catch (e) { /* log unreadable — nothing reads complete, never a crash */ }
 
@@ -236,6 +255,10 @@ async function buildDayStream(connection, opts) {
           checkbox: true,
           // Read back from spartan_goal_log — see doneOn above.
           complete: doneOn.has(Number(g.id) + '|' + day),
+          // A goal can be done OR skipped, never both: one log row per
+          // (goal, day), and the two statuses are mutually exclusive
+          // spellings of it.
+          skipped: skippedOn.has(Number(g.id) + '|' + day),
           shield: true,             // §7: Spartan red shield on the right
           is_inspection: false,
           day_index: null, day_total: null,
