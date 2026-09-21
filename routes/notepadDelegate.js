@@ -26,6 +26,7 @@ const auth = require('../services/authentication');
 const logger = require('../common/logger');
 const { getTimeStamp } = require('../common/timdate');
 const { getAccessMode, isSameAccount } = require('../utils/access');
+const { resolveAccountOwner } = require('../services/accountScope');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
 const { isFullAccess, getSectionAccess } = require('../services/notepadAccess');
 const { requireNotepadMyTasks } = require('../services/featureFlags');
@@ -141,8 +142,56 @@ router.post('/items/:id/delegate', auth.authenticateToken, requireNotepadMyTasks
     const padJobId = access.section.job_id != null ? Number(access.section.job_id) : null;
     const jobId = padJobId != null ? padJobId : Number(value.job_id);
     const [[job]] = await connection.query('SELECT id, name, created_by FROM `job` WHERE id = ? LIMIT 1', [jobId]);
-    if (!job) return res.status(404).json({ success: false, message: 'That job was not found.' });
+
+    // §2 — THREE OUTCOMES, THREE DIFFERENT ANSWERS.
+    //
+    // These were two, and the two that remain are not interchangeable. This
+    // lookup is deliberately UNSCOPED (`WHERE id = ?`, nothing else), so a
+    // 404 here means the row is genuinely absent from the table — not that
+    // the caller cannot see it. Out-of-scope is the branch below, and it is
+    // a different status, a different message and a different log line.
+    // Collapsing them is how "no such job" and "not yours" became
+    // indistinguishable in the first place.
+    //
+    // The third outcome — no job sent at all — never reaches here: Joi
+    // rejects it at the schema, and the client blocks before the request
+    // with "Pick a job before assigning."
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        code: 'JOB_GONE',
+        message: 'That job no longer exists. Pick another job and try again.',
+      });
+    }
+
     if (!(await isSameAccount(uid, job.created_by, connection))) {
+      // THE SCOPE TRIPWIRE.
+      //
+      // Deliberately findable without knowing what you are looking for:
+      // grep the word DELEGATE_JOB_OUT_OF_SCOPE and you have every instance.
+      // If the account rules are ever over-narrowed, this is the line that
+      // shows it — a legitimate owner denied their own job — and it carries
+      // BOTH owner ids so the two can be compared rather than guessed at.
+      //
+      // It is logged at WARN, not INFO: a user hitting this is either
+      // probing or being wrongly refused, and both are worth seeing.
+      let callerOwner = null;
+      let jobOwner = null;
+      try {
+        callerOwner = await resolveAccountOwner(connection, uid);
+        jobOwner = await resolveAccountOwner(connection, job.created_by);
+      } catch (e) {
+        // The log must never be the reason the request fails.
+        logger.warn(`DELEGATE_JOB_OUT_OF_SCOPE owner-resolve failed: ${e && e.message}`);
+      }
+      logger.warn(
+        `DELEGATE_JOB_OUT_OF_SCOPE route=POST /api/v1/checklists/items/:id/delegate ` +
+        `caller=${uid} caller_account_owner=${callerOwner} ` +
+        `job_id=${jobId} job_created_by=${job.created_by} job_account_owner=${jobOwner} ` +
+        `pad_section=${access.section.id} pad_job_id=${padJobId}`,
+      );
+      // The message stays vague on purpose. It is the only one of the three
+      // that must not tell the caller whether the job exists.
       return res.status(403).json({ success: false, message: 'That job is not in your account.' });
     }
 

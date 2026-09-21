@@ -29,7 +29,8 @@ const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolve
 // The account job predicate, shared with the dashboard. See accountScope.js.
 const { jobScopeWhere } = require("../services/accountScope");
 const { requireOwnsJob, ownsJob } = require("../utils/ownership");
-const { createAutoNotepadFor } = require("../services/notepadAccess");
+const { createAutoNotepadFor, repointNotepadJobToLead, clearNotepadJobRefs } = require("../services/notepadAccess");
+const { ensureNotepadSchema } = require("../services/notepadSchema");
 const { notepadMyTasksEnabled } = require("../services/featureFlags");
 // Cross-account guard: the job/lead the request targets must belong to the
 // caller's account. getJobId(req) locates the id (param/query/body); optional
@@ -2959,8 +2960,30 @@ router.post(
         leadId = leadIns.insertId;
       }
 
-      // 3. Delete the job
-      await connection.query(`DELETE FROM job WHERE id = ?`, [jobId]);
+      // 3. Move the notepads to the lead, then delete the job.
+      //
+      // Section A. The pads belonged to the job; the lead is the same
+      // real-world thing, so they follow it and keep their items rather than
+      // being orphaned. Atomic with the delete — a pad must never be left
+      // pointing at a job id whose row has gone.
+      //
+      // NOTE: the wider non-atomicity here is PRE-EXISTING and deliberately
+      // untouched. The lead insert/re-activate above is still outside this
+      // transaction, so a failure between the two can leave a re-activated
+      // lead beside a job that still exists. Reported, not fixed in this pass.
+      //
+      // Schema first, OUTSIDE the transaction: ensureNotepadSchema can issue
+      // ALTER TABLE, and DDL implicitly commits in MySQL.
+      await ensureNotepadSchema(connection);
+      await connection.beginTransaction();
+      try {
+        await repointNotepadJobToLead(connection, jobId, leadId);
+        await connection.query(`DELETE FROM job WHERE id = ?`, [jobId]);
+        await connection.commit();
+      } catch (txErr) {
+        await connection.rollback();
+        throw txErr;
+      }
 
       res.json({
         message: "Job converted back to Lead successfully",
@@ -3038,6 +3061,10 @@ router.delete("/delete/:id", auth.authenticateToken, denyExpiredFreeWrites, asyn
     // Archived tasks drop off the live Task Manager / Daily Tasks / Spartan lists
     // (all filter archived_at IS NULL) but remain recoverable via "Show Archived".
     // status_note is only set when empty so we never clobber a user's own note.
+    //
+    // Schema first, OUTSIDE the transaction: ensureNotepadSchema can issue
+    // ALTER TABLE, and DDL implicitly commits in MySQL.
+    await ensureNotepadSchema(connection);
     await connection.beginTransaction();
     try {
       await connection.execute(
@@ -3047,6 +3074,12 @@ router.delete("/delete/:id", auth.authenticateToken, denyExpiredFreeWrites, asyn
          WHERE job_id = ? AND archived_at IS NULL`,
         [id]
       );
+      // Section A — the pads have to let go of the job BEFORE it disappears.
+      // There is no FK and no ON DELETE SET NULL, so without this the pad
+      // keeps an id with no row and the delegate sheet renders a job that
+      // does not exist. Inside the same transaction as the delete: either
+      // both happen or neither does.
+      await clearNotepadJobRefs(connection, id);
       await connection.execute("DELETE FROM job WHERE id = ?", [id]);
       await connection.commit();
     } catch (txErr) {

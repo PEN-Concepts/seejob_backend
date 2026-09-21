@@ -414,6 +414,74 @@ async function repointNotepadLeadToJob(connection, leadId, jobId) {
 }
 
 /**
+ * THE INVERSE, AND WHY IT EXISTS.
+ *
+ * `checklist_sections.job_id` has no foreign key (confirmed: the only FKs in
+ * this backend are the four schedule-template ones in dbMigrations). Nothing
+ * at the database level stops a job_id outliving its job, and both job-delete
+ * paths used to let exactly that happen:
+ *
+ *   DELETE /jobs/delete/:id        archived the job's TASKS, ignored its pads
+ *   POST  /jobs/convert-to-lead    deleted the job outright, ignored its pads
+ *
+ * The pad then pointed at an id with no row. The LEFT JOIN that supplies
+ * `job_name` returned NULL, and the delegate sheet's `sec.job_name ||
+ * sec.title` fallback printed the pad's OWN TITLE in the job slot and locked
+ * it there — so the form asserted a job that did not exist, the Assign button
+ * was live, and the server correctly 404'd. That is the "Cliff Branch" bug.
+ *
+ * THESE TWO DO NOT SWALLOW THEIR ERRORS, unlike `repointNotepadLeadToJob`
+ * above. Both are called inside a transaction that deletes the job; if the
+ * pad update fails, the delete must roll back rather than commit a fresh
+ * orphan. A swallowed error here would recreate the very bug it closes.
+ * That means a broken notepad schema now FAILS THE JOB DELETE instead of
+ * orphaning its pads. Deliberate: destructive paths fail closed.
+ *
+ * NEITHER CALLS `ensureNotepadSchema`, and that is not an oversight. It can
+ * issue ALTER TABLE, and DDL in MySQL commits the open transaction out from
+ * under you — the delete would stop being atomic without a single visible
+ * error. The callers ensure the schema BEFORE they open their transaction.
+ */
+
+/**
+ * Job → lead, the exact inverse of `repointNotepadLeadToJob`, for
+ * convert-to-lead. The lead is the same real-world thing the job was, so the
+ * pads follow it and keep their items.
+ *
+ * NOT filtered to `origin = 'auto'`, deliberately, and this is the one place
+ * the two directions differ. The forward call is filtered because only the
+ * auto pad came from the lead. Here, a job may also carry pads the user
+ * attached by hand; leaving those behind would orphan them, which is the
+ * defect. Every pad on the job moves.
+ */
+async function repointNotepadJobToLead(connection, jobId, leadId) {
+  const [r] = await connection.query(
+    'UPDATE checklist_sections SET job_id = NULL, lead_id = ? WHERE job_id = ?',
+    [Number(leadId), Number(jobId)],
+  );
+  return r && r.affectedRows ? Number(r.affectedRows) : 0;
+}
+
+/**
+ * Hard delete: there is no destination, so the reference is cleared.
+ *
+ * NOTE, because it cuts against the reasoning that declined the backfill: a
+ * dangling job_id is the only surviving record of which job a pad belonged
+ * to, and this destroys it. It is still strictly better than the status quo
+ * — the job row is going away in the same transaction, so the reference would
+ * dangle either way, and a NULL at least renders honestly. If that provenance
+ * is worth keeping, it needs a column to keep it in; inventing one was not
+ * part of this pass.
+ */
+async function clearNotepadJobRefs(connection, jobId) {
+  const [r] = await connection.query(
+    'UPDATE checklist_sections SET job_id = NULL WHERE job_id = ?',
+    [Number(jobId)],
+  );
+  return r && r.affectedRows ? Number(r.affectedRows) : 0;
+}
+
+/**
  * The single authorisation gate for one section. Returns null when the caller
  * has no business seeing it at all — callers turn that into a 403 (§6: "An
  * off-list user's request for a company notepad must 403").
@@ -531,6 +599,8 @@ module.exports = {
   NO_JOB_TITLE,
   createAutoNotepadFor,
   repointNotepadLeadToJob,
+  repointNotepadJobToLead,
+  clearNotepadJobRefs,
   getSectionAccess,
   isShareable,
 };

@@ -49,7 +49,12 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       appointment_id INT NULL, filed_at DATETIME NULL, kept TINYINT DEFAULT 0,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
     await conn.query("CREATE TABLE teams (id INT PRIMARY KEY, team_name VARCHAR(120), team_color VARCHAR(20))");
-    await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, created_by INT NULL, name VARCHAR(150), color VARCHAR(30) NULL, status INT DEFAULT 1)");
+    // FIXTURE WIDENED, NOT AN ASSERTION WEAKENED — see the fuller note in
+    // notepadJobAttach.functional. jobScopeWhere() reads `j.client_id` and
+    // the `tasks` table; without them the query throws, the catch swallows
+    // it into a 500, and an empty list passes for a scoped one.
+    await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, created_by INT NULL, client_id INT NULL, name VARCHAR(150), color VARCHAR(30) NULL, status INT DEFAULT 1)");
+    await conn.query("CREATE TABLE tasks (id INT PRIMARY KEY AUTO_INCREMENT, job_id INT NULL, user_id INT NULL, created_by INT NULL, task_type VARCHAR(20) NULL, status INT DEFAULT 0, archived_at DATETIME NULL)");
     await conn.query("INSERT INTO `user` (id,name,email,role) VALUES (700,'Owner Olly','olly@x.com',14),(701,'Other Ollie','ollie@x.com',14)");
 
     const express = require('express');

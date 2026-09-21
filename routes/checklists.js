@@ -15,6 +15,7 @@ const mailer = require('../services/mailer');
 const { replyToForUser } = require('../services/mailReplyTo');
 const { getSectionAccess } = require('../services/notepadAccess');
 const { ensureNotepadSchema } = require('../services/notepadSchema');
+const { jobScopeWhere, resolveAccountOwner } = require('../services/accountScope');
 
 // Minimal HTML escaper for the shared-snapshot email body.
 function escapeHtml(s) {
@@ -580,7 +581,32 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
       await ensureNotepadFlowColumns(connection); // so s.job_id is selectable
 
       const requestedType = req.query.type;
-      const params = [signedin_user];
+
+      // Section A — SCOPE THE JOB JOIN. DEFENCE IN DEPTH, stated accurately.
+      //
+      // This join was `ON j.id = s.job_id` with no account predicate, so it
+      // resolves ANY job id in the table and hands back its name and colour.
+      //
+      // IT IS NOT CURRENTLY REACHABLE, and the comment says so rather than
+      // dressing this up as a live leak. Both paths that write job_id — the
+      // create at ~496 and the update at ~826 — go through
+      // `resolveNotepadJob`, which 403s unless `isSameAccount`. Checked, not
+      // assumed; an earlier draft of this comment claimed otherwise and was
+      // wrong.
+      //
+      // What it guards is the case where membership moves AFTER the pad is
+      // attached: an employee's category changes, or a job's created_by is
+      // reassigned, and a pad that was legitimately attached now points at a
+      // job outside the account. The write-time check cannot see that coming;
+      // a read-time predicate can. The test proves the unscoped version
+      // returns another account's job name, so the guard is doing work.
+      //
+      // The predicate goes in the JOIN, not the WHERE: this is a LEFT JOIN
+      // and the section itself must still be returned. A foreign job now
+      // resolves to NULL job_name — which is exactly the unresolved-job state
+      // §1 renders honestly, rather than a name the caller should not see.
+      const jobScope = jobScopeWhere('j', await resolveAccountOwner(connection, signedin_user));
+      const params = [...jobScope.params, signedin_user];
       let sql = `
         SELECT
           s.id,
@@ -598,7 +624,7 @@ router.get('/sections', auth.authenticateToken, async (req, res) => {
           COUNT(c.id) AS item_count
         FROM checklist_sections s
         LEFT JOIN user owner ON owner.id = s.owner_user_id
-        LEFT JOIN \`job\` j ON j.id = s.job_id
+        LEFT JOIN \`job\` j ON j.id = s.job_id AND ${jobScope.sql}
         LEFT JOIN check_list c ON c.section_id = s.id
         WHERE s.owner_user_id = ?
       `;
@@ -652,7 +678,10 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
       // (Section share, item delegation, and team visibility were all removed —
       // there is no cross-user access path anymore, so the expired-collaborator
       // branch is gone too; an expired user simply sees their own pages read-only.)
-      const sectionParams = [signedin_user];
+      // Section A — the same scoped job join as /sections. See the comment
+      // there; the two payloads must not disagree about which jobs resolve.
+      const jobScope = jobScopeWhere('j', await resolveAccountOwner(connection, signedin_user));
+      const sectionParams = [...jobScope.params, signedin_user];
       const sectionsWhere = `s.owner_user_id = ?`;
       let sectionsSql = `
         SELECT
@@ -670,7 +699,7 @@ router.get('/sections-with-items', auth.authenticateToken, async (req, res) => {
           NULL AS assign_to_name
         FROM checklist_sections s
         LEFT JOIN user owner ON owner.id = s.owner_user_id
-        LEFT JOIN \`job\` j ON j.id = s.job_id
+        LEFT JOIN \`job\` j ON j.id = s.job_id AND ${jobScope.sql}
         WHERE ${sectionsWhere}
       `;
 
