@@ -104,6 +104,59 @@ function jobScopeWhere(alias, accountOwnerId) {
  * disagree about what exists. Filtering AFTER the query was explicitly not
  * an option: the rows must not be selected in the first place.
  */
+/**
+ * ACTIVE ONLY. `job.status` is 0 = completed, 1 = current, 2 = archived —
+ * confirmed at routes/jobs.js:1553, whose own comment reads "expecting
+ * status = 0 (completed) or 2 (archived)" and whose guard is
+ * `if (![0, 2, 1].includes(status))`. jobColorPalette.js says the same from
+ * the other side: "color released on complete/archive, so only status=1
+ * holds".
+ *
+ * This is the §1 clause for every dashboard list. It lives HERE, in the query
+ * that builds the list, and not in the template that draws it — a template
+ * that hides rows the query still returns leaks the moment anything else
+ * consumes that query, which is exactly how the tenant-scope bug worked.
+ */
+const ACTIVE_JOB_SQL = 'j.status = 1';
+
+/**
+ * A LIVE LEAD. `leads.status = 3` is closed/converted (routes/leads.js:760,
+ * "Update lead status = 3 (closed/converted)"; routes/tasks.js:942 reads
+ * `status<>3` to mean live), and `bid_status = 'Archived'` is a SEPARATE
+ * archive flag (routes/leads.js:202, "returns active leads and EXCLUDES
+ * bid_status='Archived'"). Both have to be excluded — one alone leaves the
+ * other kind of finished lead on the dashboard.
+ *
+ * NULL-tolerant on both columns: a lead that has never been given a status
+ * or a bid_status is live, not hidden. The reverse would REMOVE rows for a
+ * reason nobody chose.
+ */
+const LIVE_LEAD_SQL =
+  "(status IS NULL OR status <> 3) AND (bid_status IS NULL OR bid_status <> 'Archived')";
+
+/**
+ * "This notepad section is not sitting on a finished job."
+ *
+ * Takes the alias of the `checklist_sections` row in the calling query. A
+ * section with NO job (job_id IS NULL) passes: that is a real pad and §5
+ * gives its tasks a NO JOB chip. A section pointing at a job that is
+ * completed, archived or DELETED fails, because none of those is live work.
+ *
+ * IT LIVES HERE RATHER THAN INLINE IN routes/dashboard.js FOR A REASON, and
+ * the reason has teeth: test/dashboardScopeGuard.test.js asserts at source
+ * level that dashboard.js contains no direct query against the `job` table,
+ * so that a future edit cannot quietly add an unscoped one. Writing this
+ * EXISTS inline broke that guard on the first run — which is the guard doing
+ * exactly the job it was built for.
+ */
+const SECTION_ON_LIVE_JOB_SQL = (sectionAlias) => {
+  const s = String(sectionAlias || 's').replace(/[^a-z0-9_]/gi, '') || 's';
+  return `(
+    ${s}.job_id IS NULL
+    OR EXISTS (SELECT 1 FROM \`job\` j WHERE j.id = ${s}.job_id AND ${ACTIVE_JOB_SQL})
+  )`;
+};
+
 async function visibleJobsForUser(connection, userId, columns) {
   const owner = await resolveAccountOwner(connection, userId);
   const { sql, params } = jobScopeWhere('j', owner);
@@ -111,7 +164,7 @@ async function visibleJobsForUser(connection, userId, columns) {
     .map((c) => 'j.`' + String(c).replace(/[^a-z0-9_]/gi, '') + '`')
     .join(', ');
   const [rows] = await connection.query(
-    `SELECT ${cols} FROM \`job\` j WHERE ${sql}`,
+    `SELECT ${cols} FROM \`job\` j WHERE ${sql} AND ${ACTIVE_JOB_SQL}`,
     params,
   );
   return rows;
@@ -127,7 +180,8 @@ async function visibleJobsForUser(connection, userId, columns) {
 async function visibleLeadsForUser(connection, userId) {
   const owner = await resolveAccountOwner(connection, userId);
   const [rows] = await connection.query(
-    `SELECT id, lead_name AS name FROM leads WHERE user_id IN ${ACCOUNT_MEMBER_SQL}`,
+    `SELECT id, lead_name AS name FROM leads
+      WHERE user_id IN ${ACCOUNT_MEMBER_SQL} AND ${LIVE_LEAD_SQL}`,
     [owner, owner],
   );
   return rows;
@@ -165,6 +219,13 @@ module.exports = {
   ACCOUNT_MEMBER_SQL,
   resolveAccountOwner,
   jobScopeWhere,
+  // §1 — exported so the two /exceptions queries that build their own SQL
+  // use the SAME clause rather than a second copy of the rule. Two copies of
+  // "which jobs count" is how the dashboard and the jobs list disagreed in
+  // the first place.
+  ACTIVE_JOB_SQL,
+  LIVE_LEAD_SQL,
+  SECTION_ON_LIVE_JOB_SQL,
   visibleJobsForUser,
   visibleLeadsForUser,
   targetAccountOwner,

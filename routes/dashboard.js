@@ -39,6 +39,8 @@ const {
   visibleJobsForUser,
   visibleLeadsForUser,
   jobScopeWhere,
+  ACTIVE_JOB_SQL,
+  SECTION_ON_LIVE_JOB_SQL,
   targetAccountOwner,
 } = require('../services/accountScope');
 const { buildDayStream, eachDay } = require('../services/dashboardDay');
@@ -231,6 +233,109 @@ router.post('/stall-snooze', auth.authenticateToken, async (req, res) => {
     }
   } catch (err) {
     logger.error('dashboard stall-snooze error: ' + err.message);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/**
+ * POST /stall-snooze/bulk — ONE DATE, APPLIED TO SEVERAL ROWS.
+ *
+ * §4b. Poul has fifteen stalled and fifty-two incomplete to work through, and
+ * the reason they have not been cleared is that each one costs a tap, a
+ * calendar and a date. This takes the date ONCE and applies it to everything
+ * ticked.
+ *
+ * IT WRITES EXACTLY WHAT THE SINGLE CONTROL WRITES AND NOTHING ELSE: the same
+ * upsert into dashboard_stall_snooze, per row, under the same validation. It
+ * is not a delete, it does not touch the job, the lead or any task, and it
+ * only ever affects the caller's own view. The name is the honest one —
+ * `Check back on`, not a dismiss and not an ×.
+ *
+ * JOB AND LEAD ONLY, because that is all `target_type` has ever understood.
+ * A late TASK cannot be expressed here and no new target_type is invented for
+ * one: a late task is something you do or re-date, not something you silence.
+ *
+ * ALL-OR-NOTHING on validation, per row on the write. A batch with one bad
+ * target is rejected whole rather than half-applied, so the confirmation that
+ * said "6 rows" cannot turn out to have meant five.
+ */
+const BULK_MAX = 200;
+router.post('/stall-snooze/bulk', auth.authenticateToken, async (req, res) => {
+  const uid = Number(res.locals.id);
+  const body = req.body || {};
+  const ymd = String(body.check_back_on || '').trim();
+  const targets = Array.isArray(body.targets) ? body.targets : null;
+
+  if (!targets || !targets.length) {
+    return res.status(400).json({ success: false, message: 'Pick at least one row.' });
+  }
+  if (targets.length > BULK_MAX) {
+    return res.status(400).json({ success: false, message: `That is more than ${BULK_MAX} rows.` });
+  }
+  if (!YMD.test(ymd)) {
+    return res.status(400).json({ success: false, message: 'check_back_on must be a YYYY-MM-DD date.' });
+  }
+  const picked = ymdToLocalDate(ymd);
+  if (isNaN(picked.getTime())) {
+    return res.status(400).json({ success: false, message: 'check_back_on is not a real date.' });
+  }
+  const back = `${picked.getFullYear()}-${String(picked.getMonth() + 1).padStart(2, '0')}-${String(picked.getDate()).padStart(2, '0')}`;
+  if (back !== ymd) {
+    return res.status(400).json({ success: false, message: 'check_back_on is not a real date.' });
+  }
+  // The same rule as the single control: there is no indefinite option and no
+  // way to construct one.
+  if (picked < todayLocal()) {
+    return res.status(400).json({ success: false, message: 'Pick a date in the future — a job cannot be hidden for good.' });
+  }
+
+  // Shape-check every target BEFORE anything is written.
+  const wanted = [];
+  for (const t of targets) {
+    const type = String((t && t.target_type) || '').trim();
+    const id = Number(t && t.target_id);
+    if (!SNOOZE_TARGETS.has(type)) {
+      return res.status(400).json({ success: false, message: 'target_type must be job or lead.' });
+    }
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ success: false, message: 'target_id must be a positive id.' });
+    }
+    wanted.push({ type, id });
+  }
+
+  try {
+    const connection = await pool.getConnection();
+    try {
+      await ensureDashboardSchema(connection);
+      const owner = await resolveAccountOwner(connection, uid);
+
+      // EVERY target is proved to be on the caller's account before ANY row is
+      // written. Half a batch applied and half refused is worse than a refusal.
+      for (const w of wanted) {
+        const targetOwner = await targetAccountOwner(connection, w.type, w.id);
+        if (targetOwner === null) {
+          return res.status(404).json({ success: false, message: 'One of those is not there any more. Nothing was changed.' });
+        }
+        if (Number(targetOwner) !== Number(owner)) {
+          return res.status(403).json({ success: false, message: 'Not your account. Nothing was changed.' });
+        }
+      }
+
+      for (const w of wanted) {
+        await connection.query(
+          `INSERT INTO dashboard_stall_snooze (user_id, target_type, target_id, check_back_on)
+           VALUES (?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE check_back_on = VALUES(check_back_on)`,
+          [uid, w.type, w.id, ymd],
+        );
+      }
+
+      return res.status(200).json({ success: true, snoozed: wanted.length, check_back_on: ymd });
+    } finally {
+      connection.release();
+    }
+  } catch (err) {
+    logger.error('dashboard stall-snooze bulk error: ' + err.message);
     return res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -489,7 +594,13 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
               -- 'completed', not 'complete' (see dashboardDay.js). This filter
               -- never matched, so items already ticked off kept appearing in
               -- PAST DUE.
-              AND (c.status IS NULL OR LOWER(c.status) <> 'completed')`,
+              AND (c.status IS NULL OR LOWER(c.status) <> 'completed')
+              -- §1 — a task on a FINISHED job is not late, it is done with.
+              -- The clause is built in accountScope, not written here: this
+              -- file is asserted at source level to contain no direct query
+              -- against the job table (test/dashboardScopeGuard.test.js), and
+              -- an inline EXISTS broke that guard on the first run.
+              AND ${SECTION_ON_LIVE_JOB_SQL('s')}`,
           [...params, today],
         );
         pastDue.push(...rows.map((r) => ({
@@ -498,7 +609,21 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
         })));
       } catch (e) { /* none */ }
 
-      // ── INCOMPLETE — Gantt items with no assignee, and jobs with no schedule.
+      // ── UNASSIGNED and INCOMPLETE — TWO BANDS NOW, from one query that
+      //    used to answer both at once.
+      //
+      // The old clause was `assignee_user_id IS NULL OR computed_start_date
+      // IS NULL`, so "nobody is doing this" and "this has no date" arrived as
+      // one number and you could not tell which you were looking at. §4 names
+      // them separately because they are different jobs of work: one needs a
+      // person, the other needs a date.
+      //
+      // NOTHING NEW IS SHOWN. Every row counted here was already inside
+      // INCOMPLETE; this splits an existing list in two and renames the
+      // halves. A row cannot appear in both — the unassigned test wins, so an
+      // item with neither a person nor a date is counted once, under the
+      // question you have to answer first.
+      const unassignedGantt = new Map(); // job_id -> count
       const incompleteGantt = new Map(); // job_id -> count
       const noSchedule = [];
       // Both INCOMPLETE reads were `j.created_by = <promoted owner>`. Same
@@ -506,20 +631,29 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
       const gScope = jobScopeWhere('j', owner);
       try {
         const [rows] = await connection.query(
-          `SELECT sc.job_id, COUNT(*) AS n
+          `SELECT sc.job_id,
+                  SUM(CASE WHEN i.assignee_user_id IS NULL THEN 1 ELSE 0 END) AS unassigned_n,
+                  SUM(CASE WHEN i.assignee_user_id IS NOT NULL
+                            AND i.computed_start_date IS NULL THEN 1 ELSE 0 END) AS undated_n
              FROM job_schedule_items i
              JOIN job_schedules sc ON sc.id = i.schedule_id
              JOIN \`job\` j ON j.id = sc.job_id
-            WHERE ${gScope.sql} AND (i.assignee_user_id IS NULL OR i.computed_start_date IS NULL)
+            WHERE ${gScope.sql} AND ${ACTIVE_JOB_SQL}
+              AND (i.assignee_user_id IS NULL OR i.computed_start_date IS NULL)
             GROUP BY sc.job_id`,
           gScope.params,
         );
-        for (const r of rows) incompleteGantt.set(Number(r.job_id), Number(r.n));
+        for (const r of rows) {
+          const u = Number(r.unassigned_n) || 0;
+          const d = Number(r.undated_n) || 0;
+          if (u) unassignedGantt.set(Number(r.job_id), u);
+          if (d) incompleteGantt.set(Number(r.job_id), d);
+        }
       } catch (e) { /* none */ }
       try {
         const [rows] = await connection.query(
           `SELECT j.id FROM \`job\` j
-            WHERE ${gScope.sql}
+            WHERE ${gScope.sql} AND ${ACTIVE_JOB_SQL}
               AND NOT EXISTS (SELECT 1 FROM job_schedules sc WHERE sc.job_id = j.id)`,
           gScope.params,
         );
@@ -599,20 +733,33 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
         });
       }
 
+      // ── UNASSIGNED rows. JOB rows, so §4b's snooze applies to this page.
+      const unassignedRows = [];
+      for (const [jid, n] of unassignedGantt) {
+        const job = jobs.get(jid) || { name: 'Job', color: null };
+        unassignedRows.push({
+          target_type: 'job',
+          kind: 'gantt', label: job.name, sub: 'nobody on it', color: job.color,
+          count: n, job_id: jid, id: jid, section_id: null, item_id: null,
+        });
+      }
+
       // ── INCOMPLETE rows. Gantt items NEVER list individually.
       const incompleteRows = [];
       for (const [jid, n] of incompleteGantt) {
         const job = jobs.get(jid) || { name: 'Job', color: null };
         incompleteRows.push({
+          target_type: 'job',
           kind: 'gantt', label: job.name, sub: 'Gantt chart', color: job.color,
-          count: n, job_id: jid, section_id: null, item_id: null,
+          count: n, job_id: jid, id: jid, section_id: null, item_id: null,
         });
       }
       for (const jid of noSchedule) {
         const job = jobs.get(jid) || { name: 'Job', color: null };
         incompleteRows.push({
+          target_type: 'job',
           kind: 'no-schedule', label: job.name, sub: 'no schedule', color: job.color,
-          count: 1, job_id: jid, section_id: null, item_id: null,
+          count: 1, job_id: jid, id: jid, section_id: null, item_id: null,
         });
       }
 
@@ -620,10 +767,29 @@ router.get('/exceptions', auth.authenticateToken, async (req, res) => {
       // has to remember to hide. §3.
       const bands = {};
       if (pastDueRows.length) bands.past_due = pastDueRows;
+      if (unassignedRows.length) bands.unassigned = unassignedRows;
       if (incompleteRows.length) bands.incomplete = incompleteRows;
       if (stalled.length) bands.stalled = stalled;
 
-      return res.status(200).json({ success: true, bands });
+      /*
+       * §4 — THE FOUR COUNTS, computed here rather than by the client.
+       *
+       * The number is what Poul checks every morning, so it has to mean the
+       * same thing as the page the row opens. A client counting array lengths
+       * would drift the moment a band rolls rows up: PAST DUE collapses two
+       * or more items on one job into a single row with a count, so
+       * `past_due.length` is the number of ROWS and not the number of late
+       * things. `Late` counts the things.
+       */
+      const sumCount = (rows) => rows.reduce((n, r) => n + (Number(r.count) || 1), 0);
+      const counts = {
+        late: sumCount(pastDueRows),
+        unassigned: sumCount(unassignedRows),
+        incomplete: sumCount(incompleteRows),
+        stalled: stalled.length,
+      };
+
+      return res.status(200).json({ success: true, bands, counts });
     } finally {
       connection.release();
     }

@@ -37,7 +37,12 @@ const daysFromNow = (n) => { const d = new Date(); d.setHours(0, 0, 0, 0); d.set
 
     await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT NULL, category INT NULL, created_by INT NULL, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, name VARCHAR(150), created_by INT NULL, status INT DEFAULT 1, color VARCHAR(20) NULL, client_id INT NULL, created_at DATETIME NULL)");
-    await conn.query("CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(150), user_id INT NULL, created_at DATETIME NULL)");
+    // FIXTURE WIDENED, NOT AN ASSERTION WEAKENED. §1 filters leads on
+    // `status` (3 = closed) and `bid_status` ('Archived'); without the
+    // columns the query throws, visibleLeadsForUser's caller swallows it into
+    // `leads = []`, and a lead that SHOULD be stalled simply vanishes. Both
+    // columns exist in production (routes/leads.js writes them).
+    await conn.query("CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(150), user_id INT NULL, status INT NULL, bid_status VARCHAR(40) NULL, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE tasks (id INT PRIMARY KEY AUTO_INCREMENT, job_id INT, user_id INT, created_by INT, task_type VARCHAR(20), task_name VARCHAR(190) NULL, status INT DEFAULT 0, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE checklist_sections (id INT PRIMARY KEY AUTO_INCREMENT, owner_user_id INT NULL, type VARCHAR(20) NULL, title VARCHAR(190), sort_order INT DEFAULT 0, job_id INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NULL)");
     await conn.query("CREATE TABLE check_list (id INT PRIMARY KEY AUTO_INCREMENT, section_id INT, name VARCHAR(255), due_date DATETIME NULL, status VARCHAR(20) NULL, created_by INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
