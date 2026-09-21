@@ -125,9 +125,16 @@ function readsJobTable(sql) {
   const EXPECTED = [
     'GET /day', 'GET /exceptions', 'GET /item-review', 'GET /stalled',
     'POST /item-review', 'POST /stall-snooze',
+    // ADDED DELIBERATELY, §4b. The bulk snooze takes one date and applies it
+    // to several ticked rows. It writes EXACTLY what POST /stall-snooze
+    // writes — the same upsert into dashboard_stall_snooze, per row, under
+    // the same validation — and it accepts job and lead targets only. It is
+    // not a delete and it touches nothing outside the caller's own view.
+    // This line is the acknowledgement the guard exists to force.
+    'POST /stall-snooze/bulk',
   ].sort();
   ok(JSON.stringify(routes) === JSON.stringify(EXPECTED),
-    'the dashboard router has exactly the six known routes — a new one lands here first',
+    'the dashboard router has exactly the seven known routes — a new one lands here first',
     JSON.stringify(routes));
 
   // ── the guard runs before every one of them ─────────────────────────

@@ -192,14 +192,31 @@ const plus = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); retu
       (900,'unassigned A',1,?,0,NULL),(900,'unassigned B',1,?,0,NULL),(900,'unassigned C',1,?,0,NULL)`,
       [fmt(THU), fmt(THU), fmt(THU)]);
     const ex2 = await request(app).get('/api/dashboard/exceptions').set('Authorization', tok(700, 14, 4));
-    const inc = ((ex2.body && ex2.body.bands) || {}).incomplete || [];
-    const ganttRows = inc.filter((r) => r.kind === 'gantt' && r.label === 'Lynes - ADU & Main House');
-    ok(ganttRows.length === 1,
-      'THREE incomplete Gantt items produce exactly ONE row for that job',
+    const bands2 = (ex2.body && ex2.body.bands) || {};
+    const inc = bands2.incomplete || [];
+    const una = bands2.unassigned || [];
+
+    // §4 UPDATED, NOT WEAKENED — THESE THREE ITEMS CHANGED BANDS ON PURPOSE.
+    //
+    // They are seeded with assignee_user_id NULL and a real start date, so
+    // under the old single clause (`no assignee OR no date`) they counted as
+    // INCOMPLETE. §4 splits that question in two because they are different
+    // jobs of work: these need a PERSON, not a date. The roll-up rule they
+    // were written to prove is unchanged and is asserted below on the band
+    // they now belong to.
+    const unaRows = una.filter((r) => r.kind === 'gantt' && r.label === 'Lynes - ADU & Main House');
+    ok(unaRows.length === 1,
+      'THREE items with nobody on them produce exactly ONE row for that job',
+      JSON.stringify(una));
+    ok(unaRows[0] && unaRows[0].count === 3 && unaRows[0].sub === 'nobody on it',
+      'that single row carries the count and says what is missing — a person',
+      JSON.stringify(unaRows[0]));
+
+    // THE OLD EXPECTATION, KEPT AS A NEGATIVE so the two cannot silently
+    // collapse back into one number.
+    ok(!inc.some((r) => r.kind === 'gantt' && r.label === 'Lynes - ADU & Main House'),
+      'and they are NOT in INCOMPLETE any more — "no assignee" and "no date" are two questions',
       JSON.stringify(inc));
-    ok(ganttRows[0] && ganttRows[0].count === 3 && ganttRows[0].sub === 'Gantt chart',
-      'that single row reads "<job> · Gantt chart" and carries the count',
-      JSON.stringify(ganttRows[0]));
 
     // ── §3: a band with zero items is ABSENT, not empty ─────────────────
     ok(!('stalled' in bands) || (bands.stalled && bands.stalled.length > 0),
