@@ -26,6 +26,8 @@ function ownerTypeOf(v) {
 const { upload } = require("../services/fileUpload");
 const { cloneRightsFromInviter } = require("../utils/rights");
 const { denyExpiredFreeWrites, getAccessMode, isSameAccount, canViewJob, resolveOwnerId, blockExpiredOwnJob, blockExpiredOwnRecord, OWNER_EXEMPT_EMAILS, denyRestrictedJobData, requireLevel } = require("../utils/access");
+// The account job predicate, shared with the dashboard. See accountScope.js.
+const { jobScopeWhere } = require("../services/accountScope");
 const { requireOwnsJob, ownsJob } = require("../utils/ownership");
 const { createAutoNotepadFor } = require("../services/notepadAccess");
 const { notepadMyTasksEnabled } = require("../services/featureFlags");
@@ -1145,24 +1147,15 @@ router.get("/jobs", auth.authenticateToken, async (req, res) => {
       // Being merely a passive contact does NOT surface a foreign job — per the
       // rule "a job isn't assigned to me unless a task (or bid) came to me".
       // (Bid-request surfacing will be added when the bid system is live.)
-      const ACCOUNT = "(SELECT id FROM `user` WHERE id = ? OR (created_by = ? AND category = 1))";
-      whereClause = `
-        WHERE
-          (
-            j.created_by IN ${ACCOUNT}
-            OR j.client_id IN ${ACCOUNT}
-            OR (
-              -- A job assigned to me by another contractor (via a task) only
-              -- shows while it is ACTIVE (status = 1). When they complete/archive
-              -- it, it disappears from my side.
-              j.status = 1
-              AND j.id IN (
-                SELECT DISTINCT job_id FROM tasks WHERE user_id IN ${ACCOUNT}
-              )
-            )
-          )
-      `;
-      whereParams = [managerId, managerId, managerId, managerId, managerId, managerId];
+      //
+      // THIS PREDICATE NOW LIVES IN services/accountScope.js AND IS SHARED.
+      // It was correct here and wrong on the dashboard, which used a
+      // different resolver and a bare `created_by = ?`. Moving it rather than
+      // copying it is the point: two functions that merely agree today are
+      // what produced the leak in the first place.
+      const scope = jobScopeWhere('j', managerId);
+      whereClause = `WHERE ${scope.sql}`;
+      whereParams = scope.params;
     }
 
     // 4 params for the two CASE "account" subqueries in addedBySelect.

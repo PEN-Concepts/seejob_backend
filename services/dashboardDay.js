@@ -23,6 +23,7 @@
  */
 
 const engine = require('./scheduleEngine');
+const { jobScopeWhere } = require('./accountScope');
 
 /** 'YYYY-MM-DD' for a Date, in local time. */
 function fmt(d) {
@@ -110,7 +111,19 @@ function ymdOf(dt) {
  */
 async function buildDayStream(connection, opts) {
   const uid = Number(opts.uid);
+  /**
+   * TWO OWNERS, ON PURPOSE — see the note on source 3.
+   *
+   *   owner    — the JOB account (resolveAccountOwner: employees only).
+   *              Everything about jobs, leads, appointments and schedules.
+   *   padOwner — the NOTEPAD account (accountOwnerOf: whoever invited you).
+   *              Only the company-pad clause of source 3.
+   *
+   * Collapsing them is the bug this file was fixed for. Defaulting padOwner
+   * to owner keeps old callers working without silently widening jobs.
+   */
   const owner = Number(opts.owner);
+  const padOwner = Number(opts.padOwner != null ? opts.padOwner : opts.owner);
   const fromYMD = opts.from;
   const toYMD = opts.to;
   const full = !!opts.full; // caller is on the notepad allowlist
@@ -123,9 +136,15 @@ async function buildDayStream(connection, opts) {
   const jobColor = new Map();
   const jobAddress = new Map();
   try {
+    // SCOPED through the shared account predicate — the same one the jobs
+    // list uses. This was `created_by = <owner>` against an owner that
+    // promoted subcontractors and clients to the contractor who invited
+    // them, which put that contractor's job names on their dashboard.
+    const scope = jobScopeWhere('j', owner);
     const [jobs] = await connection.query(
-      'SELECT id, name, color, job_address, job_city, job_state, job_zipcode FROM `job` WHERE created_by = ?',
-      [owner],
+      `SELECT j.id, j.name, j.color, j.job_address, j.job_city, j.job_state, j.job_zipcode
+         FROM \`job\` j WHERE ${scope.sql}`,
+      scope.params,
     );
     for (const j of jobs) {
       jobName.set(Number(j.id), j.name);
@@ -269,12 +288,24 @@ async function buildDayStream(connection, opts) {
 
   // ── 3. DATED NOTEPAD TASKS ────────────────────────────────────────────
   // Same three visibility clauses as notepadHub. Nothing is widened.
+  //
+  // THIS ONE USES padOwner, NOT owner, AND THE DIFFERENCE IS DELIBERATE.
+  // Jobs and notepads have different ownership models. A subcontractor is
+  // their own account for JOBS (they are a separate business), but they
+  // belong to the inviting contractor's NOTEPAD account — that is how
+  // delegated work reaches them, and notepadAccess documents it as
+  // intentional. Using the job owner here would have silently cut
+  // subcontractors off from the work sent to them.
+  //
+  // It is still gated: `full` is isFullAccess, so a subcontractor who is
+  // not on the allowlist gets only their own pads and pads shared with
+  // them by id, exactly as notepadHub gives them.
   try {
     const where = ['s.owner_user_id = ?'];
     const params = [uid];
     if (full) {
       where.push('(s.scope = \'company\' AND COALESCE(s.account_owner_id, s.owner_user_id) = ?)');
-      params.push(owner);
+      params.push(padOwner);
     }
     where.push('EXISTS (SELECT 1 FROM checklist_section_shares sh WHERE sh.section_id = s.id AND sh.user_id = ?)');
     params.push(uid);
@@ -326,6 +357,7 @@ async function buildDayStream(connection, opts) {
   // ── 4. DATED INSPECTION ROWS FROM JOB SCHEDULES ───────────────────────
   // (What the brief called "Master Calendar items".) Multi-day items fan out
   // across WORKING days only, per §8.
+  const inspScope = jobScopeWhere('j', owner);
   try {
     const [rows] = await connection.query(
       `SELECT i.id, i.name, i.duration_days, i.computed_start_date, i.computed_end_date,
@@ -334,8 +366,8 @@ async function buildDayStream(connection, opts) {
          FROM job_schedule_items i
          JOIN job_schedules sc ON sc.id = i.schedule_id
          JOIN \`job\` j ON j.id = sc.job_id
-        WHERE j.created_by = ? AND i.computed_start_date IS NOT NULL`,
-      [owner],
+        WHERE ${inspScope.sql} AND i.computed_start_date IS NOT NULL`,
+      inspScope.params,
     );
     for (const r of rows) {
       const start = ymdOf(r.computed_start_date);
