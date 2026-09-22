@@ -8,6 +8,7 @@ const { blockExpiredOwnRecord, requirePlan, OWNER_EXEMPT_EMAILS, denyRestrictedJ
 const { requireAccountOwner } = require("../utils/adminGate");
 const { requireOwnsJob } = require("../utils/ownership");
 const { countFlagged, withFlags, tbdNoteError, blankToNull, TBD_NOTE_MAX } = require("../services/budgetFlags");
+const { fetchBudgetExportData, buildBudgetWorkbook, budgetExportFilename } = require("../services/budgetWorkbook");
 
 // Payment methods a subcontractor payment can be recorded under.
 const PAYMENT_METHODS = new Set(["check", "cash", "credit_card", "venmo", "wire"]);
@@ -481,6 +482,108 @@ router.get("/lineitems", auth.authenticateToken, blockExpiredOwnRecord((r) => r.
     if (connection) connection.release();
   }
 });
+
+/* GET /export — the budget as a styled .xlsx workbook.
+ *
+ * WHO CAN EXPORT. This file contains your costs, what you pay each sub, and
+ * cheque numbers, so it is gated by COMPOSING THE GATES THAT ALREADY DECIDE WHO
+ * MAY SEE THAT DATA rather than by writing a fresh rule:
+ *
+ *   router-level  authenticateToken + requirePlan("platinum")
+ *                 + requireJobIdOwnership — the job must belong to the caller's
+ *                   account, enforced across every budget route
+ *   blockExpiredOwnRecord     an expired trial cannot pull its own financials
+ *   requireJobBudgetFeature   = denyRestrictedJobData + requirePlanFeatures
+ *   requireAccountOwner       payments are owner-only, and this workbook is
+ *                               mostly payments
+ *
+ * WHICH GATE ACTUALLY REFUSES WHOM — measured, not assumed (see
+ * test/budgetExport.test.js, which prints each refusal):
+ *
+ *   subcontractor / client  requireJobIdOwnership — "This job does not belong to
+ *                           your account." ownsOwnerRecord resolves them to
+ *                           THEMSELVES (resolveOwnerId promotes employees only),
+ *                           so the owner's job is never theirs.
+ *                           denyRestrictedJobData inside requireJobBudgetFeature
+ *                           is the second layer behind it.
+ *   employee                requireAccountOwner — it is the ONLY gate they
+ *                           reach and fail, which makes it the one the test
+ *                           pins directly.
+ *
+ * The refusal is a 403 with NO FILE, never a workbook with the cost columns
+ * blanked: a blanked file still tells you how many lines there are, who the subs
+ * are, and what the divisions cost to within a guess.
+ *
+ * There is deliberately NO client-facing variant and no `?for=client` flag. If a
+ * client export is wanted it is a SEPARATE builder with the cost columns absent,
+ * because a flag that removes columns is one wrong default away from sending a
+ * client your margins.
+ */
+router.get(
+  "/export",
+  auth.authenticateToken,
+  // No per-route ownership guard: `router.use(requireJobIdOwnership)` above
+  // already resolves job_id back to its true owner and refuses a foreign job on
+  // EVERY budget route. Adding requireOwnsJob here as well was a second copy of
+  // the same rule — removed, and the test proves the router-level one still
+  // refuses a subcontractor and a client by printing the message it returns.
+  blockExpiredOwnRecord((r) => r.query.job_id, (r) => r.query.job_type),
+  requireJobBudgetFeature,
+  requireAccountOwner,
+  async (req, res) => {
+    const { job_id, job_type } = req.query;
+    if (!job_id) return res.status(400).json({ message: "job_id is required" });
+
+    const ownerType = ownerTypeOf(job_type);
+    let connection;
+    try {
+      connection = await pool.getConnection();
+      // The same schema guards the page's own reads run, so an account that has
+      // never opened Budget can still export without a missing-column 500.
+      await ensureOwnerTypeColumns(connection);
+      await ensureSubCostColumn(connection);
+      await ensureInHouseColumn(connection);
+      await ensureAllowanceColumn(connection);
+      await ensureBudgetTbdColumns(connection);
+      await ensureBudgetPercentColumns(connection);
+      await ensurePaymentsTables(connection);
+
+      const data = await fetchBudgetExportData(connection, {
+        jobId: Number(job_id),
+        ownerType,
+        requestedByUserId: req.user && req.user.id,
+      });
+
+      const { workbook } = buildBudgetWorkbook(data);
+      const today = new Date();
+      const ymd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+      const filename = budgetExportFilename(data.job && data.job.name, ymd);
+
+      // RFC 5987 alongside a plain ASCII fallback: a job name with an accent or
+      // an em dash breaks a bare filename= in older clients.
+      const asciiName = filename.replace(/[^\x20-\x7e]/g, "_").replace(/"/g, "");
+      res.setHeader(
+        "Content-Type",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+      );
+      await workbook.xlsx.write(res);
+      return res.end();
+    } catch (err) {
+      logger.error("Error exporting budget workbook", err);
+      // Nothing has been written yet on the error paths above, so a JSON error
+      // is still valid here; once xlsx.write() has begun the response is binary
+      // and headersSent guards against corrupting it with JSON.
+      if (res.headersSent) return res.end();
+      return res.status(500).json({ message: "Failed to export budget" });
+    } finally {
+      if (connection) connection.release();
+    }
+  },
+);
 
 // POST /contingency - update contingency percentage for all lineitems of a job
 router.post("/contingency", auth.authenticateToken, blockExpiredOwnRecord((r) => r.body && r.body.job_id, (r) => r.body && r.body.job_type), requireJobBudgetFeature, async (req, res) => {
