@@ -2153,23 +2153,37 @@ router.get("/all-tasks", auth.authenticateToken, async (req, res) => {
   try {
     connection = await pool.getConnection();
 
-    // Determine manager for this user 
-    const [userRows] = await connection.query(
-      "SELECT created_by FROM user WHERE id = ?",
-      [loggedInUserId]
-    );
-
-    const managerId =
-      userRows.length && userRows[0].created_by
-        ? userRows[0].created_by
-        : loggedInUserId;
+    /*
+     * THE ACCOUNT OWNER, RESOLVED BY THE ONE HELPER THAT OWNS THAT QUESTION.
+     *
+     * This was `user.created_by || loggedInUserId` — promote ANYONE to whoever
+     * created them — and the result was used below as a ROW SELECTOR
+     * (`j.created_by = managerId`, `l.user_id = managerId`). A SUBCONTRACTOR is
+     * created_by the contractor who invited them, so that handed them the
+     * inviting contractor's ENTIRE job and lead list, on the endpoint the
+     * default dashboard (/spartan) calls on every login.
+     *
+     * It is the same defect as the dashboard tenant-scope leak, on a different
+     * endpoint: the same promoted id, used the same wrong way. resolveOwnerId
+     * promotes EMPLOYEES ONLY (category 1); a subcontractor resolves to
+     * themselves, so `created_by = <self>` selects nothing of anyone else's.
+     * GET /jobs already resolves it this way — this makes the two agree instead
+     * of keeping a second, looser copy of the rule.
+     *
+     * WHY THE RESOLVER AND NOT jobScopeWhere(): that predicate has no
+     * `job_contacts`, `task_assignees` or team clause, and this endpoint needs
+     * all three. Routing the whole WHERE through it would narrow a
+     * subcontractor further than intended — they would lose the jobs they are
+     * legitimately attached to. The resolver is the shared rule; the predicate
+     * is a different shape and forcing it here would be the second copy, not
+     * the cure.
+     */
+    const managerId = Number(await resolveOwnerId(loggedInUserId, connection));
 
     // CLIENT-only (Round 8): a Client's task list must show ONLY the jobs/leads
-    // and tasks actually assigned to THEM — not the owner's whole account (which
-    // is what the managerId-based branches below return, and why "My Daily Tasks"
-    // showed the owner's 26 tasks). Gate strictly on category 3; Subcontractors
-    // (category 2) are intentionally UNCHANGED this round. The assignee clause a
-    // client gets = assigned-to-me OR assigned-to-a-team-I'm-on.
+    // and tasks actually assigned to THEM. Gate strictly on category 3; a
+    // SUBCONTRACTOR no longer needs a gate here because `managerId` can no
+    // longer resolve to anybody else's account.
     const email = String(req.user?.email || "").trim().toLowerCase();
     const isClientViewer = Number(req.user && req.user.category) === 3 && !OWNER_EXEMPT_EMAILS.has(email);
     const clientTaskAssignee = `(
