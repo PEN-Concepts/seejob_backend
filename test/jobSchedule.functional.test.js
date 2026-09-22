@@ -35,9 +35,24 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // ---- Schema (only the columns the endpoint touches) ----
     await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), role INT NULL, category INT NULL, created_by INT NULL)");
     await conn.query("CREATE TABLE job (id INT PRIMARY KEY, name VARCHAR(150), status INT, created_by INT NULL)");
+    /* ── FIXTURE REPAIR, 2026-09-22 ────────────────────────────────────────
+     *
+     * THIS FILE WAS RED ON MAIN — all 14 assertions, every request 500ing.
+     * Not a regression: the endpoint grew columns and a whole table
+     * (job_schedules) that the fixture never gained, and nothing runs these
+     * files together, so it failed unnoticed. Found while investigating the
+     * carried-over boundary, and repaired as its own change so the repair is
+     * separable from the feature work that needed it.
+     *
+     * Every column below is one the endpoint's two queries actually SELECT or
+     * JOIN on — listed from routes/jobs.js rather than guessed by running and
+     * patching whatever error came back next. Nothing else was added, and no
+     * assertion was touched: the point is to make the existing checks run, not
+     * to change what they claim. */
     await conn.query(`CREATE TABLE tasks (
       id INT PRIMARY KEY, task_name VARCHAR(200), job_id INT, task_type VARCHAR(20),
       start_date DATETIME NULL, end_date DATETIME NULL, is_calendar_task TINYINT DEFAULT 0,
+      duration_days INT NULL, complete_percentage INT NULL,
       user_id INT NULL, team_id INT NULL, status INT DEFAULT 0, assignee_completed TINYINT DEFAULT 0,
       archived_at DATETIME NULL, created_by INT NULL)`);
     await conn.query("CREATE TABLE teams (id INT PRIMARY KEY, team_name VARCHAR(120))");
@@ -45,7 +60,16 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query("CREATE TABLE job_contacts (id INT PRIMARY KEY AUTO_INCREMENT, job_id INT, contact_id INT)");
     // Phase 2: a Gantt trade = a task with a linked job_schedule_items row; its
     // percent lives in gantt_stage_progress. task_assignees = full multi-assignee set.
-    await conn.query("CREATE TABLE job_schedule_items (id INT PRIMARY KEY, task_id INT NULL)");
+    /* job_schedules was MISSING ENTIRELY. The items query LEFT JOINs it for the
+     * two weekend-skip flags and reads js.status to drop on-hold and archived
+     * schedules, so its absence 500'd every request in this file. */
+    await conn.query(`CREATE TABLE job_schedules (
+      id INT PRIMARY KEY, job_id INT NULL, status VARCHAR(20) NULL,
+      skip_saturday TINYINT DEFAULT 1, skip_sunday TINYINT DEFAULT 1)`);
+    await conn.query("INSERT INTO job_schedules (id,job_id,status) VALUES (1,10,'active')");
+    await conn.query(`CREATE TABLE job_schedule_items (
+      id INT PRIMARY KEY, task_id INT NULL, schedule_id INT NULL, duration_days INT NULL,
+      computed_start_date DATE NULL, computed_end_date DATE NULL, pinned_start_date DATE NULL)`);
     await conn.query("CREATE TABLE gantt_stage_progress (id INT PRIMARY KEY AUTO_INCREMENT, schedule_item_id INT, job_id INT, owner_type VARCHAR(8) DEFAULT 'job', percent TINYINT DEFAULT 0)");
     await conn.query("CREATE TABLE task_assignees (id INT PRIMARY KEY AUTO_INCREMENT, task_id INT, user_id INT)");
 
@@ -82,7 +106,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       (11,'On external job',13,'job',${IN},0,999,NULL,0,0,NULL,700)          -- neither owner nor contractor sees
     `);
     // Task 8 (Stucco) is a real Gantt trade → schedule item 500 at 40% → type 'schedule'.
-    await conn.query("INSERT INTO job_schedule_items (id,task_id) VALUES (500,8)");
+    await conn.query("INSERT INTO job_schedule_items (id,task_id,schedule_id) VALUES (500,8,1)");
     await conn.query("INSERT INTO gantt_stage_progress (schedule_item_id,job_id,percent) VALUES (500,10,40)");
     // Task 2 (Order lumber) has TWO assignees → assignees array of both names.
     await conn.query("INSERT INTO task_assignees (task_id,user_id) VALUES (2,702),(2,701)");
@@ -92,7 +116,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       (21,'Old done task',10,'job','2026-08-28 08:00:00',0,701,NULL,1,1,NULL,700),         -- completed -> NOT carried
       (22,'Overdue trade',10,'job','2026-08-28 08:00:00',1,NULL,800,0,0,NULL,700)          -- a Gantt trade (schedule item) -> NEVER carried
     `);
-    await conn.query("INSERT INTO job_schedule_items (id,task_id) VALUES (501,22)");
+    await conn.query("INSERT INTO job_schedule_items (id,task_id,schedule_id) VALUES (501,22,1)");
 
     const express = require('express');
     app = express();
