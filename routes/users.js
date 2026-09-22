@@ -1796,12 +1796,18 @@ router.get("/getallusers", auth.authenticateToken, async (req, res) => {
     NULL AS team_name,
     NULL AS team_color
   FROM contact c
-  INNER JOIN user u ON u.id = c.request_user2
+  INNER JOIN user u ON u.id = c.request_to
   LEFT JOIN role r ON r.id = u.role
   -- No status filter: a contact is schedulable regardless of invite/acceptance
   -- state (Saved/Pending/Accept). Deleted contacts have no row, so they drop out
   -- naturally. Matches get-task-users so every dropdown shows the same full list.
-  WHERE c.request_user1 IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
+  --
+  -- Swapped off request_user1/request_user2 at the same time as get-task-users,
+  -- and for the same reason (nothing writes that pair — see the long note on
+  -- that endpoint). The comment directly above is why BOTH had to move together:
+  -- fixing one and not the other is precisely how the two lists come to
+  -- disagree, which this endpoint exists to prevent.
+  WHERE c.request_by IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
 )
 
 UNION
@@ -1820,9 +1826,9 @@ UNION
     NULL AS team_name,
     NULL AS team_color
   FROM contact c
-  INNER JOIN user u ON u.id = c.request_user1
+  INNER JOIN user u ON u.id = c.request_by
   LEFT JOIN role r ON r.id = u.role
-  WHERE c.request_user2 IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
+  WHERE c.request_to IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
 )
 
 UNION
@@ -2028,7 +2034,26 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
         NULL AS team_name,
         NULL AS team_color
       FROM (
-        -- Contacts where 1 sent the request
+        -- Contacts this account SENT the request to.
+        --
+        -- THESE JOIN request_by / request_to, NOT request_user1 / request_user2.
+        -- The contact table carries both pairs, but only request_by/request_to
+        -- is written: every one of the eleven INSERT INTO contact statements in
+        -- this codebase writes that pair (invitations.js:229, :2239, :2443,
+        -- :2572, :2610; jobs.js:398, :981; and the rest). request_user1/2 is a
+        -- pre-rename remnant that nothing has written for a long time, so these
+        -- two branches matched only the handful of surviving legacy rows and
+        -- the picker was being carried by the self / owner / employee branches
+        -- alone. That is why the contact count looked wrong on every screen
+        -- that calls this endpoint.
+        --
+        -- routes/budget.js was already fixed for exactly this and says so in
+        -- its own comment ("DEAD JOIN COLUMNS ... NOTHING WRITES THOSE"); this
+        -- was the last live read left on the dead pair.
+        --
+        -- TENANT SCOPING IS UNCHANGED. The WHERE still resolves through the
+        -- same account subquery, so this widens which of the caller's OWN
+        -- contact rows match — it does not widen whose rows they may be.
         SELECT
             u.id,
             u.name,
@@ -2043,15 +2068,16 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
             u.mobile,
             u.business AS business_name
         FROM contact c
-        INNER JOIN user u ON u.id = c.request_user2
+        INNER JOIN user u ON u.id = c.request_to
         LEFT JOIN role r ON r.id = u.role
         LEFT JOIN subcategory sc ON sc.id = u.subcategory
         LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
-        WHERE c.request_user1 IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
+        WHERE c.request_by IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
 
         UNION
 
-        -- Contacts where 1 received the request
+        -- Contacts who sent the request TO this account. Same column swap and
+        -- the same reasoning as the branch above; the pair is simply reversed.
         SELECT
             u.id,
             u.name,
@@ -2066,11 +2092,11 @@ router.get("/get-task-users", auth.authenticateToken, async (req, res) => {
             u.mobile,
             u.business AS business_name
         FROM contact c
-        INNER JOIN user u ON u.id = c.request_user1
+        INNER JOIN user u ON u.id = c.request_by
         LEFT JOIN role r ON r.id = u.role
         LEFT JOIN subcategory sc ON sc.id = u.subcategory
         LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
-        WHERE c.request_user2 IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
+        WHERE c.request_to IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
 
         UNION
 

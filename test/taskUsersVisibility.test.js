@@ -30,7 +30,13 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
       id INT PRIMARY KEY, name VARCHAR(190), email VARCHAR(190), role INT, category INT,
       subcategory INT, business VARCHAR(190), mobile VARCHAR(60), image VARCHAR(190),
       created_by INT, exit_type VARCHAR(10), can_view_all_contacts TINYINT DEFAULT 0, status TINYINT DEFAULT 1)`);
-    await conn.query(`CREATE TABLE contact (id INT PRIMARY KEY AUTO_INCREMENT, request_user1 INT, request_user2 INT)`);
+    // BOTH column pairs, because production has both. request_by/request_to is
+    // the live pair — every INSERT INTO contact in the codebase writes it.
+    // request_user1/request_user2 is a pre-rename remnant that nothing writes;
+    // it is present here only so that seeding it (as this fixture used to) is
+    // still expressible, and so a regression back onto it shows up as an empty
+    // picker rather than a missing-column error.
+    await conn.query(`CREATE TABLE contact (id INT PRIMARY KEY AUTO_INCREMENT, request_by INT, request_to INT, request_user1 INT, request_user2 INT)`);
     await conn.query(`CREATE TABLE category (id INT PRIMARY KEY, name VARCHAR(60))`);
     await conn.query(`CREATE TABLE subcategory (id INT PRIMARY KEY, name VARCHAR(60), category_id INT)`);
     await conn.query(`CREATE TABLE role (id INT PRIMARY KEY, name VARCHAR(60))`);
@@ -53,7 +59,12 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await U(600, 'Joshua Own Contact', 2, 376, 0);// a contact Joshua himself added
 
     // Contact rows: owner (74) is connected to all his people; Joshua (376) to his own (600).
-    const link = (a, b) => conn.query('INSERT INTO contact (request_user1,request_user2) VALUES (?,?)', [a, b]);
+    // Seeded through request_by/request_to — the pair production actually writes.
+    // This fixture used to seed request_user1/request_user2, which no INSERT in
+    // the codebase has written since the column rename. That is why this suite
+    // stayed green while twelve live pickers returned almost no contacts: it was
+    // asserting against a shape production never produces.
+    const link = (a, b) => conn.query('INSERT INTO contact (request_by,request_to) VALUES (?,?)', [a, b]);
     await link(74, 376); await link(74, 400); await link(74, 500); await link(74, 501);
     await link(376, 600);
 
