@@ -64,6 +64,22 @@ function loadMailer({ provider, breakSes }) {
 
   for (const k of Object.keys(require.cache)) {
     if (/services[\\/](mailer|emailSuppression)\.js$/.test(k)) delete require.cache[k];
+    // AND THE SES SDK ITSELF — otherwise breakSes silently stops working.
+    //
+    // The stub below throws from Module._resolveFilename. But Node short-circuits
+    // a repeat require of the same specifier from the same parent: it looks up
+    // relativeResolveCache FIRST and, on a hit whose Module._cache entry is still
+    // present, returns the cached exports without ever calling _resolveFilename.
+    // So once the SUCCESSFUL-CUTOVER section above has loaded the SDK, every
+    // later `breakSes: true` load quietly succeeds and the FAILED-CUTOVER section
+    // asserts against a boot that did not fall back.
+    //
+    // That is not hypothetical — it is exactly what happened the first time the
+    // dependency was actually installed: this suite went 22/0 to 18/7 while the
+    // mailer was provably correct in isolation. Deleting the Module._cache entry
+    // also invalidates its relativeResolveCache entry, so the next require goes
+    // back through _resolveFilename and the stub bites again.
+    if (/node_modules[\\/]@aws-sdk[\\/]client-ses[\\/]/.test(k)) delete require.cache[k];
   }
   // DELETE, never assign undefined: process.env stringifies, so assigning
   // undefined sets the literal "undefined" and the unset case is never tested.
