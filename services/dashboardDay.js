@@ -23,7 +23,7 @@
  */
 
 const engine = require('./scheduleEngine');
-const { jobScopeWhere, ACTIVE_JOB_SQL } = require('./accountScope');
+const { jobScopeWhere, ACTIVE_JOB_SQL, SECTION_ON_LIVE_JOB_SQL } = require('./accountScope');
 
 /** 'YYYY-MM-DD' for a Date, in local time. */
 function fmt(d) {
@@ -321,7 +321,26 @@ async function buildDayStream(connection, opts) {
          JOIN checklist_sections s ON s.id = c.section_id
         WHERE (${where.join(' OR ')})
           AND c.due_date IS NOT NULL
-          AND DATE(c.due_date) BETWEEN ? AND ?`,
+          AND DATE(c.due_date) BETWEEN ? AND ?
+          -- §1 — a task on a FINISHED job is not late, it is done with.
+          --
+          -- CARRIED ACROSS FROM /exceptions PAST DUE, WHICH HAD IT AND THIS
+          -- DID NOT. The two queries read the same table for the same reason
+          -- and disagreed: PAST DUE dropped a task on a completed or archived
+          -- job, the day stream kept it. Poul's words for the symptom were
+          -- "pulling up completed jobs that have been untouched in eighty
+          -- days, which makes no sense".
+          --
+          -- It showed up wrong as well as showing up at all: jobName below is
+          -- built from ACTIVE jobs only, so an inactive job's task found no
+          -- entry, came through with job_name null, and the day card drew it
+          -- with the NO JOB chip — a task from a finished job, labelled as
+          -- belonging to no job. One clause removes the row and the symptom.
+          --
+          -- Sections on a LEAD are unaffected, exactly as in PAST DUE: the
+          -- helper tests job_id only, so lead work keeps whatever treatment it
+          -- has there. Deliberately not widened here.
+          AND ${SECTION_ON_LIVE_JOB_SQL('s')}`,
       [...params, fromYMD, toYMD],
     );
     for (const it of items) {
