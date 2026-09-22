@@ -195,6 +195,27 @@ const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); retur
     // ════════════════════════════════════════════════════════════════════
     const today = fmt(new Date());
     await conn.query("INSERT INTO job_schedule_items (id,schedule_id,name,computed_start_date,computed_end_date,is_inspection) VALUES (10,1,'ACTIVE inspection',?,?,1),(11,2,'COMPLETED inspection',?,?,1)", [today, today, today, today]);
+
+    /* THE HOLE THIS FILE HAD, AND WHY IT WAS INVISIBLE.
+     *
+     * The day-stream section tested INSPECTIONS only — source 4, which carried
+     * ACTIVE_JOB_SQL and passed. The four check_list tasks above (100-103) are
+     * dated YESTERDAY, so they fall outside `from=today&to=today` and never
+     * reached this endpoint at all. Source 3 was therefore never exercised
+     * here, and it had no live-job clause: a dated notepad task on a completed
+     * or archived job appeared on the day cards.
+     *
+     * These four are dated TODAY, which is what puts them in the window. Same
+     * four jobs, same four states, on the query that was never checked. */
+    await conn.query(
+      "INSERT INTO check_list (id,section_id,name,due_date,status,created_by) VALUES " +
+      "(110,1,'TODAY on active',?, NULL,700)," +
+      "(111,2,'COMPLETED notepad task',?, NULL,700)," +
+      "(112,3,'ARCHIVED notepad task',?, NULL,700)," +
+      "(113,4,'TODAY with no job',?, NULL,700)",
+      [today, today, today, today],
+    );
+
     const day = await get(`/api/dashboard/day?from=${today}&to=${today}`);
     ok(day.status === 200, 'day: 200', `${day.status} ${JSON.stringify(day.body).slice(0, 200)}`);
     const rows = Object.values(day.body.days || {}).flat();
@@ -204,6 +225,32 @@ const daysAgo = (n) => { const d = new Date(); d.setDate(d.getDate() - n); retur
       'day: the active job\'s inspection stays', dayNames.join(' | '));
     ok(!dayNames.some((n) => n.includes('COMPLETED inspection')),
       'day: NO inspection from a completed job', dayNames.join(' | '));
+
+    // ── source 3, the one that had no clause ──────────────────────────────
+    ok(dayNames.some((n) => n === 'TODAY on active'),
+      'day: the active job\'s notepad task stays', dayNames.join(' | '));
+    ok(dayNames.some((n) => n === 'TODAY with no job'),
+      'day: a task on NO job stays — jobless is not finished', dayNames.join(' | '));
+    ok(!dayNames.some((n) => n === 'COMPLETED notepad task'),
+      'day: NO notepad task from a completed job', dayNames.join(' | '));
+    ok(!dayNames.some((n) => n === 'ARCHIVED notepad task'),
+      'day: NO notepad task from an archived job', dayNames.join(' | '));
+
+    /* THE SYMPTOM, ASSERTED SEPARATELY FROM THE CAUSE.
+     *
+     * jobName in dashboardDay.js is built from ACTIVE jobs only, so before the
+     * fix an inactive job's task resolved to job_name null and the day card
+     * drew it with the NO JOB chip — a task from a finished job, labelled as
+     * belonging to no job. Dropping the row removes the symptom too, but only
+     * this assertion proves it: EVERY row that comes back with no job_name
+     * must be one whose section genuinely has no job_id, never one whose job
+     * merely failed to resolve. */
+    const jobless = rows.filter((r) => !r.job_name);
+    const joblessNames = jobless.map((r) => String(r.title || ''));
+    note(`rows with no job_name: ${joblessNames.join(' | ') || '(none)'}`);
+    ok(jobless.every((r) => r.job_id == null),
+      'day: NO row renders NO JOB because its job failed to resolve',
+      jobless.filter((r) => r.job_id != null).map((r) => `${r.title} (job_id ${r.job_id})`).join(' | '));
 
     // ════════════════════════════════════════════════════════════════════
     // THE AMBER GUARANTEE — nothing was ADDED anywhere.
