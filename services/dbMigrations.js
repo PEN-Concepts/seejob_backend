@@ -751,6 +751,25 @@ async function ensureTaskManagerColumns(connection) {
   await ensureScheduleColumn(connection, 'tasks', 'is_urgent', 'TINYINT NOT NULL DEFAULT 0');
   await ensureScheduleColumn(connection, 'tasks', 'assignee_seen_at', 'DATETIME NULL');
   await ensureScheduleColumn(connection, 'tasks', 'completion_response', 'TEXT NULL');
+  /* tasks.all_day — the twin of appointments.all_day, and the same rule:
+   * THE COLUMN IS THE TRUTH, NEVER THE ABSENCE OF A TIME.
+   *
+   * A DATETIME cannot tell "3 Oct, all day" from "3 Oct at midnight" — both
+   * store 00:00:00 — which is the ambiguity this column exists to remove
+   * (routes/notepadDelegate.js:68 states the same rule for the date itself).
+   *
+   * NO BACKFILL, DELIBERATELY. Every existing row gets 0 and stays 0 until
+   * something sets it. Inferring all-day from a midnight start_date would
+   * write a GUESS into the data permanently, indistinguishable from a real
+   * answer, and would silently convert a task genuinely scheduled for midnight
+   * into an all-day task. If a backfill is ever wanted it is its own decision
+   * with its own evidence.
+   *
+   * It lives here rather than in its own ensure* function because this is the
+   * migration for the `tasks` table and it already runs in the right order;
+   * a separate function would need its own export and its own call site, which
+   * is where ordering mistakes come from. */
+  await ensureScheduleColumn(connection, 'tasks', 'all_day', 'TINYINT(1) NOT NULL DEFAULT 0');
   await ensureScheduleColumn(connection, 'tasks_images', 'kind', "VARCHAR(10) NOT NULL DEFAULT 'request'");
   await ensureScheduleColumn(connection, 'tasks_images', 'uploaded_by', 'INT NULL');
   taskManagerColumnsEnsured = true;
