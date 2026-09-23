@@ -1976,7 +1976,7 @@ router.post("/webhook", async (req, res) => {
 });
 
 // ─── Admin: Plan & Payment Status ──────────────────────────────────────────────
-// Sensitive billing data — gated by requireAdmin (super-admin 246 OR owner email).
+// Sensitive billing data — gated by requireAdmin (owner-exempt email only).
 
 const EMPLOYEE_CATEGORY = 1;
 const TRIAL_DAYS = 60;

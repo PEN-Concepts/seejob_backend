@@ -6,7 +6,8 @@
  *      - webhook REJECTS a missing/invalid signature (401) and does NOT mutate;
  *      - webhook ACCEPTS a correctly HMAC-SHA512-signed body and updates
  *        subscriptions.status (cancelled -> canceled, created -> active);
- *      - admin gate: id 246 OK, owner-exempt email OK, everyone else 403;
+ *      - admin gate: owner-exempt email OK, everyone else 403 INCLUDING the
+ *        former developer's id 246, whose hard-coded access was removed;
  *      - overview endpoint computes access_mode (paid/trial_active/expired_free),
  *        owner-exempt, employee-inherited, plan+price correctly;
  *      - live-status endpoint degrades gracefully when Authorize.Net isn't
@@ -98,6 +99,9 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     // 103 paying Gold, 104 employee of 103, 105 for webhook cancel test.
     await conn.query(`INSERT INTO \`user\` (id,name,email,role,category,subcategory,created_by,created_at) VALUES
       (100,'Owner Exempt','admin@oakcoast.net',14,2,NULL,NULL, NOW() - INTERVAL 400 DAY),
+      -- A SECOND owner-exempt address, so an admin action ON account 100 is not
+      -- also a self-action. 246 used to play this part and no longer can.
+      (99,'Owner Exempt Two','poul@oakcoast.net',14,2,NULL,NULL, NOW() - INTERVAL 400 DAY),
       (101,'Trial User','trial@x.com',14,2,NULL,NULL, NOW() - INTERVAL 5 DAY),
       (102,'Expired User','expired@x.com',14,2,NULL,NULL, NOW() - INTERVAL 90 DAY),
       (103,'Paying GC','paying@x.com',14,2,NULL,NULL, NOW() - INTERVAL 200 DAY),
@@ -178,9 +182,22 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     const [afterCreate] = await conn.query("SELECT status FROM subscriptions WHERE authorize_subscription_id='ARB123'");
     ok(afterCreate[0] && afterCreate[0].status === 'active', 'webhook: created event set local status -> active', afterCreate[0] && afterCreate[0].status);
 
-    // --- Admin gate ---
+    /* --- Admin gate ---
+     *
+     * USER 246 IS REFUSED, AND THAT IS THE POINT OF THIS BLOCK.
+     *
+     * It used to assert 200 here: id 246 ("gc gc") was hard-coded into
+     * isAdminUser and passed every admin gate. Poul identified that account as
+     * his FORMER WEB DEVELOPER — someone outside the company holding a standing
+     * key to the billing overview and to impersonating any user without their
+     * password. The id path is gone; the gate is Poul's two owner-exempt
+     * addresses and nothing else.
+     *
+     * 246 is still SEEDED above, deliberately. Deleting the fixture would make
+     * this pass because the user does not exist, which proves nothing. The user
+     * exists, is a perfectly ordinary role-14 account, and is refused. */
     const r246 = await request(app).get('/api/payments/admin/subscriptions-overview').set('Authorization', tok(246));
-    ok(r246.status === 200, 'gate: super-admin id 246 allowed (200)', String(r246.status));
+    ok(r246.status === 403, 'gate: former developer id 246 is REFUSED (403)', String(r246.status));
     const rOwner = await request(app).get('/api/payments/admin/subscriptions-overview').set('Authorization', tok(100));
     ok(rOwner.status === 200, 'gate: owner-exempt email allowed (200)', String(rOwner.status));
     const rReg = await request(app).get('/api/payments/admin/subscriptions-overview').set('Authorization', tok(101));
@@ -189,7 +206,11 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     ok(rAnon.status === 401, 'gate: no token -> 401', String(rAnon.status));
 
     // --- Overview correctness ---
-    const users = (r246.body && r246.body.users) || [];
+    /* Read the OWNER's response, not 246's. 246 is now refused, so its body is
+     * a 403 and every assertion below would be checking an empty list — which
+     * would fail loudly here, but in a suite with fewer assertions could quietly
+     * pass by finding nothing to contradict it. */
+    const users = (rOwner.body && rOwner.body.users) || [];
     const byId = new Map(users.map((u) => [u.id, u]));
     ok(byId.get(100) && byId.get(100).access_mode === 'paid' && byId.get(100).owner_exempt === true, 'overview: owner-exempt -> paid + flagged', JSON.stringify(byId.get(100)));
     ok(byId.get(101) && byId.get(101).access_mode === 'trial_active', 'overview: new user -> trial_active', byId.get(101) && byId.get(101).access_mode);
@@ -229,10 +250,10 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
 
     // --- Live-status graceful degradation (Authorize.Net not configured) ---
     const [goldSub] = await conn.query("SELECT id FROM subscriptions WHERE authorize_subscription_id='ARBGOLD'");
-    const liveRes = await request(app).get(`/api/payments/admin/subscription-live/${goldSub[0].id}`).set('Authorization', tok(246));
+    const liveRes = await request(app).get(`/api/payments/admin/subscription-live/${goldSub[0].id}`).set('Authorization', tok(100));
     ok(liveRes.status === 200 && liveRes.body.checked === false && liveRes.body.reason === 'authnet_not_configured', 'live: degrades to checked:false when Authorize.Net not configured', JSON.stringify(liveRes.body));
     const [noRemote] = await conn.query("SELECT id FROM subscriptions WHERE user_id=107 AND authorize_subscription_id IS NULL");
-    const liveNoRemote = await request(app).get(`/api/payments/admin/subscription-live/${noRemote[0].id}`).set('Authorization', tok(246));
+    const liveNoRemote = await request(app).get(`/api/payments/admin/subscription-live/${noRemote[0].id}`).set('Authorization', tok(100));
     ok(liveNoRemote.body && liveNoRemote.body.reason === 'no_authorize_subscription_id', 'live: sub with no ARB id -> no_authorize_subscription_id', JSON.stringify(liveNoRemote.body));
 
     // --- accept-config: sandbox env returns the sandbox script + fallback keys ---
@@ -256,11 +277,11 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     // --- go-live reverify endpoint flags all active subs (canceled + flagged) ---
     const [activeBefore] = await conn.query("SELECT COUNT(*) AS c FROM subscriptions WHERE status='active'");
     // Dry-run first: previews the count WITHOUT flagging anything.
-    const dryRev = await request(app).post('/api/payments/admin/reverify-sandbox-subscriptions').set('Authorization', tok(246)).send({ dryRun: true });
+    const dryRev = await request(app).post('/api/payments/admin/reverify-sandbox-subscriptions').set('Authorization', tok(100)).send({ dryRun: true });
     ok(dryRev.status === 200 && dryRev.body.dryRun === true && dryRev.body.active_count === Number(activeBefore[0].c), 'reverify dryRun: previews active count', JSON.stringify(dryRev.body));
     const [afterDry] = await conn.query("SELECT COUNT(*) AS c FROM subscriptions WHERE status='active'");
     ok(Number(afterDry[0].c) === Number(activeBefore[0].c), 'reverify dryRun: does NOT mutate (subs still active)', `${activeBefore[0].c} -> ${afterDry[0].c}`);
-    const rev = await request(app).post('/api/payments/admin/reverify-sandbox-subscriptions').set('Authorization', tok(246));
+    const rev = await request(app).post('/api/payments/admin/reverify-sandbox-subscriptions').set('Authorization', tok(100));
     ok(rev.status === 200 && rev.body.flagged === Number(activeBefore[0].c), 'reverify: flagged == active-before count', JSON.stringify(rev.body));
     const [stillActive] = await conn.query("SELECT COUNT(*) AS c FROM subscriptions WHERE status='active'");
     ok(Number(stillActive[0].c) === 0, 'reverify: no active subs remain', String(stillActive[0].c));
@@ -320,7 +341,7 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
       (201,4,99.00,'monthly','canceled',1, DATE_ADD(NOW(), INTERVAL 14 DAY))`);
 
     // Dry run (Email B) — recipient list, no send.
-    const dry = await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(246)).send({ emailType: 'B', dryRun: true });
+    const dry = await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(100)).send({ emailType: 'B', dryRun: true });
     const dryEmails = ((dry.body && dry.body.recipients) || []).map((r) => r.email);
     const skipReasons = ((dry.body && dry.body.skipped) || []).reduce((m, s) => { m[s.id] = s.reason; return m; }, {});
     ok(dry.status === 200 && dry.body.dryRun === true, 'send B (dryRun): returns a recipient list without sending', String(dry.status));
@@ -335,17 +356,17 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     await conn.query(`INSERT INTO subscriptions (user_id,plan_id,amount,billing_interval,status,needs_reverification,reverification_due_at) VALUES
       (202,4,99.00,'monthly','canceled',1, DATE_ADD(NOW(), INTERVAL 14 DAY)),
       (202,4,99.00,'monthly','active',0, NULL)`);
-    const dry2 = await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(246)).send({ emailType: 'B', dryRun: true });
+    const dry2 = await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(100)).send({ emailType: 'B', dryRun: true });
     const dry2Emails = ((dry2.body && dry2.body.recipients) || []).map((r) => r.email);
     ok(!dry2Emails.includes('acted@x.com'), 'send B: an owner who already re-subscribed is NOT re-emailed', JSON.stringify(dry2Emails));
 
     // Email A requires a migration date to actually send.
-    const aNoDate = await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(246)).send({ emailType: 'A' });
+    const aNoDate = await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(100)).send({ emailType: 'A' });
     ok(aNoDate.status === 400, 'send A: requires migrationDate to send', String(aNoDate.status));
 
     // Real send (Email B) — no SMTP configured in test, so sends fail-soft, but the
     // send path runs and every recipient is LOGGED (AC8).
-    const realB = await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(246)).send({ emailType: 'B' });
+    const realB = await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(100)).send({ emailType: 'B' });
     ok(realB.status === 200 && typeof realB.body.total === 'number', 'send B (real): returns a summary', JSON.stringify({ s: realB.status, total: realB.body && realB.body.total }));
     const [logRows] = await conn.query("SELECT COUNT(*) AS c FROM reverification_email_log WHERE email_type='B'");
     ok(Number(logRows[0].c) === Number(realB.body.total), 'send B: one audit-log row per recipient (recipient+type+timestamp)', `log=${logRows[0].c} total=${realB.body.total}`);
@@ -357,11 +378,11 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     // --- send history log endpoint ---
     // Dry-run must NOT write to the log (preview only).
     const [logBefore] = await conn.query("SELECT COUNT(*) AS c FROM reverification_email_log");
-    await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(246)).send({ emailType: 'B', dryRun: true });
+    await request(app).post('/api/payments/admin/send-reverification-email').set('Authorization', tok(100)).send({ emailType: 'B', dryRun: true });
     const [logAfter] = await conn.query("SELECT COUNT(*) AS c FROM reverification_email_log");
     ok(Number(logBefore[0].c) === Number(logAfter[0].c), 'history: a dry-run does NOT write a log row', `${logBefore[0].c} -> ${logAfter[0].c}`);
 
-    const hist = await request(app).get('/api/payments/admin/reverification-email-log').set('Authorization', tok(246));
+    const hist = await request(app).get('/api/payments/admin/reverification-email-log').set('Authorization', tok(100));
     ok(hist.status === 200 && Array.isArray(hist.body.entries) && hist.body.entries.length >= 1, 'history: endpoint returns log entries', JSON.stringify({ s: hist.status, n: hist.body && hist.body.entries && hist.body.entries.length }));
     ok(hist.body.entries[0].recipient_email && hist.body.entries[0].email_type && hist.body.entries[0].status, 'history: entries include recipient + type + status', JSON.stringify(hist.body.entries[0]));
     ok(hist.body.summary && typeof hist.body.summary === 'object', 'history: includes a status summary', JSON.stringify(hist.body.summary));
@@ -373,11 +394,14 @@ ok(!/DELETE FROM user WHERE id = \?/.test(adminCRSrc), 'source: old /delete_user
     ok(previewForbid.status === 403, 'account-delete: preview is owner-only (non-admin 403)', String(previewForbid.status));
     const delForbid = await request(app).delete('/api/payments/admin/account/101').set('Authorization', tok(101)).send({ confirmEmail: 'trial@x.com' });
     ok(delForbid.status === 403, 'account-delete: delete is owner-only (non-admin 403)', String(delForbid.status));
-    const delMismatch = await request(app).delete('/api/payments/admin/account/101').set('Authorization', tok(246)).send({ confirmEmail: 'wrong@x.com' });
+    const delMismatch = await request(app).delete('/api/payments/admin/account/101').set('Authorization', tok(100)).send({ confirmEmail: 'wrong@x.com' });
     ok(delMismatch.status === 400 && delMismatch.body.code === 'CONFIRM_MISMATCH', 'account-delete: wrong typed email is rejected (400)', JSON.stringify({ s: delMismatch.status, c: delMismatch.body && delMismatch.body.code }));
     const [stillThere] = await conn.query('SELECT COUNT(*) AS c FROM `user` WHERE id = 101');
     ok(Number(stillThere[0].c) === 1, 'account-delete: nothing deleted when the typed email is wrong', String(stillThere[0].c));
-    const delOwner = await request(app).delete('/api/payments/admin/account/100').set('Authorization', tok(246)).send({ confirmEmail: 'admin@oakcoast.net' });
+    // Acted by user 99 (the second owner-exempt address), so this stays an ADMIN
+    // deleting ANOTHER account and exercises OWNER_PROTECTED rather than the
+    // self-delete guard. 246 used to play this part.
+    const delOwner = await request(app).delete('/api/payments/admin/account/100').set('Authorization', tok(99)).send({ confirmEmail: 'admin@oakcoast.net' });
     ok(delOwner.status === 403 && delOwner.body.code === 'OWNER_PROTECTED', 'account-delete: owner-exempt account is protected (403)', JSON.stringify({ s: delOwner.status, c: delOwner.body && delOwner.body.code }));
     const [ownerStill] = await conn.query('SELECT COUNT(*) AS c FROM `user` WHERE id = 100');
     ok(Number(ownerStill[0].c) === 1, 'account-delete: the protected owner is untouched', String(ownerStill[0].c));

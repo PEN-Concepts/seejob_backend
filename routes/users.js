@@ -3923,14 +3923,20 @@ router.get("/check-device", async (req, res) => {
 
 
 // â”€â”€ Hidden impersonation endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Restricted to a single super-admin user (gc gc, id = 246). These endpoints
-// power a hidden "Impersonate" tab in the Angular app that lets that user
-// log in as any other user without their password.
-const IMPERSONATOR_USER_ID = 246;
-
-// Admin gate: super-admin id 246 OR an owner-exempt email (looked up by id).
-// Broadened from the old id-246-only check so the platform owner can reach admin
-// pages from their normal login; see utils/adminGate.js. Applied after auth.
+// Restricted to the owner-exempt addresses. These endpoints power a hidden
+// "Impersonate" tab in the Angular app that lets that user log in as any other
+// user WITHOUT THEIR PASSWORD — which is why the gate is an email allowlist and
+// nothing else.
+//
+// The hard-coded `IMPERSONATOR_USER_ID = 246` that used to sit here is GONE. It
+// was Poul's former web developer, and it named him as "the impersonator" in two
+// places below: the user list excluded him, and the endpoint refused to
+// impersonate him. Both meant "do not list or impersonate YOURSELF", so both now
+// read the authenticated caller instead. A hard-coded id cannot be revoked by
+// changing a password; it outlives the person.
+//
+// Admin gate: owner-exempt email only, looked up by id. See utils/adminGate.js.
+// Applied after auth.
 const { requireAdmin: requireImpersonator } = require("../utils/adminGate");
 
 // List every user in the system (id, name, email, role, category, mobile).
@@ -3952,7 +3958,7 @@ router.get(
            LEFT JOIN category c ON c.id = u.category
           WHERE u.id <> ?
           ORDER BY u.name ASC`,
-        [IMPERSONATOR_USER_ID]
+        [Number(req.user && req.user.id) || 0]
       );
       return res.status(200).json({
         code: '200',
@@ -3980,7 +3986,7 @@ router.post(
     if (!Number.isFinite(targetId) || targetId <= 0) {
       return res.status(400).json({ code: '400', message: 'Invalid user id', data: {} });
     }
-    if (targetId === IMPERSONATOR_USER_ID) {
+    if (targetId === Number(req.user && req.user.id)) {
       return res.status(400).json({ code: '400', message: 'Already this user', data: {} });
     }
 
@@ -4022,7 +4028,7 @@ router.post(
         rights,
         working_id,
         // Impersonation bypasses OTP/password gates by definition â€” the
-        // super-admin is already authenticated. Force these to a "verified"
+        // the caller is already authenticated. Force these to a "verified"
         // state in the issued token so the frontend doesn't bounce to the
         // verify-OTP / change-password screens.
         otp_status: 0,
@@ -4032,8 +4038,13 @@ router.post(
       const accessToken = jwt.sign(basicData, process.env.ACCESS_TOKEN, { expiresIn: '7d' });
       const photoName = user.image || 'user.png';
 
+      /* The actor is the AUTHENTICATED caller, not a hard-coded id. This line
+       * used to say "user 246" whoever did it, so the audit trail attributed
+       * every impersonation — including ones 246 never made — to him, and would
+       * have gone on attributing Poul's to him after his access was removed. An
+       * audit log that names the wrong person is worse than none. */
       logger.info(
-        `Impersonation: user 246 -> ${user.id} (${user.email}) - ${new Date()}`
+        `Impersonation: user ${Number(req.user && req.user.id) || 'unknown'} -> ${user.id} (${user.email}) - ${new Date()}`
       );
 
       return res.status(200).json({

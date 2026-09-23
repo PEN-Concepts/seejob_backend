@@ -59,7 +59,9 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     app.use('/api/payments', require('../routes/payments'));
     const tok = (id) => 'Bearer ' + jwt.sign({ id }, process.env.ACCESS_TOKEN);
 
-    const res = await request(app).get('/api/payments/admin/subscriptions-overview').set('Authorization', tok(246));
+    // 302 is the seeded poul@oakcoast.net. 246 (the former developer) no longer
+    // passes the admin gate — see utils/adminGate.js.
+    const res = await request(app).get('/api/payments/admin/subscriptions-overview').set('Authorization', tok(302));
     ok(res.status === 200 && Array.isArray(res.body.users), 'overview: 200 + users[]', String(res.status));
     const byId = new Map((res.body.users || []).map((u) => [u.id, u]));
 
