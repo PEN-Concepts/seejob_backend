@@ -9,6 +9,7 @@ const { addUserSchema } = require("../models/user");
 const { getAccessMode, resolveOwnerId, isSameAccount, denyExpiredFreeWrites, requireLevel } = require("../utils/access");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { applyLevelRights, applyToggles } = require("../services/permissionLevels");
+const { canWriteAppointment, statusFor } = require("../services/appointmentAccess");
 
 // For an expired_free user, keep ONLY appointments created by ANOTHER account
 // (i.e. ones they were invited to). Their OWN account's appointments are locked
@@ -1369,6 +1370,18 @@ router.delete('/appointments/:id', auth.authenticateToken, async (req, res) => {
     if (!apptId) return res.status(400).json({ message: 'Invalid appointment id' });
 
     connection = await pool.getConnection();
+
+    /* §1 — WHO MAY DELETE THIS. Checked BEFORE the transaction opens, so a
+     * refusal cannot leave one half-applied. Until this existed the query was
+     * `DELETE FROM appointments WHERE id = ?` with no ownership clause at all,
+     * so any authenticated user could delete any appointment in the database,
+     * including another company's. */
+    const mayDelete = await canWriteAppointment(connection, req.user && req.user.id, apptId);
+    if (!mayDelete.allowed) {
+      return res.status(statusFor(mayDelete.reason))
+        .json({ code: String(statusFor(mayDelete.reason)), message: mayDelete.message, data: {} });
+    }
+
     await connection.beginTransaction();
 
     // Detect whether appointments table has task_id column
@@ -1485,6 +1498,27 @@ router.put('/update_appointments/:id', auth.authenticateToken, async (req, res) 
       message: "Appointment ID is required",
       data: {},
     });
+  }
+
+  /* §1 — WHO MAY EDIT THIS. Same rule as the delete path, from the same module,
+   * because two copies of "who may change an appointment" is how they come to
+   * disagree. Until this existed the statement was
+   * `UPDATE appointments … WHERE id = ?` with no ownership clause at all. */
+  {
+    let authzConn;
+    try {
+      authzConn = await pool.getConnection();
+      const mayEdit = await canWriteAppointment(authzConn, req.user && req.user.id, Number(id));
+      if (!mayEdit.allowed) {
+        return res.status(statusFor(mayEdit.reason))
+          .json({ code: String(statusFor(mayEdit.reason)), message: mayEdit.message, data: {} });
+      }
+    } catch (e) {
+      logger.error('update_appointments authz: ' + e.message);
+      return res.status(403).json({ code: '403', message: 'Forbidden', data: {} }); // fail closed
+    } finally {
+      if (authzConn) authzConn.release();
+    }
   }
 
   // Format date and time safely without timezone shifts
