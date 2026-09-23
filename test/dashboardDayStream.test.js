@@ -39,7 +39,7 @@ const plus = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); retu
     const request = require('supertest');
     const jwt = require('jsonwebtoken');
 
-    await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT NULL, category INT NULL, created_by INT NULL, created_at DATETIME NULL)");
+    await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT NULL, category INT NULL, created_by INT NULL, created_at DATETIME NULL, business VARCHAR(190) NULL)");
     await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, name VARCHAR(150), created_by INT NULL, status INT DEFAULT 1, color VARCHAR(20) NULL, client_id INT NULL, job_address VARCHAR(190) NULL, job_city VARCHAR(90) NULL, job_state VARCHAR(90) NULL, job_zipcode VARCHAR(20) NULL, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE leads (id INT PRIMARY KEY, lead_name VARCHAR(150), user_id INT NULL, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE tasks (id INT PRIMARY KEY AUTO_INCREMENT, job_id INT, user_id INT, created_by INT, task_type VARCHAR(20), task_name VARCHAR(190) NULL, status INT DEFAULT 0, created_at DATETIME NULL)");
@@ -61,9 +61,12 @@ const plus = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); retu
     const { ensureDashboardSchema } = require('../services/dashboardSchema');
     await ensureDashboardSchema(conn);
 
-    await conn.query(`INSERT INTO \`user\` (id,name,email,role,category,created_by,created_at) VALUES
-      (700,'Poul','poul@x.com',14,4,NULL,NOW()),
-      (710,'Josh','josh@x.com',2,1,700,NOW())`);
+    await conn.query(`INSERT INTO \`user\` (id,name,email,role,category,created_by,created_at,business) VALUES
+      (700,'Poul','poul@x.com',14,4,NULL,NOW(),NULL),
+      (710,'Josh','josh@x.com',2,1,700,NOW(),NULL),
+      -- 711 carries a COMPANY; 710 does not. §4 renders company-over-person for
+      -- one and the person alone for the other, so both shapes are covered.
+      (711,'Martin Hernandez','martin@x.com',2,1,700,NOW(),'P & C PLASTERING')`);
     await conn.query("INSERT INTO `job` (id,name,created_by,color,job_address,job_city,created_at) VALUES (10,'Lynes - ADU & Main House',700,'#d9457a','301 Fair Oaks','Arroyo Grande',NOW()),(11,'Samuel - DECK',700,'#d94a2a','1145 Vard Loomis','Arroyo Grande',NOW())");
     await conn.query("INSERT INTO checklist_sections (id,owner_user_id,type,title,job_id,scope,origin,account_owner_id) VALUES (1,700,'task','Lynes - ADU & Main House',10,'company','auto',700)");
 
@@ -83,6 +86,13 @@ const plus = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); retu
       [fmt(THU) + ' 00:00:00']);
     await conn.query(
       "INSERT INTO check_list (id,section_id,name,due_date,all_day,status,created_by) VALUES (2,1,'No-time task',?,0,'new',700)",
+      [fmt(THU) + ' 00:00:00']);
+    // Two ASSIGNED rows so the assignee map is actually exercised — it never was.
+    await conn.query(
+      "INSERT INTO check_list (id,section_id,name,due_date,all_day,status,created_by,assign_to) VALUES (91,1,'Assigned to a company',?,1,'new',700,711)",
+      [fmt(THU) + ' 00:00:00']);
+    await conn.query(
+      "INSERT INTO check_list (id,section_id,name,due_date,all_day,status,created_by,assign_to) VALUES (92,1,'Assigned to a person',?,1,'new',700,710)",
       [fmt(THU) + ' 00:00:00']);
     await conn.query(
       "INSERT INTO check_list (id,section_id,name,due_date,all_day,status,created_by) VALUES (3,1,'Timed task',?,0,'new',700)",
@@ -217,6 +227,30 @@ const plus = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); retu
     ok(!inc.some((r) => r.kind === 'gantt' && r.label === 'Lynes - ADU & Main House'),
       'and they are NOT in INCOMPLETE any more — "no assignee" and "no date" are two questions',
       JSON.stringify(inc));
+
+    /* ── THE ASSIGNEE, WHICH NOTHING HAS EVER ASSERTED ──────────────────
+     *
+     * `assignee_name` has been emitted by this stream since it was written and
+     * NO test has ever looked at it. That was found while adding
+     * `assignee_company`: the new column made the user query throw against a
+     * fixture that lacked it, the catch emptied BOTH maps, and all 25 tests
+     * still passed — i.e. every assignee name could have vanished from the
+     * dashboard and the suite would have said nothing.
+     *
+     * So both fields are pinned here, in both shapes §4 renders:
+     *   711 has a company  -> company + person
+     *   710 has none       -> person, and company NULL (§4's "no second line")
+     */
+    const thuRows = days[fmt(THU)] || [];
+    const withCo = thuRows.find((r) => r.title === 'Assigned to a company');
+    const noCo = thuRows.find((r) => r.title === 'Assigned to a person');
+    ok(!!withCo && withCo.assignee_name === 'Martin Hernandez',
+      'assignee_name is emitted in full', withCo && withCo.assignee_name);
+    ok(!!withCo && withCo.assignee_company === 'P & C PLASTERING',
+      'assignee_company is emitted when the user has one', withCo && withCo.assignee_company);
+    ok(!!noCo && noCo.assignee_name === 'Josh' && noCo.assignee_company === null,
+      'a user with no business gets a name and a NULL company, not an empty string',
+      noCo && JSON.stringify({ n: noCo.assignee_name, c: noCo.assignee_company }));
 
     // ── §3: a band with zero items is ABSENT, not empty ─────────────────
     ok(!('stalled' in bands) || (bands.stalled && bands.stalled.length > 0),

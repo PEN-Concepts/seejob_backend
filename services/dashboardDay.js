@@ -158,10 +158,23 @@ async function buildDayStream(connection, opts) {
     }
   } catch (e) { /* no jobs readable */ }
 
+  /* `business` joins `name` here so the day card can render §4's two-line
+   * assignee: COMPANY on top, the person underneath. Without it every assignee
+   * fell through to §4's "no company" case — the person's name alone — and the
+   * green company line could not render at all, however the CSS was written.
+   *
+   * The column already exists and five other route files return it; this is the
+   * one read that did not. Still decoration: the catch leaves both maps empty
+   * rather than failing the day. */
   const userName = new Map();
+  const userCompany = new Map();
   try {
-    const [us] = await connection.query('SELECT id, name FROM `user` WHERE id = ? OR created_by = ?', [owner, owner]);
-    for (const u of us) userName.set(Number(u.id), u.name);
+    const [us] = await connection.query('SELECT id, name, business FROM `user` WHERE id = ? OR created_by = ?', [owner, owner]);
+    for (const u of us) {
+      userName.set(Number(u.id), u.name);
+      const biz = String(u.business || '').trim();
+      if (biz) userCompany.set(Number(u.id), biz);
+    }
   } catch (e) { /* names are decoration */ }
 
   // ── 1. APPOINTMENTS ───────────────────────────────────────────────────
@@ -188,6 +201,7 @@ async function buildDayStream(connection, opts) {
         job_color: jid ? (jobColor.get(jid) || null) : null,
         address: a.address || (jid ? jobAddress.get(jid) : '') || '',
         assignee_name: a.user_id ? (userName.get(Number(a.user_id)) || null) : null,
+        assignee_company: a.user_id ? (userCompany.get(Number(a.user_id)) || null) : null,
         starred: false,
         checkbox: false,          // §7: appointments have no checkbox
         is_inspection: false,
@@ -274,6 +288,7 @@ async function buildDayStream(connection, opts) {
           job_id: null, job_name: null, job_color: null,
           address: '',
           assignee_name: null,
+          assignee_company: null,
           starred: false,
           checkbox: true,
           // Read back from spartan_goal_log — see doneOn above.
@@ -363,6 +378,7 @@ async function buildDayStream(connection, opts) {
         job_color: jid ? (jobColor.get(jid) || null) : null,
         address: jid ? (jobAddress.get(jid) || '') : '',
         assignee_name: it.assign_to ? (userName.get(Number(it.assign_to)) || null) : null,
+        assignee_company: it.assign_to ? (userCompany.get(Number(it.assign_to)) || null) : null,
         starred: false,
         checkbox: true,
         // 'completed', not 'complete'. check_list.status only ever holds
@@ -414,6 +430,7 @@ async function buildDayStream(connection, opts) {
           job_color: jobColor.get(jid) || null,
           address: jobAddress.get(jid) || '',
           assignee_name: r.assignee_user_id ? (userName.get(Number(r.assignee_user_id)) || null) : null,
+          assignee_company: r.assignee_user_id ? (userCompany.get(Number(r.assignee_user_id)) || null) : null,
           starred: false,
           /*
            * NO CHECKBOX ON AN INSPECTION ROW. Ruled 2026-09-18.
