@@ -213,6 +213,44 @@ const money = (n) => '$' + Number(n).toFixed(2);
       return found;
     };
 
+    // ══ 1b. SHEET 1 CARRIES ALL EIGHT COLUMNS, IN ORDER ════════════════════
+    //
+    // This suite asserted the sheet names, the formulas, the frozen row and the
+    // print titles — and never the header labels themselves. The gap surfaced
+    // while wiring the Export button (FE #106): the CCP's checklist asked for
+    // the eight columns and the only evidence available was READING
+    // services/budgetWorkbook.js:373. Reading the source is what let a complete
+    // backend sit unreachable behind a CSV button for a week; it is not proof
+    // that the produced file has these columns.
+    //
+    // The eight are the contract between this workbook and the person opening
+    // it. Reorder or rename one and every downstream reference — a pasted
+    // formula, a saved filter, a client's own sheet — silently points at the
+    // wrong money. So they are pinned by NAME and by POSITION.
+    const EXPECTED_HEADERS = [
+      'CSI', 'Item', 'Allw', 'Subcontractor',
+      'Client budget', 'Sub cost', 'Paid to date', 'Remaining',
+    ];
+    const headerHit = findRow(budget, 1, 'CSI');
+    ok(!!headerHit, 'Sheet 1 has a header row starting with CSI');
+    if (headerHit) {
+      const actual = EXPECTED_HEADERS.map((_, i) => {
+        const v = headerHit.row.getCell(i + 1).value;
+        return v && typeof v === 'object' && 'richText' in v
+          ? v.richText.map((t) => t.text).join('')
+          : String(v ?? '').trim();
+      });
+      ok(actual.join('|') === EXPECTED_HEADERS.join('|'),
+        'Sheet 1 carries all eight columns, in order',
+        `got: ${actual.join('|')}`);
+
+      // And nothing beyond the eighth — a ninth header would mean a column was
+      // added without this list being updated.
+      const ninth = headerHit.row.getCell(9).value;
+      ok(ninth === null || ninth === undefined || String(ninth).trim() === '',
+        'and no ninth column has crept in past Remaining', String(ninth));
+    }
+
     // ══ 2. every total matches numbers computed INDEPENDENTLY here ══════════
     const rows = seeded.map((s, i) => ({ ...s, amount: L[i][2], sub_cost: L[i][3], div: L[i][0], allw: L[i][6], paid: L[i][7] }));
     const sum = (f, filter = () => true) => rows.filter(filter).reduce((a, r) => a + f(r), 0);
