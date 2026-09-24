@@ -31,6 +31,8 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT, category INT NULL, created_by INT NULL, image VARCHAR(190) NULL, status INT DEFAULT 1, token_version INT DEFAULT 0)");
     await conn.query("CREATE TABLE job (id INT PRIMARY KEY, name VARCHAR(120), created_by INT)");
     await conn.query("CREATE TABLE job_documents (id INT PRIMARY KEY AUTO_INCREMENT, path VARCHAR(255), name VARCHAR(190), job_id INT, mime_type VARCHAR(80) NULL, created_by INT NULL, type VARCHAR(30) NULL)");
+    await conn.query("CREATE TABLE tasks (id INT PRIMARY KEY, created_by INT, job_id INT NULL)");
+    await conn.query("CREATE TABLE tasks_images (id INT PRIMARY KEY AUTO_INCREMENT, task_id INT, file_path VARCHAR(255), file_name VARCHAR(190) NULL)");
     // A(100) owns job 900 with A_FILE; B(200) owns job 901 with B_FILE.
     await conn.query("INSERT INTO `user` (id,name,email,role,category,created_by) VALUES (100,'A','a@x.com',14,2,NULL),(200,'B','b@x.com',14,2,NULL)");
     await conn.query("INSERT INTO job (id,name,created_by) VALUES (900,'A Job',100),(901,'B Job',200)");
@@ -77,6 +79,19 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     // The file route refuses traversal too.
     r = await request(app).get('/api/files/' + encodeURIComponent('../../etc/passwd') + '?t=' + ftok(100));
     ok(r.status === 400 || r.status === 403, '4b. /files refuses traversal', r.status);
+
+    // ── SUBDIR: a task image lives in tasks/<id>/<name>; the URL carries only
+    //    the basename, and the route must resolve the real subdir path. ──
+    const SUB_FILE = 'task-' + Date.now() + '.txt';
+    fs.mkdirSync(path.join(UP, 'tasks', '77'), { recursive: true });
+    fs.writeFileSync(path.join(UP, 'tasks', '77', SUB_FILE), 'SUB-bytes');
+    await conn.query("INSERT INTO tasks (id,created_by) VALUES (770,100)");
+    await conn.query("INSERT INTO tasks_images (task_id,file_path,file_name) VALUES (770,?,?)", ['tasks/77/' + SUB_FILE, SUB_FILE]);
+    r = await request(app).get('/api/files/' + SUB_FILE + '?t=' + ftok(100));
+    ok(r.status === 200 && String(r.text).includes('SUB-bytes'), '8. a SUBDIR task image serves from its real path (basename URL -> tasks/77/x)', r.status + ' ' + String(r.text).slice(0, 20));
+    r = await request(app).get('/api/files/' + SUB_FILE + '?t=' + ftok(200));
+    ok(r.status === 403, '8. and a cross-company caller is still refused the subdir file', r.status);
+    try { fs.unlinkSync(path.join(UP, 'tasks', '77', SUB_FILE)); fs.rmdirSync(path.join(UP, 'tasks', '77')); fs.rmdirSync(path.join(UP, 'tasks')); } catch (_) {}
 
     // ── 9. NON-VACUITY: neuter the ownership check -> A gets B's file ──
     const fa = require('../services/fileAccess');

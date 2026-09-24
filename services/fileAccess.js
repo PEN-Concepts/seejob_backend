@@ -67,49 +67,36 @@ function isSafeName(name) {
  * notepad_gallery.notepad_id->notepad.user_id, user.image (the user itself),
  * equipments.created_by, chat_message_attachments->conversation->job.created_by.
  */
-async function fileOwnerId(conn, filename) {
+async function findFileRow(conn, filename) {
   const name = basenameOf(filename);
   if (!name) return null;
-  const like = "%" + name; // matches '/uploads/<name>', '/home/.../<name>', '<name>'
+  const like = "%" + name; // matches '/uploads/<name>', '/home/.../<name>', 'tasks/<id>/<name>', '<name>'
 
+  // Each returns the owning user AND the STORED path, so the caller can serve
+  // the file at its real on-disk location (task images live in a subdirectory,
+  // e.g. tasks/<id>/<name>, not the uploads root).
   const tries = [
-    // job documents & photos
-    `SELECT j.created_by AS owner FROM job_documents d JOIN job j ON j.id = d.job_id
-       WHERE d.path = ? OR d.path LIKE ? LIMIT 1`,
-    // task images
-    `SELECT t.created_by AS owner FROM tasks_images ti JOIN tasks t ON t.id = ti.task_id
-       WHERE ti.file_path = ? OR ti.file_path LIKE ? LIMIT 1`,
-    // notepad image(s) (comma-joined) / audio
-    `SELECT n.user_id AS owner FROM notepad n
-       WHERE n.image = ? OR FIND_IN_SET(?, n.image) OR n.audio_note = ? OR n.audio_note LIKE ? LIMIT 1`,
-    // notepad gallery
-    `SELECT n.user_id AS owner FROM notepad_gallery g JOIN notepad n ON n.id = g.notepad_id
-       WHERE g.image = ? OR FIND_IN_SET(?, g.image) OR g.image LIKE ? LIMIT 1`,
-    // user avatar (the file belongs to that user's account)
-    `SELECT id AS owner FROM \`user\` WHERE image = ? OR image LIKE ? LIMIT 1`,
-    // equipment
-    `SELECT created_by AS owner FROM equipments WHERE image = ? OR image LIKE ? LIMIT 1`,
-    // chat attachments -> job conversation -> job owner
-    `SELECT j.created_by AS owner
-       FROM chat_message_attachments a
-       JOIN chat_conversations cc ON cc.id = a.conversation_id
-       JOIN job j ON j.id = cc.job_id
-       WHERE a.file_path = ? OR a.file_path LIKE ? LIMIT 1`,
-  ];
-  const params = [
-    [name, like],
-    [name, like],
-    [name, name, name, like],
-    [name, name, like],
-    [name, like],
-    [name, like],
-    [name, like],
+    [`SELECT j.created_by AS owner, d.path AS spath FROM job_documents d JOIN job j ON j.id = d.job_id
+        WHERE d.path = ? OR d.path LIKE ? LIMIT 1`, [name, like]],
+    [`SELECT t.created_by AS owner, ti.file_path AS spath FROM tasks_images ti JOIN tasks t ON t.id = ti.task_id
+        WHERE ti.file_path = ? OR ti.file_path LIKE ? LIMIT 1`, [name, like]],
+    [`SELECT n.user_id AS owner, ? AS spath FROM notepad n
+        WHERE n.image = ? OR FIND_IN_SET(?, n.image) OR n.audio_note = ? OR n.audio_note LIKE ? LIMIT 1`, [name, name, name, name, like]],
+    [`SELECT n.user_id AS owner, ? AS spath FROM notepad_gallery g JOIN notepad n ON n.id = g.notepad_id
+        WHERE g.image = ? OR FIND_IN_SET(?, g.image) OR g.image LIKE ? LIMIT 1`, [name, name, name, like]],
+    [`SELECT id AS owner, image AS spath FROM \`user\` WHERE image = ? OR image LIKE ? LIMIT 1`, [name, like]],
+    [`SELECT created_by AS owner, image AS spath FROM equipments WHERE image = ? OR image LIKE ? LIMIT 1`, [name, like]],
+    [`SELECT j.created_by AS owner, a.file_path AS stored
+        FROM chat_message_attachments a
+        JOIN chat_conversations cc ON cc.id = a.conversation_id
+        JOIN job j ON j.id = cc.job_id
+        WHERE a.file_path = ? OR a.file_path LIKE ? LIMIT 1`, [name, like]],
   ];
 
-  for (let i = 0; i < tries.length; i++) {
+  for (const [sql, params] of tries) {
     try {
-      const [[row]] = await conn.query(tries[i], params[i]);
-      if (row && row.owner != null) return Number(row.owner);
+      const [[row]] = await conn.query(sql, params);
+      if (row && row.owner != null) return { owner: Number(row.owner), stored: String(row.spath || name) };
     } catch (_) {
       // a table may not exist on a bare schema — skip, never throw (fail closed
       // means "no owner found here", not "grant").
@@ -118,16 +105,53 @@ async function fileOwnerId(conn, filename) {
   return null;
 }
 
+/** The user id whose account owns the file, or null. */
+async function fileOwnerId(conn, filename) {
+  const row = await findFileRow(conn, filename);
+  return row ? row.owner : null;
+}
+
 /** Does this caller's account own the file? Fail closed on any error. */
 async function callerOwnsFile(conn, callerId, filename) {
   try {
     if (!isSafeName(basenameOf(filename))) return false;
-    const ownerId = await fileOwnerId(conn, filename);
-    if (ownerId == null) return false;
-    return await isSameAccount(callerId, ownerId, conn);
+    const row = await findFileRow(conn, filename);
+    if (!row) return false;
+    return await isSameAccount(callerId, row.owner, conn);
   } catch (_) {
     return false;
   }
+}
+
+/**
+ * The file's on-disk path RELATIVE TO uploads/, if the caller owns it — else
+ * null. Derived from the STORED reference, so a subdir'd file (tasks/<id>/<name>)
+ * is served from its real location, not a wrong uploads-root guess. Rejects any
+ * '..' segment so it can never escape uploads/.
+ */
+async function ownedRelPath(conn, callerId, filename) {
+  try {
+    if (!isSafeName(basenameOf(filename))) return null;
+    const row = await findFileRow(conn, filename);
+    if (!row) return null;
+    if (!(await isSameAccount(callerId, row.owner, conn))) return null;
+    return storedToRelPath(row.stored);
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Reduce a stored reference to a safe path relative to uploads/. */
+function storedToRelPath(stored) {
+  let s = String(stored || "").replace(/\\/g, "/").trim();
+  if (!s) return null;
+  // Everything after the LAST 'uploads/' is the part under the uploads dir.
+  const m = s.toLowerCase().lastIndexOf("uploads/");
+  if (m >= 0) s = s.slice(m + "uploads/".length);
+  s = s.replace(/^\/+/, "");
+  // No traversal, no absolute, no empty segment.
+  if (!s || s.split("/").some((seg) => seg === ".." || seg === "")) return null;
+  return s;
 }
 
 module.exports = {
@@ -138,4 +162,6 @@ module.exports = {
   isSafeName,
   fileOwnerId,
   callerOwnsFile,
+  ownedRelPath,
+  storedToRelPath,
 };

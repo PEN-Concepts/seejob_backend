@@ -19,7 +19,7 @@ const jwt = require("jsonwebtoken");
 const pool = require("../config/connection");
 const logger = require("../common/logger");
 const auth = require("../services/authentication");
-const { signFileToken, verifyFileToken, isSafeName, basenameOf, callerOwnsFile } = require("../services/fileAccess");
+const { signFileToken, verifyFileToken, isSafeName, basenameOf, ownedRelPath } = require("../services/fileAccess");
 
 const UPLOADS_DIR = path.join(__dirname, "..", "uploads");
 
@@ -61,12 +61,16 @@ router.get("/:name", async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
-    const owns = await callerOwnsFile(connection, callerId, name);
-    if (!owns) return res.status(403).json({ message: "This file does not belong to your account." });
+    // The caller must own the file; we get back its REAL path under uploads
+    // (a task image lives in tasks/<id>/, not the uploads root).
+    const rel = await ownedRelPath(connection, callerId, name);
+    if (!rel) return res.status(403).json({ message: "This file does not belong to your account." });
 
-    const full = path.join(UPLOADS_DIR, name);
+    const full = path.join(UPLOADS_DIR, rel);
     // Defence in depth: the resolved absolute path must still sit inside uploads.
-    if (!full.startsWith(UPLOADS_DIR)) return res.status(400).json({ message: "Invalid file name" });
+    if (!full.startsWith(UPLOADS_DIR + path.sep) && full !== UPLOADS_DIR) {
+      return res.status(400).json({ message: "Invalid file name" });
+    }
     if (!fs.existsSync(full)) return res.status(404).json({ message: "File not found" });
     return res.sendFile(full);
   } catch (err) {
