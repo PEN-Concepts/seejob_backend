@@ -63,6 +63,10 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     //  306 past-due (past_due Gold)          307 CSLB artifact WITH a sub (anomaly)
     //  308 seed-owner (ARB 73729730)
     await conn.query(`INSERT INTO \`user\` (id,name,email,password,role,category,subcategory,created_by,created_at) VALUES
+      -- 399 is the owner-exempt address the admin gate now requires. 246 (the
+      -- former developer) no longer passes it. No subscription, so the paying
+      -- counters below are unaffected.
+      (399,'Owner','poul@oakcoast.net','',14,2,NULL,NULL, NOW() - INTERVAL 300 DAY),
       (300,'AV Dirtworks LLC','lic-1148867@no-email.invalid','',12,2,12,100, NOW() - INTERVAL 10 DAY),
       (301,'Placeholder Client','client-acme-1@no-email.invalid','',3,3,11,100, NOW() - INTERVAL 10 DAY),
       (302,'Invited Never','invited@x.com','',14,2,NULL,NULL, NOW() - INTERVAL 3 DAY),
@@ -129,7 +133,7 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     app.use('/api/payments', payments);
     const tok = (id) => 'Bearer ' + jwt.sign({ id }, process.env.ACCESS_TOKEN);
 
-    const r = await request(app).get('/api/payments/admin/subscriptions-overview').set('Authorization', tok(246));
+    const r = await request(app).get('/api/payments/admin/subscriptions-overview').set('Authorization', tok(399));
     ok(r.status === 200, "overview: 200", JSON.stringify(r.body).slice(0,300));
     const users = (r.body && r.body.users) || [];
     const byId = new Map(users.map((u) => [u.id, u]));
