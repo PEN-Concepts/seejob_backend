@@ -2065,6 +2065,25 @@ router.delete('/accepted-contacts/:contactUserId', auth.authenticateToken, async
   try {
     connection = await pool.getConnection();
     const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
+
+    // §4 A JOB'S CLIENT CAN'T BE DELETED OUT FROM UNDER ITS JOB. Deleting one
+    // left job.client_id / job_contacts pointing at a gone contact, and the
+    // next client-sync re-created the link — the "deleted contact rises again"
+    // bug. Block it, name the job, and make the user reassign first. This is
+    // what guarantees no orphan and no resurrection.
+    const jobLink = await jobLinkOf(connection, ownerId, contactUserId);
+    if (jobLink) {
+      const [[who]] = await connection.query('SELECT name FROM `user` WHERE id = ? LIMIT 1', [contactUserId]);
+      const nm = (who && who.name) ? who.name.split(' ')[0] : 'This contact';
+      return res.status(409).json({
+        code: 'ON_JOB',
+        job: { id: jobLink.id, name: jobLink.name },
+        message: jobLink.asClient
+          ? `${nm} is the client on the ${jobLink.name} job. Change that job's client first, then delete.`
+          : `${nm} is on the ${jobLink.name} job. Remove them from that job first, then delete.`,
+      });
+    }
+
     const [result] = await connection.query(
       `DELETE FROM contact
        WHERE (request_by IN ${ACCOUNT} AND request_to = ?)
@@ -2171,10 +2190,41 @@ router.post('/purge-duplicate-contacts', auth.authenticateToken, async (req, res
 });
 
 // ── Update a contact's profile info (business_name, license, address) ──
+/**
+ * Is `userId` a job's CLIENT within this account, or attached to one of its
+ * jobs? Returns the first such job's `{ id, name, asClient }` or null.
+ *   asClient=true  -> job.client_id points at them (the "client on the X job")
+ *   asClient=false -> they are on the job via job_contacts (a job contact)
+ * Drives BOTH the merge survivor (a job's client wins) and the delete block
+ * (a job's client can't be deleted out from under its job). Account-scoped.
+ */
+async function jobLinkOf(connection, ownerId, userId) {
+  const ACCT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
+  const [[asClient]] = await connection.query(
+    `SELECT id, name FROM job WHERE created_by IN ${ACCT} AND client_id = ? LIMIT 1`,
+    [ownerId, ownerId, userId]
+  );
+  if (asClient) return { id: asClient.id, name: asClient.name, asClient: true };
+  const [[onJob]] = await connection.query(
+    `SELECT j.id, j.name FROM job_contacts jc JOIN job j ON j.id = jc.job_id
+      WHERE j.created_by IN ${ACCT} AND jc.contact_id = ? LIMIT 1`,
+    [ownerId, ownerId, userId]
+  );
+  if (onJob) return { id: onJob.id, name: onJob.name, asClient: false };
+  return null;
+}
+
+/** Non-empty-wins column update fragment: a value the user actually typed
+ *  overwrites; a blank leaves the stored value alone (never wipes). */
+const KEEP = (col) => `${col} = COALESCE(NULLIF(TRIM(?), ''), ${col})`;
+
 router.post('/update-contact-info', auth.authenticateToken, async (req, res) => {
   // Account-wide: any member of the account (owner or employee) can edit a
   // company contact, regardless of which teammate originally added it.
   const ownerId = res.locals.working_id || req.user.id;
+  // Two-phase merge: the FE re-submits with confirmMerge:true after the user
+  // OKs the merge dialog. Without it, a merge is previewed, never performed.
+  const confirmMerge = req.body.confirmMerge === true || req.body.confirmMerge === 'true';
   const { contact_user_id, mobile, email, business_name, license_number, license_state, manual_status, address, spouse_name, spouse_email, spouse_phone, first_name, last_name, spouse_last_name } = req.body;
   if (!contact_user_id) return res.status(400).json({ message: 'contact_user_id required' });
 
@@ -2205,109 +2255,164 @@ router.post('/update-contact-info', auth.authenticateToken, async (req, res) => 
 
     await ensureCslbColumns(connection);
 
-    // ── "Link, don't duplicate" ────────────────────────────────────────────
-    // Email must stay globally unique — login is email+OTP, so two rows sharing
-    // an email would make login ambiguous (an OTP could land on the wrong row).
-    // So if the email being saved already belongs to a DIFFERENT user, we can't
-    // move it onto the edited row. Instead: link this account to that existing
-    // person, fill in any details they're missing (never overwriting theirs),
-    // and drop the duplicate placeholder — the contact list then shows one real
-    // record instead of a dead-end "email already used by another contact" error.
+    // ── Auto-link, made SAFE ───────────────────────────────────────────────
+    // Email is globally unique (login is email+OTP), so two contacts can't both
+    // hold one email. When the entered email already belongs to another row we
+    // MERGE the two into one — but scoped, asked-first, and resolving into the
+    // job's client. The old code enriched blanks-only, linked silently, dropped
+    // the edited row (so the edit never saved), and matched ACROSS companies.
     if (email && String(email).trim()) {
+      // SCOPE (security): only a row in THIS account is a merge candidate —
+      // a contact of the account, or a user the account created. A match that
+      // is NOT in scope belongs to another company: never link or enrich it,
+      // just report the email as taken. This closes the cross-tenant hole.
       const [[emailOwner]] = await connection.query(
-        'SELECT id, name FROM `user` WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) AND id <> ? LIMIT 1',
-        [email, contact_user_id]
+        `SELECT u.id, u.name, u.email FROM \`user\` u
+          WHERE LOWER(TRIM(u.email)) = LOWER(TRIM(?)) AND u.id <> ?
+            AND ( u.created_by IN ${ACCOUNT}
+                  OR EXISTS (SELECT 1 FROM contact c
+                              WHERE (c.request_by IN ${ACCOUNT} AND c.request_to = u.id)
+                                 OR (c.request_to IN ${ACCOUNT} AND c.request_by = u.id)) )
+          LIMIT 1`,
+        [email, contact_user_id, ownerId, ownerId, ownerId, ownerId, ownerId, ownerId]
       );
-      if (emailOwner) {
-        const targetId = Number(emailOwner.id);
-        await ensureContactStatusColumn(connection);
-        // 1) enrich the existing person ADDITIVELY — never overwrite their data
-        await connection.query(
-          `UPDATE \`user\`
-             SET name = IF(name IS NULL OR name = '', COALESCE(?, name), name),
-                 first_name = IF(first_name IS NULL OR first_name = '', COALESCE(?, first_name), first_name),
-                 last_name = IF(last_name IS NULL OR last_name = '', COALESCE(?, last_name), last_name),
-                 mobile = IF(mobile IS NULL OR mobile = '', COALESCE(?, mobile), mobile),
-                 business = IF(business IS NULL OR business = '', COALESCE(?, business), business),
-                 organization_name = IF(organization_name IS NULL OR organization_name = '', COALESCE(?, organization_name), organization_name),
-                 license_number = COALESCE(license_number, ?),
-                 license_state = COALESCE(license_state, ?),
-                 address = IF(address IS NULL OR address = '', COALESCE(?, address), address)
-           WHERE id = ?`,
-          [name || null,
-           first_name != null ? (first_name || '') : null,
-           last_name != null ? (last_name || '') : null,
-           mobile || null, business_name || null, business_name || null,
-           license_number || null, license_state || null, address || null, targetId]
+      if (!emailOwner) {
+        // Is the email held by SOMEONE (another company)? Then it is simply
+        // taken — a clean 409, with no cross-tenant read/enrich.
+        const [[taken]] = await connection.query(
+          'SELECT 1 AS x FROM `user` WHERE LOWER(TRIM(email)) = LOWER(TRIM(?)) AND id <> ? LIMIT 1',
+          [email, contact_user_id]
         );
-        // 2) ensure this account is linked to the existing person
-        const [[link]] = await connection.query(
-          `SELECT id FROM contact
-             WHERE (request_by IN ${ACCOUNT} AND request_to = ?)
-                OR (request_to IN ${ACCOUNT} AND request_by = ?)
-             LIMIT 1`,
-          [ownerId, ownerId, targetId, ownerId, ownerId, targetId]
-        );
-        if (!link) {
-          await connection.query(
-            `INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
-             VALUES (?, ?, 'Saved', NOW(), NOW())`,
-            [ownerId, targetId]
-          );
+        if (taken) {
+          return res.status(409).json({ code: 'EMAIL_TAKEN', message: 'That email address is already in use.' });
         }
-        // 3) drop this account's link to the old placeholder row (swap it out)
-        if (Number(contact_user_id) !== targetId) {
+        // else: nobody has it -> fall through to a normal edit below.
+      } else {
+        await ensureContactStatusColumn(connection);
+        const targetId = Number(emailOwner.id);
+        const editedJob = await jobLinkOf(connection, ownerId, contact_user_id);
+        const otherJob = await jobLinkOf(connection, ownerId, targetId);
+
+        // Both are clients of DIFFERENT jobs -> never collapse two jobs'
+        // clients into one. Keep them separate and say so.
+        if (editedJob && otherJob && editedJob.asClient && otherJob.asClient && editedJob.id !== otherJob.id) {
+          return res.status(409).json({
+            code: 'BOTH_ON_JOBS',
+            message: `These are the clients on two different jobs (${editedJob.name} and ${otherJob.name}), so they can't be merged. Keep them separate, or change one job's client first.`,
+          });
+        }
+
+        // Survivor = the job's client if exactly one is on a job; otherwise the
+        // contact being edited (default). The survivor keeps the email and the
+        // job link; the other becomes the emptied duplicate.
+        const otherIsJobClient = !!(otherJob && otherJob.asClient);
+        const survivorId = otherIsJobClient ? targetId : Number(contact_user_id);
+        const loserId = survivorId === targetId ? Number(contact_user_id) : targetId;
+        const survivorName = otherIsJobClient ? (emailOwner.name || 'the job contact') : (name || emailOwner.name || 'this contact');
+        const survivorJob = otherIsJobClient ? otherJob : editedJob;
+
+        // ASK FIRST. Without confirmation we only PREVIEW — no writes.
+        if (!confirmMerge) {
+          return res.json({
+            needsMerge: true,
+            survivor_user_id: survivorId,
+            loser_user_id: loserId,
+            survivor_name: survivorName,
+            job: survivorJob ? { id: survivorJob.id, name: survivorJob.name } : null,
+            message: survivorJob
+              ? `That email already belongs to "${survivorName}", the client on the ${survivorJob.name} job. Merge into that contact? The job keeps its client.`
+              : `That email already belongs to "${survivorName}". Merge these two contacts into one?`,
+          });
+        }
+
+        // ── CONFIRMED MERGE (transactional) ─────────────────────────────────
+        await connection.beginTransaction();
+        try {
+          // Email uniqueness: only one row may hold it. If the survivor isn't
+          // the current holder, move it off the loser first (both same account).
+          if (survivorId !== targetId) {
+            await connection.query('UPDATE `user` SET email = NULL WHERE id = ?', [loserId]);
+          }
+          // Write the survivor: the user's typed values (non-empty) win, and
+          // the loser's non-empty fields fill anything still blank. Never wipe.
+          await connection.query(
+            `UPDATE \`user\` SET
+               ${KEEP('name')}, ${KEEP('first_name')}, ${KEEP('last_name')},
+               ${KEEP('mobile')}, ${KEEP('email')}, ${KEEP('business')},
+               ${KEEP('organization_name')}, ${KEEP('license_number')},
+               ${KEEP('license_state')}, ${KEEP('address')}
+             WHERE id = ?`,
+            [name, first_name, last_name, mobile, email, business_name, business_name,
+             license_number, license_state, address, survivorId]
+          );
+          // Fill the survivor's still-blank fields from the loser (never overwrite).
+          await connection.query(
+            `UPDATE \`user\` s
+               JOIN \`user\` l ON l.id = ?
+               SET s.name = COALESCE(NULLIF(TRIM(s.name), ''), l.name),
+                   s.first_name = COALESCE(NULLIF(TRIM(s.first_name), ''), l.first_name),
+                   s.last_name = COALESCE(NULLIF(TRIM(s.last_name), ''), l.last_name),
+                   s.mobile = COALESCE(NULLIF(TRIM(s.mobile), ''), l.mobile),
+                   s.business = COALESCE(NULLIF(TRIM(s.business), ''), l.business),
+                   s.organization_name = COALESCE(NULLIF(TRIM(s.organization_name), ''), l.organization_name),
+                   s.license_number = COALESCE(s.license_number, l.license_number),
+                   s.license_state = COALESCE(s.license_state, l.license_state),
+                   s.address = COALESCE(NULLIF(TRIM(s.address), ''), l.address)
+             WHERE s.id = ?`,
+            [loserId, survivorId]
+          );
+          // Point this account's link at the survivor; drop the loser's link.
+          const [[link]] = await connection.query(
+            `SELECT id FROM contact
+               WHERE (request_by IN ${ACCOUNT} AND request_to = ?) OR (request_to IN ${ACCOUNT} AND request_by = ?)
+               LIMIT 1`,
+            [ownerId, ownerId, survivorId, ownerId, ownerId, survivorId]
+          );
+          if (!link) {
+            await connection.query(
+              `INSERT INTO contact (request_by, request_to, status, created_at, updated_at) VALUES (?, ?, 'Saved', NOW(), NOW())`,
+              [ownerId, survivorId]
+            );
+          }
           await connection.query(
             `DELETE FROM contact
-               WHERE (request_by IN ${ACCOUNT} AND request_to = ?)
-                  OR (request_to IN ${ACCOUNT} AND request_by = ?)`,
-            [ownerId, ownerId, contact_user_id, ownerId, ownerId, contact_user_id]
+               WHERE (request_by IN ${ACCOUNT} AND request_to = ?) OR (request_to IN ${ACCOUNT} AND request_by = ?)`,
+            [ownerId, ownerId, loserId, ownerId, ownerId, loserId]
           );
+          await connection.commit();
+        } catch (mErr) {
+          try { await connection.rollback(); } catch (_) {}
+          throw mErr;
         }
         return res.json({
           merged: true,
-          linked_user_id: targetId,
-          message: `That email already belongs to "${emailOwner.name || 'an existing contact'}", so that record was linked to your contacts and the details filled in.`,
+          survivor_user_id: survivorId,
+          linked_user_id: survivorId,
+          message: `Merged into "${survivorName}".`,
         });
       }
     }
 
-    // Out-of-state licenses have no auto-checker; the status is set manually
+    // §1 A SAVE MUST SAVE, non-empty-wins. A value the user typed OVERWRITES the
+    // stored one (so a wrong phone can be corrected); a field left blank is
+    // PRESERVED, never wiped. The old query mixed COALESCE (couldn't clear) with
+    // `= ?` (blank WIPED license/address/spouse) — both wrong.
     const stateUpper = (license_state || 'CA').toUpperCase();
-    let sql = `UPDATE \`user\`
-       SET name = COALESCE(?, name),
-           first_name = COALESCE(?, first_name),
-           last_name = COALESCE(?, last_name),
-           mobile = COALESCE(?, mobile),
-           email = COALESCE(?, email),
-           business = COALESCE(?, business),
-           organization_name = COALESCE(?, organization_name),
-           license_number = ?,
-           license_state = ?,
-           address = ?,
-           spouse_name = ?,
-           spouse_last_name = ?,
-           spouse_email = ?,
-           spouse_phone = ?`;
+    let sql = `UPDATE \`user\` SET
+           ${KEEP('name')}, ${KEEP('first_name')}, ${KEEP('last_name')},
+           ${KEEP('mobile')}, ${KEEP('email')}, ${KEEP('business')},
+           ${KEEP('organization_name')}, ${KEEP('license_number')},
+           ${KEEP('license_state')}, ${KEEP('address')},
+           ${KEEP('spouse_name')}, ${KEEP('spouse_last_name')},
+           ${KEEP('spouse_email')}, ${KEEP('spouse_phone')}`;
     const params = [
-      name || null,
-      first_name != null ? (first_name || '') : null,
-      last_name != null ? (last_name || '') : null,
-      mobile || null,
-      email || null,
-      business_name || null,
-      business_name || null,
-      license_number || null,
-      license_state || null,
-      address || null,
-      spouse_name || null,
-      spouse_last_name || null,
-      spouse_email || null,
-      spouse_phone || null,
+      name, first_name, last_name, mobile, email, business_name, business_name,
+      license_number, license_state, address,
+      spouse_name, spouse_last_name, spouse_email, spouse_phone,
     ];
     if (stateUpper !== 'CA') {
-      sql += `, cslb_status = ?`;
-      params.push(manual_status || null);
+      sql += `, cslb_status = COALESCE(NULLIF(TRIM(?), ''), cslb_status)`;
+      params.push(manual_status);
     }
     sql += ` WHERE id = ?`;
     params.push(contact_user_id);
@@ -2397,11 +2502,33 @@ router.post('/save-contact', auth.authenticateToken, async (req, res) => {
     await ensureContactStatusColumn(connection);
     const now = getTimeStamp();
 
-    // Find or create the user (same mapping as the job invite flow)
+    // §2 SCOPE (security): reuse an existing row for this email ONLY when it is
+    // in the caller's own account (a contact of the account, or created by it).
+    // A row belonging to another company is off-limits — reusing it would link
+    // and enrich across the tenant boundary. If the email is taken by an
+    // out-of-account row, report it taken rather than reaching into it.
+    const ACCT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
     const [[existingUser]] = await connection.query(
-      'SELECT id FROM user WHERE email = ? LIMIT 1', [email]
+      `SELECT u.id FROM user u
+        WHERE u.email = ?
+          AND ( u.created_by IN ${ACCT}
+                OR EXISTS (SELECT 1 FROM contact c
+                            WHERE (c.request_by IN ${ACCT} AND c.request_to = u.id)
+                               OR (c.request_to IN ${ACCT} AND c.request_by = u.id)) )
+        LIMIT 1`,
+      [email, userId, userId, userId, userId, userId, userId]
     );
     let contactUserId = existingUser ? existingUser.id : null;
+
+    if (!contactUserId) {
+      // Email held by another company's row? Taken — no cross-tenant reuse.
+      const [[takenElsewhere]] = await connection.query(
+        'SELECT 1 AS x FROM user WHERE email = ? LIMIT 1', [email]
+      );
+      if (takenElsewhere) {
+        return res.status(409).json({ code: 'EMAIL_TAKEN', message: 'That email address is already in use.' });
+      }
+    }
 
     if (!contactUserId) {
       const newUserRole = user_type === 'client' ? 3 : Number(subcategory);
