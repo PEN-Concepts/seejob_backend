@@ -9,6 +9,10 @@ const { addUserSchema } = require("../models/user");
 const { getAccessMode, resolveOwnerId, isSameAccount, denyExpiredFreeWrites, requireLevel } = require("../utils/access");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
 const { applyLevelRights, applyToggles } = require("../services/permissionLevels");
+// Cross-account ownership guards (IDOR remediation). This router has NO
+// router-level guard, so each of these routes carries its own — the same
+// toolkit the guarded twins in this repo use (e.g. /job-contacts/:job_id).
+const { requireOwnsJob, requireOwnsRecord } = require("../utils/ownership");
 
 // For an expired_free user, keep ONLY appointments created by ANOTHER account
 // (i.e. ones they were invited to). Their OWN account's appointments are locked
@@ -87,7 +91,10 @@ router.get('/get_contacts',auth.authenticateToken, async (req, res) => {
 });
 
 // Fallback: delete appointment(s) by linked task_id (idempotent)
-router.delete('/appointments/by-task/:taskId', auth.authenticateToken, async (req, res) => {
+// The task (and therefore its appointments) must belong to the caller's account.
+// Guard on tasks.created_by so it covers personal (job_id NULL) tasks too, and
+// refuses BEFORE any DELETE runs.
+router.delete('/appointments/by-task/:taskId', auth.authenticateToken, requireOwnsRecord({ table: 'tasks', ownerCol: 'created_by', idKey: 'taskId' }), async (req, res) => {
   const taskIdRaw = req.params.taskId;
   let connection;
   try {
@@ -1189,7 +1196,11 @@ router.post('/appointments', auth.authenticateToken, denyExpiredFreeWrites, asyn
 
 
 // GET /api/tasks/by-job/:job_id
-router.get('/by-job/:job_id', auth.authenticateToken, async (req, res) => {
+// Same account boundary as the guarded twin /job-contacts/:job_id: the job must
+// belong to the caller's account. (This handler also has a pre-existing `db is
+// not defined` bug at the query below — out of scope here; the guard makes it
+// safe if/when that is fixed.)
+router.get('/by-job/:job_id', auth.authenticateToken, requireOwnsJob({ idKey: 'job_id', fixedType: 'job' }), async (req, res) => {
   const { job_id } = req.params;
 
   try {
@@ -1968,7 +1979,8 @@ router.post('/employee-leave', auth.authenticateToken, async (req, res) => {
 });
 
 // ✅ Update Leave Type
-router.put("/update/:id", auth.authenticateToken, async (req, res) => {
+// employees_leaves is owned by its creator (created_by = req.user.id at insert).
+router.put("/update/:id", auth.authenticateToken, requireOwnsRecord({ table: 'employees_leaves', ownerCol: 'created_by', idKey: 'id' }), async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -1992,7 +2004,7 @@ router.put("/update/:id", auth.authenticateToken, async (req, res) => {
 });
 
 // ✅ Delete Leave Type
-router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
+router.delete("/delete/:id", auth.authenticateToken, requireOwnsRecord({ table: 'employees_leaves', ownerCol: 'created_by', idKey: 'id' }), async (req, res) => {
   let connection;
   try {
     connection = await pool.getConnection();
@@ -2009,7 +2021,9 @@ router.delete("/delete/:id", auth.authenticateToken, async (req, res) => {
   }
 });
 
-router.get("/get_job_contacts/:job_id", auth.authenticateToken, async (req, res) => {
+// Returns contact PII (name, email, mobile). Same account boundary as the
+// guarded twin /job-contacts/:job_id — the job must be the caller's.
+router.get("/get_job_contacts/:job_id", auth.authenticateToken, requireOwnsJob({ idKey: 'job_id', fixedType: 'job' }), async (req, res) => {
   let connection;
   try {
     const job_id = req.params.job_id;

@@ -6,6 +6,8 @@ const pool = require("../config/connection");
 const Joi = require("joi");
 const logger = require("../common/logger");
 const { addUserSchema } = require("../models/user");
+// Cross-account ownership guard (IDOR remediation) for editing a course by id.
+const { requireOwnsRecord } = require("../utils/ownership");
 const PDFDocument = require("pdfkit");
 const path = require("path");
 const multer = require("multer");
@@ -360,7 +362,9 @@ router.post("/course", auth.authenticateToken, upload.single("file"), async (req
 });
 
 // Update existing safety course
-router.put("/course/:id", auth.authenticateToken, upload.single("file"), async (req, res) => {
+// safety_cours is owned by its creator (created_by, set at insert). The guard
+// runs BEFORE multer so we never accept an upload for a course you don't own.
+router.put("/course/:id", auth.authenticateToken, requireOwnsRecord({ table: 'safety_cours', ownerCol: 'created_by', idKey: 'id' }), upload.single("file"), async (req, res) => {
   const { id } = req.params;
   const { name, description, duration, status, generated_by } = req.body;
 
