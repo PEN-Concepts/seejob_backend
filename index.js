@@ -194,6 +194,8 @@ app.use(`${api}/dashboard`, dashboard);
 app.use(`${api}/translate`, translate);
 app.use(`${api}/bids`, bids);
 app.use(`${api}/reminders`, reminders);
+// Authenticated file serving — replaces nginx's open /uploads (see routes/files).
+app.use(`${api}/files`, require("./routes/files"));
 app.use(`${api}/schedule-templates`, scheduleTemplates);
 app.use(`${api}/job-schedules`, jobSchedules);
 
