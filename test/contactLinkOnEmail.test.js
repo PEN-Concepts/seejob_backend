@@ -66,28 +66,30 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     await conn.query(`INSERT INTO contact (request_by, request_to, status, created_at, updated_at)
                       VALUES (700,354,'Saved',NOW(),NOW())`); // owner <-> placeholder
 
-    // ── Scenario A — edit ING BUILDERS (354) to Ivan's existing email ──
+    // ── Scenario A — REWRITTEN for the safe-merge contract (CCP: contacts fix).
+    // Ivan (286) is NOT a contact of this account and was not created by it — he
+    // belongs to no relationship the owner can see. The OLD code silently linked
+    // to him and enriched his row (a cross-tenant reach). The NEW code REFUSES:
+    // an out-of-account email is simply "taken", with no link and no read of his
+    // row. Same-account merges are covered end-to-end in
+    // contactsSaveMergeDelete.test.js. ──
     const a = await edit({ contact_user_id: 354, name: 'ING BUILDERS', first_name: null, last_name: null,
       email: 'ivanngeovanni@gmail.com', business_name: 'ING BUILDERS', license_number: '1080613',
-      license_state: 'CA', address: '389 VINELAND DR', mobile: '(805) 406-1409' });
-    ok(a.status === 200, 'A: request succeeds (200, no error)', a.status + ' ' + JSON.stringify(a.body));
-    ok(a.body.merged === true, 'A: response says merged (not a dead-end error)', JSON.stringify(a.body));
-    ok(Number(a.body.linked_user_id) === 286, 'A: linked to the existing person (286)', JSON.stringify(a.body));
+      license_state: 'CA', address: '389 VINELAND DR', mobile: '(805) 406-1409', confirmMerge: true });
+    ok(a.status === 409 && a.body.code === 'EMAIL_TAKEN',
+      "A: an out-of-account email is refused, never linked cross-tenant", a.status + ' ' + JSON.stringify(a.body));
 
     const [[ivan]] = await conn.query('SELECT name, email, business, license_number, address FROM user WHERE id = 286');
-    ok(ivan.email === 'ivanngeovanni@gmail.com', 'A: existing person keeps their (unique) email', JSON.stringify(ivan));
-    ok(ivan.name === 'Ivan Lopez', 'A: existing person NAME not overwritten (additive only)', JSON.stringify(ivan));
-    ok(ivan.business === 'ING BUILDERS', 'A: company name filled onto the blank field', JSON.stringify(ivan));
-    ok(ivan.license_number === '1080613', 'A: license filled onto the blank field', JSON.stringify(ivan));
-
+    ok(ivan.name === 'Ivan Lopez' && ivan.email === 'ivanngeovanni@gmail.com' && ivan.business === null && ivan.license_number === null,
+      "A: Ivan's row is UNTOUCHED — no cross-tenant enrich", JSON.stringify(ivan));
     const [[edgeToIvan]] = await conn.query('SELECT id FROM contact WHERE request_by=700 AND request_to=286 LIMIT 1');
-    ok(!!edgeToIvan, 'A: owner is now linked to the existing person', JSON.stringify(edgeToIvan));
+    ok(!edgeToIvan, 'A: no link was created to the out-of-account person', JSON.stringify(edgeToIvan));
     const [oldEdges] = await conn.query('SELECT id FROM contact WHERE (request_by=700 AND request_to=354) OR (request_by=354 AND request_to=700)');
-    ok(oldEdges.length === 0, 'A: the old placeholder link was removed (no duplicate in the list)', JSON.stringify(oldEdges));
+    ok(oldEdges.length === 1, "A: the edited row's own link is untouched by the refusal", JSON.stringify(oldEdges));
 
     // ── Email uniqueness is preserved (login-by-email stays unambiguous) ──
     const [dupes] = await conn.query("SELECT email, COUNT(*) c FROM user WHERE email IS NOT NULL AND email <> '' GROUP BY email HAVING c > 1");
-    ok(dupes.length === 0, 'no two users share an email after the merge (OTP login safe)', JSON.stringify(dupes));
+    ok(dupes.length === 0, 'no two users share an email (OTP login safe)', JSON.stringify(dupes));
 
     // ── Scenario B — normal edit to a brand-new email is unchanged behaviour ──
     await conn.query(`INSERT INTO user (id, name, email, category, subcategory, status) VALUES (355,'P&C PLASTERING','lic-897944@no-email.invalid',2,12,1)`);
