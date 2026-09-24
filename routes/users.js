@@ -1574,6 +1574,23 @@ router.post("/revoke-access/:id", auth.authenticateToken, async (req, res) => {
 
 router.get("/images/:imageName", auth.authenticateToken, async (req, res) => {
   const imageName = req.params.imageName;
+  // SECURITY: was a bare file-serve — no ownership check and, unlike
+  // notepads/view, no traversal guard. Now it refuses a name that could escape
+  // the uploads dir, and refuses a file the caller's account does not own.
+  const { isSafeName, callerOwnsFile } = require("../services/fileAccess");
+  if (!isSafeName(imageName)) return res.status(400).json({ message: "Invalid file name" });
+  let ownConn;
+  try {
+    ownConn = await pool.getConnection();
+    const callerId = (req.user && req.user.id) || res.locals.id;
+    if (!(await callerOwnsFile(ownConn, callerId, imageName))) {
+      return res.status(403).json({ message: "This file does not belong to your account." });
+    }
+  } catch (e) {
+    return res.status(403).json({ message: "Forbidden" }); // fail closed
+  } finally {
+    if (ownConn) ownConn.release();
+  }
   viewImage(imageName, (result) => {
     if (result.error) {
       res.status(404).json({ message: result.error });
