@@ -33,7 +33,14 @@ const note = (m) => rec.push('  · ' + m);
     const request = require('supertest');
     const jwt = require('jsonwebtoken');
 
-    await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT NULL, category INT NULL, status INT DEFAULT 1, created_by INT NULL, business_name VARCHAR(190) NULL, created_at DATETIME NULL)");
+    // `business`, `trade` and `subcategory` are read by the subcontractor
+    // picker (CHECK 16): company first, owner underneath, trade searchable.
+    // Without them the endpoint 500s and CHECK 16 measures nothing.
+    await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT NULL, category INT NULL, subcategory INT NULL, status INT DEFAULT 1, created_by INT NULL, business VARCHAR(190) NULL, trade VARCHAR(120) NULL, business_name VARCHAR(190) NULL, created_at DATETIME NULL)");
+    await conn.query("CREATE TABLE category (id INT PRIMARY KEY, name VARCHAR(80))");
+    await conn.query("CREATE TABLE subcategory (id INT PRIMARY KEY, name VARCHAR(80), category_id INT NULL)");
+    await conn.query("INSERT INTO category VALUES (1,'Employee'),(2,'Contractor'),(3,'Client')");
+    await conn.query("INSERT INTO subcategory VALUES (12,'Subcontractor',2)");
     await conn.query("CREATE TABLE `job` (id INT PRIMARY KEY, name VARCHAR(150), job_number VARCHAR(40) NULL, created_by INT NULL, status INT DEFAULT 1, created_at DATETIME NULL)");
     await conn.query("CREATE TABLE contact (id INT PRIMARY KEY AUTO_INCREMENT, request_by INT NULL, request_to INT NULL, request_user1 INT NULL, request_user2 INT NULL, status INT DEFAULT 0)");
     await conn.query(`CREATE TABLE division_lineitems (
