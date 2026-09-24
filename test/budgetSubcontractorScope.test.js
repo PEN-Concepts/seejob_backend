@@ -40,7 +40,17 @@ const note = (m) => rec.push('  · ' + m);
     const request = require('supertest');
     const jwt = require('jsonwebtoken');
 
-    await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT NULL, status INT DEFAULT 1, category INT NULL, created_by INT NULL, created_at DATETIME NULL)");
+    /* `business`, `trade` and `subcategory` are on this fixture because the
+     * picker query now reads them — company first, owner underneath, and a
+     * search that matches the trade. They are real columns: routes/jobs.js
+     * INSERTs user(… business, trade …) and routes/invitations.js selects
+     * subcategory.name. A fixture missing a column the query reads makes the
+     * endpoint 500 and every isolation assertion below pass on a null list. */
+    await conn.query("CREATE TABLE `user` (id INT PRIMARY KEY, name VARCHAR(120), email VARCHAR(190), role INT NULL, status INT DEFAULT 1, category INT NULL, subcategory INT NULL, business VARCHAR(190) NULL, trade VARCHAR(120) NULL, created_by INT NULL, created_at DATETIME NULL)");
+    await conn.query("CREATE TABLE category (id INT PRIMARY KEY, name VARCHAR(80))");
+    await conn.query("CREATE TABLE subcategory (id INT PRIMARY KEY, name VARCHAR(80), category_id INT NULL)");
+    await conn.query("INSERT INTO category VALUES (1,'Employee'),(2,'Contractor'),(3,'Client'),(4,'Owner')");
+    await conn.query("INSERT INTO subcategory VALUES (12,'Subcontractor',2)");
     await conn.query("CREATE TABLE contact (id INT PRIMARY KEY AUTO_INCREMENT, request_by INT, request_to INT, request_user1 INT NULL, request_user2 INT NULL, status VARCHAR(20) NULL, created_at DATETIME NULL, updated_at DATETIME NULL)");
     await conn.query("CREATE TABLE subscriptions (id INT PRIMARY KEY AUTO_INCREMENT, user_id INT, plan_id INT NULL, status VARCHAR(30), created_at DATETIME NULL)");
     await conn.query("CREATE TABLE plan_features (id INT PRIMARY KEY AUTO_INCREMENT, plan_id INT NULL, feature_key VARCHAR(60))");
@@ -59,7 +69,13 @@ const note = (m) => rec.push('  · ' + m);
       (200,'Beta Owner','beta@example.invalid',14,1,4,NULL,NOW()),
       (201,'Beta Sub One','bsub1@example.invalid',12,1,2,NULL,NOW()),
       (202,'Beta Sub Two','bsub2@example.invalid',12,1,2,NULL,NOW()),
-      (300,'Unconnected Sub','orphan@example.invalid',12,1,2,NULL,NOW())`);
+      (300,'Unconnected Sub','orphan@example.invalid',12,1,2,NULL,NOW()),
+      -- THE NEW SURFACE. The picker used to scope to the CALLER personally
+      -- (c.request_by = ?) and now scopes to the ACCOUNT, the way every other
+      -- picker does. That is a widening, so it gets its own guard: Acme's
+      -- employee adds a contact, Acme sees it, Beta must still not.
+      (110,'Acme Employee','aemp@example.invalid',5,1,1,100,NOW()),
+      (111,'Employee Added Sub','eadd@example.invalid',12,1,2,100,NOW())`);
     await conn.query("INSERT INTO subscriptions (user_id, plan_id, status, created_at) VALUES (100,5,'active',NOW()),(200,5,'active',NOW())");
 
     // Contact links. Acme owns 101 and 102; Beta owns 201 and 202. 300 belongs
@@ -73,7 +89,9 @@ const note = (m) => rec.push('  · ' + m);
     // nobody.
     await conn.query(`INSERT INTO contact (request_by, request_to, created_at) VALUES
       (100,101,NOW()), (102,100,NOW()),
-      (200,201,NOW()), (202,200,NOW())`);
+      (200,201,NOW()), (202,200,NOW()),
+      (100,110,NOW()),
+      (110,111,NOW())`);
 
     // plans.level is derived from the plan NAME by this helper; without it
     // requirePlan cannot resolve a tier and fails closed.
@@ -121,13 +139,25 @@ const note = (m) => rec.push('  · ' + m);
       'a role-12 user with no contact link appears for NOBODY',
       JSON.stringify({ acme, beta }));
 
-    ok(acme && acme.length === 2, 'Acme list is exactly 2, not the whole platform', String(acme && acme.length));
+    // ── THE WIDENED SCOPE, guarded in both directions ───────────────────
+    // The picker now scopes to the ACCOUNT, not the caller, so a contact an
+    // EMPLOYEE typed in is finally visible to the owner. It must go no further
+    // than that: the account boundary is still the boundary.
+    ok(acme && acme.includes('Employee Added Sub'),
+      "a contact added by Acme's EMPLOYEE is visible to Acme — the scope fix",
+      JSON.stringify(acme));
+    ok(beta && !beta.includes('Employee Added Sub'),
+      "and is NOT visible to Beta — widening the scope did not widen the tenant",
+      JSON.stringify(beta));
+
+    // Acme: its 2 subs, its employee, and the sub that employee added.
+    ok(acme && acme.length === 4, 'Acme list is exactly 4, not the whole platform', String(acme && acme.length));
     ok(beta && beta.length === 2, 'Beta list is exactly 2', String(beta && beta.length));
 
     // ── Nothing was written ─────────────────────────────────────────────
     const [[uc]] = await conn.query('SELECT COUNT(*) AS n FROM `user`');
     const [[cc]] = await conn.query('SELECT COUNT(*) AS n FROM contact');
-    ok(Number(uc.n) === 7 && Number(cc.n) === 4,
+    ok(Number(uc.n) === 9 && Number(cc.n) === 6,
       'reading the dropdown wrote nothing — user and contact rows unchanged',
       JSON.stringify({ users: uc.n, contacts: cc.n }));
 

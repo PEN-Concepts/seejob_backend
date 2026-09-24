@@ -309,24 +309,86 @@ router.get(
        * unscoped branch is reintroduced — see the note above, which still
        * stands.
        */
+      /*
+       * §0 — THIRTEEN OF THIRTY-SEVEN, AND THE CAUSE WAS NOT THE CATEGORY FILTER.
+       *
+       * Poul's picker returned 13 names while his contacts hold 33
+       * subcontractors, a GC and 3 employees. The obvious suspect was
+       * `u.category = 2`. It was not. PROVEN by running both queries verbatim
+       * against one fixture (test/budgetSubcontractorScopeProof.test.js):
+       * dropping the category filter recovered 3 rows; changing the SCOPE
+       * recovered 14.
+       *
+       * The clause was `c.request_by = ?` — the CALLER, personally — while
+       * every other picker scopes to the ACCOUNT:
+       *
+       *     WHERE c.request_by IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
+       *
+       * So any contact an EMPLOYEE typed in was invisible here and visible
+       * everywhere else. Nothing in the UI shows who added a contact, which is
+       * why the missing names looked arbitrary.
+       *
+       * This is the SAME tenant boundary get-task-users already applies to the
+       * same table — not a widening of who may be seen, a correction of who was
+       * wrongly hidden.
+       *
+       * ── WHY THE FILTER IS A POSITIVE ALLOWLIST ────────────────────────────
+       *
+       * `category = 2` is not "is a subcontractor": the general contractor
+       * carries it too, so category cannot tell them apart. And a negative test
+       * (!isClient) would admit every category the code has never seen. So the
+       * rule names what it wants — CONTRACTORS and EMPLOYEES — and anything
+       * unrecognised is absent. Clients never appear: a budget line is work
+       * somebody does, and a client is who the bill goes to.
+       *
+       * The effective category mirrors get-task-users: a subcategory's parent
+       * wins over the raw column, so a contact filed under a subcategory is
+       * classified the way Contacts classifies it.
+       *
+       * `business` is selected because the picker renders COMPANY FIRST. The old
+       * query selected only id/name/email, which is the whole reason owner names
+       * were showing. `trade` and `subcategory_name` come with it so the one
+       * search box can match COMPANY, OWNER and TRADE, as the picker spec asks:
+       * typing `tile` finds C & R TILE & STONE, typing `Rolando` finds the same
+       * row. Neither is rendered.
+       *
+       * The CALLER IS EXCLUDED — Poul must not appear in his own subcontractor
+       * list. He reaches this query through the reverse branch, being category 2
+       * himself.
+       */
       const [rows] = await connection.query(
-        `(
-          SELECT u.id, u.name, u.email
-          FROM contact c
-          INNER JOIN user u ON u.id = c.request_to
-          WHERE c.request_by = ?
-            AND u.category = 2
-        )
-        UNION
-        (
-          SELECT u.id, u.name, u.email
-          FROM contact c
-          INNER JOIN user u ON u.id = c.request_by
-          WHERE c.request_to = ?
-            AND u.category = 2
-        )
-        ORDER BY name ASC, id ASC`,
-        [userId, userId]
+        `SELECT p.id, p.name, p.email, p.business, p.trade, p.category,
+                p.subcategory, p.subcategory_name,
+                p.effective_category_id, p.effective_category_name
+         FROM (
+           (
+             SELECT u.id, u.name, u.email, u.business, u.trade, u.category, u.subcategory,
+                    COALESCE(sc.category_id, u.category) AS effective_category_id,
+                    cat.name AS effective_category_name,
+                    sc.name AS subcategory_name
+             FROM contact c
+             INNER JOIN user u ON u.id = c.request_to
+             LEFT JOIN subcategory sc ON sc.id = u.subcategory
+             LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
+             WHERE c.request_by IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
+           )
+           UNION
+           (
+             SELECT u.id, u.name, u.email, u.business, u.trade, u.category, u.subcategory,
+                    COALESCE(sc.category_id, u.category) AS effective_category_id,
+                    cat.name AS effective_category_name,
+                    sc.name AS subcategory_name
+             FROM contact c
+             INNER JOIN user u ON u.id = c.request_by
+             LEFT JOIN subcategory sc ON sc.id = u.subcategory
+             LEFT JOIN category cat ON cat.id = COALESCE(sc.category_id, u.category)
+             WHERE c.request_to IN (SELECT id FROM user WHERE id = ? OR created_by = ?)
+           )
+         ) p
+         WHERE p.id <> ?
+           AND COALESCE(p.effective_category_id, p.category) IN (1, 2, 4, 5)
+         ORDER BY COALESCE(NULLIF(TRIM(p.business), ''), p.name) ASC, p.id ASC`,
+        [userId, userId, userId, userId, userId]
       );
       return res.json(rows);
     } catch (err) {
