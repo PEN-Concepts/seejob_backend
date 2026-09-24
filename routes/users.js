@@ -11,6 +11,9 @@ const { getCurrentDateTime, getTimeStamp } = require("../common/timdate");
 const { getAccessInfo, isSameAccount, getActivePlanLevel, OWNER_EXEMPT_EMAILS, getAccessMode, hasLevelAtLeast } = require("../utils/access");
 const { ensureOwnerTypeColumns, ensureContactAuthorityColumn, ensureOtpAttemptsColumn } = require("../services/dbMigrations");
 const { getContactScope, visibleUserPredicate } = require("../utils/contactVisibility");
+// Cross-account ownership guards (IDOR remediation) for the by-id write/delete
+// routes that had no company check.
+const { requireOwnsRecord, requireOwnsRecordViaJob } = require("../utils/ownership");
 const path = require("path");
 const multer = require("multer");
 const fs = require("fs");
@@ -3728,7 +3731,9 @@ router.put(
   }
 );
 
-router.delete("/daily-report/:id", auth.authenticateToken, async (req, res) => {
+// A daily report belongs to its job's account. Resolve daily_report.job_id -> job
+// and require ownership before the DELETE.
+router.delete("/daily-report/:id", auth.authenticateToken, requireOwnsRecordViaJob({ table: 'daily_report', jobCol: 'job_id', idKey: 'id' }), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -3860,7 +3865,9 @@ router.get("/employee-status/:managerId", auth.authenticateToken, async (req, re
   }
 });
 
-router.put("/approve-leave/:leaveId", auth.authenticateToken, async (req, res) => {
+// leave_request is owned by its creator (created_by, set at insert). Approving
+// another company's leave request is refused before the UPDATE.
+router.put("/approve-leave/:leaveId", auth.authenticateToken, requireOwnsRecord({ table: 'leave_request', ownerCol: 'created_by', idKey: 'leaveId' }), async (req, res) => {
   try {
     const { leaveId } = req.params;
     const { approverId } = req.body;
