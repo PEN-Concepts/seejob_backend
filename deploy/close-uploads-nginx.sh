@@ -22,8 +22,17 @@
 # Nothing is changed unless `nginx -t` passes on the new config.
 set -euo pipefail
 
-SITE="${SITE:-/etc/nginx/sites-available/REPLACE_ME}"   # <-- set this
-CHOICE="${CHOICE:-A}"                                    # A = return 404, B = proxy to app
+# The live block is in /etc/nginx/nginx.conf (lines 121-127 as of 2026-09-24):
+#     location /uploads {
+#         alias /home/ubuntu/code/freelance_seejob_node/uploads/;
+#         access_log off;
+#         expires 30d;
+#         autoindex off;
+#         try_files $uri =404;
+#     }
+# Replacement (CHOICE=A): location /uploads { return 404; }
+SITE="${SITE:-/etc/nginx/nginx.conf}"
+CHOICE="${CHOICE:-A}"                                    # A = return 404 (recommended). B = proxy to app.
 APP_UPSTREAM="${APP_UPSTREAM:-http://127.0.0.1:3000}"    # only used for CHOICE=B; set to the pm2 app's port
 
 if [ ! -f "$SITE" ]; then echo "SITE not found: $SITE — set SITE=... (grep -RIl 'location /uploads' /etc/nginx/)"; exit 1; fi
@@ -38,7 +47,9 @@ if [ "$CHOICE" = "B" ]; then
   read -r -d '' NEWBLOCK <<EOF || true
     # /uploads is no longer served from disk. Proxy to the authenticated app
     # route, which checks ownership before streaming (was: open static mount).
-    location /uploads/ {
+    # NOTE: old /uploads/<name> links carry no ?t= token, so they will 401 here;
+    # this only helps if you later add token forwarding. CHOICE=A is cleaner.
+    location /uploads {
         proxy_pass ${APP_UPSTREAM}/api/v1/files/;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -48,7 +59,7 @@ else
   read -r -d '' NEWBLOCK <<'EOF' || true
     # /uploads is no longer served from disk — files go through the
     # authenticated app route (/api/v1/files/:name). Refuse the old open path.
-    location /uploads/ {
+    location /uploads {
         return 404;
     }
 EOF
