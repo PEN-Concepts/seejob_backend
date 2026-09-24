@@ -937,7 +937,24 @@ router.post(
             (path, name, lead_id, mime_type, created_by, created_at, type)
            VALUES (?, ?, ?, ?, ?, NOW(), ?)`,
           [
-            file.path.split(path.sep).join("/"),
+            /* THE PUBLIC PATH, not multer's absolute disk path.
+             *
+             * This stored `file.path` — e.g.
+             *   /home/ubuntu/code/freelance_seejob_node/uploads/1776294121717.jpg
+             * — while routes/jobs.js:2732 and routes/chat.js:112 store
+             * `/uploads/<filename>`. Worse, the lead→job conversion below copies
+             * these rows VERBATIM into job_documents, so a lead's absolute path
+             * became a job document sitting beside relative ones.
+             *
+             * A reader then concatenated it onto the API origin and produced
+             * https://userback.seejobrun.com/home/ubuntu/.../uploads/x.jpg,
+             * which nginx answered 404 before Node ever saw it. Poul could not
+             * open his plans.
+             *
+             * Existing rows are NOT repaired — the shared reader
+             * (src/app/shared/file-url.ts) copes with every shape. This stops
+             * new ones being written wrong. */
+            `/uploads/${file.filename}`,
             file_name || file.originalname,
             job_id,
             file.mimetype,
@@ -1048,7 +1065,20 @@ router.post("/delete-file", auth.authenticateToken, requireLeadOwnership((r) => 
       return res.status(404).json({ message: "File not found" });
     }
 
-    const filePath = rows[0].path;
+    /* RESOLVE THE STORED VALUE TO A DISK PATH — do not trust it to BE one.
+     *
+     * This treated `rows[0].path` as an absolute filesystem path, which worked
+     * only because the writer above stored one. Now that it stores
+     * `/uploads/<filename>` like every other writer,
+     * `fs.existsSync('/uploads/x')` is false and the file would be left on disk
+     * forever — a silent orphan, with the DB row gone and nothing to find it by.
+     *
+     * Taking the BASENAME handles both shapes, so old absolute rows and new
+     * relative ones both delete. Same pattern as routes/jobs.js:2896. */
+    const storedBase = path.basename(String(rows[0].path || ""));
+    const filePath = storedBase
+      ? path.join(__dirname, "..", "uploads", storedBase)
+      : "";
 
     // ðŸ”¥ Delete file from uploads folder
     if (filePath && fs.existsSync(filePath)) {
