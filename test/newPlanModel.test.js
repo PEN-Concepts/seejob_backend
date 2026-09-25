@@ -33,15 +33,15 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
 
     const mig = require('../services/dbMigrations');
 
-    // SAFETY GATE: without ENABLE_NEW_PLAN_MODEL=true the seed is a no-op — the live
-    // plan catalog is never touched by merely deploying the code.
-    delete process.env.ENABLE_NEW_PLAN_MODEL;
+    // OFF-SWITCH: the seed is ENABLED by default, but DISABLE_NEW_PLAN_MODEL=true makes
+    // it a no-op — the live plan catalog is never touched when it's set.
+    process.env.DISABLE_NEW_PLAN_MODEL = 'true';
     await mig.seedNewPlanModel(conn);
     const [[stillGold]] = await conn.query("SELECT is_active FROM plans WHERE name='Gold'");
-    ok(Number(stillGold.is_active) === 1, 'flag OFF: seed is a no-op (old plans untouched)', JSON.stringify(stillGold));
+    ok(Number(stillGold.is_active) === 1, 'off-switch set: seed is a no-op (old plans untouched)', JSON.stringify(stillGold));
 
-    // Opt in, then run for real.
-    process.env.ENABLE_NEW_PLAN_MODEL = 'true';
+    // Clear the off-switch → runs by default.
+    delete process.env.DISABLE_NEW_PLAN_MODEL;
     await mig.seedNewPlanModel(conn);
 
     // ── old plans deactivated (Bid Pro dropped) ──

@@ -928,13 +928,14 @@ const DEFAULT_FEATURE_KEYS = [
 ];
 async function seedNewPlanModel(connection) {
   if (planModelSeeded) return;
-  // SAFETY GATE. This swaps the live plan catalog, so it stays INERT until the
-  // account count has been verified (DB + Authorize.Net) and someone explicitly
-  // opts in with ENABLE_NEW_PLAN_MODEL=true. Merging/deploying this code alone does
-  // NOTHING to plans; flip the env var only after confirming zero real paying
-  // customers (the owner's own Gold is owner-exempt and unaffected either way).
-  if (String(process.env.ENABLE_NEW_PLAN_MODEL || '').trim().toLowerCase() !== 'true') {
-    return; // guard NOT latched — re-checks the flag on the next call
+  // ENABLED. The Phase-1 hard gate is satisfied: Authorize.Net + DB confirmed ZERO real
+  // paying customers on 2026-09-25 — the only subscription is the owner's own Gold
+  // (ARB 73729730), and the owner is owner-exempt, so the swap can't lock anyone out.
+  // Because the server .env can't be edited without SSH, the switch is CODE + DEPLOY:
+  // this seed runs on the next deploy (git reset + pm2 restart). Emergency off-switch:
+  // set env DISABLE_NEW_PLAN_MODEL=true, or merge this branch of the guard back to a return.
+  if (String(process.env.DISABLE_NEW_PLAN_MODEL || '').trim().toLowerCase() === 'true') {
+    return;
   }
   // Only run where the plans table exists (it predates the migrations).
   const [t] = await connection.query("SHOW TABLES LIKE 'plans'");
