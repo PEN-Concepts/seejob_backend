@@ -879,6 +879,7 @@ async function seedStandardNewHomeBuild(connection) {
 // Bid Pro is a separate ADD-ON, not a rung on this ladder, so it deliberately
 // gets NO level (stays NULL) and never grants tier-gated access on its own.
 let planLevelEnsured = false;
+let planModelSeeded = false;
 async function ensurePlanLevelColumn(connection) {
   if (planLevelEnsured) return;
   const [cols] = await connection.query("SHOW COLUMNS FROM plans LIKE 'level'");
@@ -900,6 +901,80 @@ async function ensurePlanLevelColumn(connection) {
       WHERE level IS NULL`
   );
   planLevelEnsured = true;
+}
+
+// ── New team-size plan model (confirmed: no existing subscribers → replace freely) ──
+// Starter $69 (1–3 employees), Team $99 (up to 5), Crew $129 (up to 10); +$15/employee
+// beyond 10 is handled at billing time, not here. ALL features on every plan (each new
+// plan is level 5 = top rung, so every requirePlan gate passes, AND gets every known
+// feature_key so billing/status returns them all). The old 5 plans (Bid Pro/Basic/
+// Bronze/Silver/Gold) are DEACTIVATED (is_active=0) — Bid Pro is dropped per the ruling.
+// The 60-day trial + expired_free (read-only) free tier is the existing access model
+// (utils/access.js) and needs nothing here. Idempotent; safe to re-run.
+const NEW_PLANS = [
+  { name: 'Starter', amount: 69,  seats: 3,  description: '1–3 employees' },
+  { name: 'Team',    amount: 99,  seats: 5,  description: 'Up to 5 employees' },
+  { name: 'Crew',    amount: 129, seats: 10, description: 'Up to 10 employees' },
+];
+// Fallback feature catalog — used only if plan_features is empty (fresh DB). In prod
+// the DISTINCT feature_key set already holds the full catalog from the old plans.
+const DEFAULT_FEATURE_KEYS = [
+  'dashboard', 'spartan', 'job', 'jobs', 'contact', 'contacts', 'task', 'task_manager',
+  'my_daily_tasks', 'checklist', 'lead', 'leads', 'calendar', 'appointment', 'appointments',
+  'quote', 'changeorder', 'change_orders', 'budget', 'billing', 'equipment',
+  'equipment_management', 'user', 'employee_management', 'team', 'team_management',
+  'jobanalysis', 'tailgate_safety_meetings', 'dailysheet', 'daily_job_reports', 'timecard',
+  'materials', 'documents', 'photos', 'chat', 'bid-requests',
+];
+async function seedNewPlanModel(connection) {
+  if (planModelSeeded) return;
+  // Only run where the plans table exists (it predates the migrations).
+  const [t] = await connection.query("SHOW TABLES LIKE 'plans'");
+  if (!t.length) { planModelSeeded = true; return; }
+
+  // max_employees: the plan's included seat cap (employees). Crew's +$15/employee
+  // overage beyond this is applied at billing time (a later step), not here.
+  const [mecol] = await connection.query("SHOW COLUMNS FROM plans LIKE 'max_employees'");
+  if (!mecol.length) await connection.query("ALTER TABLE plans ADD COLUMN max_employees INT NULL");
+
+  // 1) Deactivate every existing plan (old 5 incl. Bid Pro). New rows re-activate below.
+  await connection.query("UPDATE plans SET is_active = 0");
+
+  // 2) Upsert the three new plans, all at level 5 (all-features), monthly.
+  const planIds = {};
+  for (const p of NEW_PLANS) {
+    const [[existing]] = await connection.query("SELECT id FROM plans WHERE name = ? LIMIT 1", [p.name]);
+    if (existing) {
+      await connection.query(
+        "UPDATE plans SET amount = ?, `interval` = 'month', level = 5, is_active = 1, description = ?, max_employees = ? WHERE id = ?",
+        [p.amount, p.description, p.seats, existing.id]
+      );
+      planIds[p.name] = existing.id;
+    } else {
+      const [ins] = await connection.query(
+        "INSERT INTO plans (name, amount, `interval`, is_active, level, description, max_employees) VALUES (?, ?, 'month', 1, 5, ?, ?)",
+        [p.name, p.amount, p.description, p.seats]
+      );
+      planIds[p.name] = ins.insertId;
+    }
+  }
+
+  // 3) All-features: grant every known feature_key to each new plan.
+  const [distinctRows] = await connection.query("SELECT DISTINCT feature_key FROM plan_features");
+  let allKeys = distinctRows.map((r) => r.feature_key).filter(Boolean);
+  if (!allKeys.length) allKeys = DEFAULT_FEATURE_KEYS;
+  for (const planId of Object.values(planIds)) {
+    for (const key of allKeys) {
+      await connection.query(
+        `INSERT INTO plan_features (plan_id, feature_key)
+         SELECT ?, ? FROM DUAL
+         WHERE NOT EXISTS (SELECT 1 FROM plan_features WHERE plan_id = ? AND feature_key = ?)`,
+        [planId, key, planId, key]
+      );
+    }
+  }
+
+  planModelSeeded = true;
 }
 
 // Per-user IANA timezone (e.g. 'America/Los_Angeles'). This is the CANONICAL
@@ -1786,6 +1861,7 @@ module.exports = {
   ensureRemindersTable,
   ensureScheduleTemplateTables,
   ensurePlanLevelColumn,
+  seedNewPlanModel,
   ensureUserTimezoneColumn,
   ensureSubscriptionReverifyColumn,
   ensureReverifyEmailLogTable,
