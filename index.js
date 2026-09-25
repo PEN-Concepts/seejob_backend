@@ -8,7 +8,7 @@ const express = require("express");
 const cors = require("cors");
 const pool = require('./config/connection');
 const logger = require("./common/logger");
-const { ensureOwnerTypeColumns, ensureMaterialsExtraColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureJobColorLockedColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatFilesColumns, ensureInvoiceDocumentSchema, ensureChatBackfill, ensureChatMergeConvertedLeadChats, purgeShoppingLists, ensureEmailSuppressionsTable, ensureSesEventsTable, ensureBlockedSendsTable } = require("./services/dbMigrations");
+const { ensureOwnerTypeColumns, ensureMaterialsExtraColumns, ensureScheduleTemplateTables, ensurePlanLevelColumn, seedNewPlanModel, ensureLeadBidStatusColumn, ensureUserTimezoneColumn, ensureSubscriptionReverifyColumn, ensureReverifyEmailLogTable, ensureJobColorColumn, ensureJobColorLockedColumn, ensureAppointmentAllDayColumn, dropUserMobileUniqueIndex, ensureUserAccountSourceColumn, ensureUserFirstLoginColumn, ensureUserLevelColumn, ensureFamilyFriendSubcategory, ensureSubscriptionPaymentColumns, ensurePaymentReceiptsTable, ensureTaskManagerColumns, ensureTaskAssigneesTable, ensureUserTokenVersionColumn, ensureDeviceTokenUnique, ensureChatTables, ensureChatGroupType, ensureChatReactionsTable, ensureChatMessageEditColumn, ensureChatIconColumn, ensureChatFilesColumns, ensureInvoiceDocumentSchema, ensureChatBackfill, ensureChatMergeConvertedLeadChats, purgeShoppingLists, ensureEmailSuppressionsTable, ensureSesEventsTable, ensureBlockedSendsTable } = require("./services/dbMigrations");
 const { ensureNotepadSchema } = require("./services/notepadSchema");
 const { getCurrentDateTime } = require("./common/timdate")
 const { repaletteOrphanedColors, reassignActiveDiverse } = require("./services/jobColorPalette");
@@ -265,6 +265,7 @@ const startServer = async (retries = 5, delay = 5000) => {
                 await ensureMaterialsExtraColumns(migrationConn);
                 await ensureScheduleTemplateTables(migrationConn);
                 await ensurePlanLevelColumn(migrationConn);
+                await seedNewPlanModel(migrationConn);
                 await ensureLeadBidStatusColumn(migrationConn);
                 await ensureUserTimezoneColumn(migrationConn);
                 await ensureSubscriptionReverifyColumn(migrationConn);
