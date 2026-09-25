@@ -13,7 +13,7 @@ const logger = require('../common/logger');
 const engine = require('../services/scheduleEngine');
 const cascade = require('../services/scheduleCascade');
 const notify = require('../services/notify');
-const { requirePlan, denyRestrictedJobData, isSameAccount, requireLevel } = require('../utils/access');
+const { requireActiveAccess, denyRestrictedJobData, isSameAccount, requireLevel } = require('../utils/access');
 const { ensureScheduleTemplateTables } = require('../services/dbMigrations');
 const { getTimeStamp } = require('../common/timdate');
 
@@ -31,10 +31,10 @@ router.use(async (req, res, next) => {
   }
 });
 
-// PLATINUM-ONLY GATE: every job-schedule operation requires the Platinum plan (server-side
-// 403). authenticateToken runs first so requirePlan can read req.user.
-// Gantt Scheduler data is off-limits to Subcontractors/Clients on ANY job.
-router.use(auth.authenticateToken, denyRestrictedJobData, requirePlan('platinum'));
+// ACCESS GATE: the Schedule is available to all PAID or IN-TRIAL accounts (server-side
+// 403 for expired_free). authenticateToken runs first so the gate can read req.user.
+// Schedule data is off-limits to Subcontractors/Clients on ANY job (denyRestrictedJobData).
+router.use(auth.authenticateToken, denyRestrictedJobData, requireActiveAccess);
 
 // Gantt/schedule EDITING is a Level-4 action (decision #2). Foreman (L3) keeps
 // view-only via the single GET route; every mutation (blank/validate/reorder/
@@ -276,6 +276,11 @@ router.put('/:sid/items/:iid', async (req, res) => {
     if ('pinned_start_date' in b) {
       const p = b.pinned_start_date;
       sets.push('pinned_start_date = ?'); vals.push(p ? String(p).slice(0, 10) : null);
+    }
+    // client_visible: per-row "show on Client View" flag (default 1). Display-only
+    // preference; does not affect dates, deps, or the cascade.
+    if ('client_visible' in b) {
+      sets.push('client_visible = ?'); vals.push(b.client_visible ? 1 : 0);
     }
     // "Start with this item": exactly ONE start per schedule. Marking this item
     // clears the flag from every other item AND drops this item's own deps (a
