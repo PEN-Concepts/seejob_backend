@@ -89,6 +89,24 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const [[healed]] = await conn.query("SELECT COUNT(*) AS n FROM plans WHERE is_active=1 AND name IN ('Starter','Team','Crew')");
     ok(Number(healed.n) === 3, 'self-heals from an all-deactivated state back to 3 active tiers', JSON.stringify(healed));
 
+    // ── SCHEMA DRIFT / FALLBACK: a prod-only NOT NULL column makes the new-plan INSERT
+    //    fail → the seed must re-activate the old plans (never blank) + record the error ──
+    await conn.query("DROP TABLE plan_features");
+    await conn.query("DROP TABLE plans");
+    await conn.query("CREATE TABLE plans (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(80), amount DECIMAL(10,2), `interval` VARCHAR(20), is_active TINYINT DEFAULT 1, level INT NULL, description VARCHAR(190) NULL, required_col VARCHAR(40) NOT NULL) ENGINE=InnoDB");
+    await conn.query("CREATE TABLE plan_features (id INT PRIMARY KEY AUTO_INCREMENT, plan_id INT NULL, feature_key VARCHAR(80)) ENGINE=InnoDB");
+    // Old plans exist but already deactivated (mirrors the current broken prod state).
+    await conn.query("INSERT INTO plans (name, amount, `interval`, is_active, level, required_col) VALUES ('Gold',199,'month',0,4,'x'),('Basic',29,'month',0,1,'x')");
+    delete require.cache[require.resolve('../services/dbMigrations')];
+    const mig4 = require('../services/dbMigrations');
+    await mig4.seedNewPlanModel(conn); // INSERT fails on required_col → rollback → fallback
+    const [[fb]] = await conn.query("SELECT COUNT(*) AS active FROM plans WHERE is_active=1");
+    ok(Number(fb.active) >= 2, 'schema-drift fallback: old plans re-activated (never blank)', JSON.stringify(fb));
+    const [[noNew]] = await conn.query("SELECT COUNT(*) AS n FROM plans WHERE name IN ('Starter','Team','Crew')");
+    ok(Number(noNew.n) === 0, 'schema-drift: no partial new plans created', JSON.stringify(noNew));
+    const err = mig4.getLastPlanSeedError();
+    ok(err && /required_col|default/i.test(err), 'schema-drift: seed error recorded for _diag', err);
+
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);
     conn.release(); if (pool.end) await pool.end(); if (db.stop) await db.stop();
