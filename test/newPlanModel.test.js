@@ -81,6 +81,14 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     const [[dupe]] = await conn.query("SELECT COUNT(*) AS n FROM plans WHERE name='Starter'");
     ok(Number(dupe.n) === 1, 'no duplicate Starter plan on re-run', JSON.stringify(dupe));
 
+    // ── SELF-HEAL: simulate a broken/partial state (all plans deactivated), re-run ──
+    await conn.query("UPDATE plans SET is_active = 0");
+    delete require.cache[require.resolve('../services/dbMigrations')];
+    const mig3 = require('../services/dbMigrations');
+    await mig3.seedNewPlanModel(conn);
+    const [[healed]] = await conn.query("SELECT COUNT(*) AS n FROM plans WHERE is_active=1 AND name IN ('Starter','Team','Crew')");
+    ok(Number(healed.n) === 3, 'self-heals from an all-deactivated state back to 3 active tiers', JSON.stringify(healed));
+
     console.log(rec.join('\n'));
     console.log(`\n${pass} passed, ${fail} failed`);
     conn.release(); if (pool.end) await pool.end(); if (db.stop) await db.stop();

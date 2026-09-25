@@ -941,46 +941,68 @@ async function seedNewPlanModel(connection) {
   const [t] = await connection.query("SHOW TABLES LIKE 'plans'");
   if (!t.length) { planModelSeeded = true; return; }
 
-  // max_employees: the plan's included seat cap (employees). Crew's +$15/employee
-  // overage beyond this is applied at billing time (a later step), not here.
+  // max_employees: the plan's included seat cap (employees). DDL implicitly commits in
+  // MySQL, so it runs OUTSIDE the transaction below. Crew's +$15/employee overage beyond
+  // this cap is applied at billing time (a later step), not here.
   const [mecol] = await connection.query("SHOW COLUMNS FROM plans LIKE 'max_employees'");
   if (!mecol.length) await connection.query("ALTER TABLE plans ADD COLUMN max_employees INT NULL");
 
-  // 1) Deactivate every existing plan (old 5 incl. Bid Pro). New rows re-activate below.
-  await connection.query("UPDATE plans SET is_active = 0");
-
-  // 2) Upsert the three new plans, all at level 5 (all-features), monthly.
-  const planIds = {};
-  for (const p of NEW_PLANS) {
-    const [[existing]] = await connection.query("SELECT id FROM plans WHERE name = ? LIMIT 1", [p.name]);
-    if (existing) {
-      await connection.query(
-        "UPDATE plans SET amount = ?, `interval` = 'month', level = 5, is_active = 1, description = ?, max_employees = ? WHERE id = ?",
-        [p.amount, p.description, p.seats, existing.id]
-      );
-      planIds[p.name] = existing.id;
-    } else {
-      const [ins] = await connection.query(
-        "INSERT INTO plans (name, amount, `interval`, is_active, level, description, max_employees) VALUES (?, ?, 'month', 1, 5, ?, ?)",
-        [p.name, p.amount, p.description, p.seats]
-      );
-      planIds[p.name] = ins.insertId;
-    }
-  }
-
-  // 3) All-features: grant every known feature_key to each new plan.
+  // Feature catalog (read before the transaction).
   const [distinctRows] = await connection.query("SELECT DISTINCT feature_key FROM plan_features");
   let allKeys = distinctRows.map((r) => r.feature_key).filter(Boolean);
   if (!allKeys.length) allKeys = DEFAULT_FEATURE_KEYS;
-  for (const planId of Object.values(planIds)) {
-    for (const key of allKeys) {
-      await connection.query(
-        `INSERT INTO plan_features (plan_id, feature_key)
-         SELECT ?, ? FROM DUAL
-         WHERE NOT EXISTS (SELECT 1 FROM plan_features WHERE plan_id = ? AND feature_key = ?)`,
-        [planId, key, planId, key]
-      );
+
+  // ALL-OR-NOTHING. Deactivate-then-insert MUST be atomic: if an insert fails (e.g. an
+  // unexpected NOT NULL column on this DB), a bare sequence would leave the catalog with
+  // the old plans already deactivated and no new ones — an empty /plans. Wrapping it in a
+  // transaction means any failure ROLLS BACK to the old plans (still active), never empty.
+  // Re-running also self-heals a prior partial run. A final guard refuses to commit fewer
+  // than the expected number of active plans.
+  await connection.beginTransaction();
+  try {
+    // 1) Deactivate every existing plan (old 5 incl. Bid Pro). New rows re-activate below.
+    await connection.query("UPDATE plans SET is_active = 0");
+
+    // 2) Upsert the three new plans, all at level 5 (all-features), monthly.
+    const planIds = {};
+    for (const p of NEW_PLANS) {
+      const [[existing]] = await connection.query("SELECT id FROM plans WHERE name = ? LIMIT 1", [p.name]);
+      if (existing) {
+        await connection.query(
+          "UPDATE plans SET amount = ?, `interval` = 'month', level = 5, is_active = 1, description = ?, max_employees = ? WHERE id = ?",
+          [p.amount, p.description, p.seats, existing.id]
+        );
+        planIds[p.name] = existing.id;
+      } else {
+        const [ins] = await connection.query(
+          "INSERT INTO plans (name, amount, `interval`, is_active, level, description, max_employees) VALUES (?, ?, 'month', 1, 5, ?, ?)",
+          [p.name, p.amount, p.description, p.seats]
+        );
+        planIds[p.name] = ins.insertId;
+      }
     }
+
+    // 3) All-features: grant every known feature_key to each new plan.
+    for (const planId of Object.values(planIds)) {
+      for (const key of allKeys) {
+        await connection.query(
+          `INSERT INTO plan_features (plan_id, feature_key)
+           SELECT ?, ? FROM DUAL
+           WHERE NOT EXISTS (SELECT 1 FROM plan_features WHERE plan_id = ? AND feature_key = ?)`,
+          [planId, key, planId, key]
+        );
+      }
+    }
+
+    // Guard: never commit an empty/short catalog.
+    const [[chk]] = await connection.query("SELECT COUNT(*) AS n FROM plans WHERE is_active = 1");
+    if (Number(chk.n) < NEW_PLANS.length) {
+      throw new Error(`plan seed produced ${chk.n} active plans (< ${NEW_PLANS.length}) — rolling back`);
+    }
+    await connection.commit();
+  } catch (e) {
+    try { await connection.rollback(); } catch (_) {}
+    throw e; // caller logs; the old plans remain active (rolled back), never an empty catalog
   }
 
   planModelSeeded = true;
