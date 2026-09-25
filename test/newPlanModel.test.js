@@ -22,10 +22,10 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     pool = require('../config/connection'); conn = await pool.getConnection();
 
     // Mirror prod schema for the pre-existing tables.
-    await conn.query("CREATE TABLE plans (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(80), amount DECIMAL(10,2), `interval` VARCHAR(20), is_active TINYINT DEFAULT 1, level INT NULL, description VARCHAR(190) NULL)");
+    await conn.query("CREATE TABLE plans (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(80), amount DECIMAL(10,2), `interval` ENUM('monthly','yearly') NOT NULL DEFAULT 'monthly', is_active TINYINT DEFAULT 1, level INT NULL, description VARCHAR(190) NULL)");
     await conn.query("CREATE TABLE plan_features (id INT PRIMARY KEY AUTO_INCREMENT, plan_id INT NULL, feature_key VARCHAR(80))");
     // The OLD 5 plans + a representative feature catalog on the top plan.
-    await conn.query("INSERT INTO plans (name, amount, `interval`, is_active, level) VALUES ('Bid Pro',19,'month',1,NULL),('Basic',29,'month',1,1),('Bronze',59,'month',1,2),('Silver',99,'month',1,3),('Gold',199,'month',1,4)");
+    await conn.query("INSERT INTO plans (name, amount, `interval`, is_active, level) VALUES ('Bid Pro',19,'monthly',1,NULL),('Basic',29,'monthly',1,1),('Bronze',59,'monthly',1,2),('Silver',99,'monthly',1,3),('Gold',199,'monthly',1,4)");
     const [[gold]] = await conn.query("SELECT id FROM plans WHERE name='Gold'");
     for (const k of ['job', 'contact', 'task', 'checklist', 'quote', 'calendar', 'budget', 'billing', 'equipment', 'user']) {
       await conn.query("INSERT INTO plan_features (plan_id, feature_key) VALUES (?, ?)", [gold.id, k]);
@@ -93,10 +93,10 @@ const ok = (c, m, x) => { c ? pass++ : fail++; rec.push(`${c ? '  ✓' : '  ✗'
     //    fail → the seed must re-activate the old plans (never blank) + record the error ──
     await conn.query("DROP TABLE plan_features");
     await conn.query("DROP TABLE plans");
-    await conn.query("CREATE TABLE plans (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(80), amount DECIMAL(10,2), `interval` VARCHAR(20), is_active TINYINT DEFAULT 1, level INT NULL, description VARCHAR(190) NULL, required_col VARCHAR(40) NOT NULL) ENGINE=InnoDB");
+    await conn.query("CREATE TABLE plans (id INT PRIMARY KEY AUTO_INCREMENT, name VARCHAR(80), amount DECIMAL(10,2), `interval` ENUM('monthly','yearly') NOT NULL DEFAULT 'monthly', is_active TINYINT DEFAULT 1, level INT NULL, description VARCHAR(190) NULL, required_col VARCHAR(40) NOT NULL) ENGINE=InnoDB");
     await conn.query("CREATE TABLE plan_features (id INT PRIMARY KEY AUTO_INCREMENT, plan_id INT NULL, feature_key VARCHAR(80)) ENGINE=InnoDB");
     // Old plans exist but already deactivated (mirrors the current broken prod state).
-    await conn.query("INSERT INTO plans (name, amount, `interval`, is_active, level, required_col) VALUES ('Gold',199,'month',0,4,'x'),('Basic',29,'month',0,1,'x')");
+    await conn.query("INSERT INTO plans (name, amount, `interval`, is_active, level, required_col) VALUES ('Gold',199,'monthly',0,4,'x'),('Basic',29,'monthly',0,1,'x')");
     delete require.cache[require.resolve('../services/dbMigrations')];
     const mig4 = require('../services/dbMigrations');
     await mig4.seedNewPlanModel(conn); // INSERT fails on required_col → rollback → fallback

@@ -971,13 +971,13 @@ async function seedNewPlanModel(connection) {
       const [[existing]] = await connection.query("SELECT id FROM plans WHERE name = ? LIMIT 1", [p.name]);
       if (existing) {
         await connection.query(
-          "UPDATE plans SET amount = ?, `interval` = 'month', level = 5, is_active = 1, description = ?, max_employees = ? WHERE id = ?",
+          "UPDATE plans SET amount = ?, `interval` = 'monthly', level = 5, is_active = 1, description = ?, max_employees = ? WHERE id = ?",
           [p.amount, p.description, p.seats, existing.id]
         );
         planIds[p.name] = existing.id;
       } else {
         const [ins] = await connection.query(
-          "INSERT INTO plans (name, amount, `interval`, is_active, level, description, max_employees) VALUES (?, ?, 'month', 1, 5, ?, ?)",
+          "INSERT INTO plans (name, amount, `interval`, is_active, level, description, max_employees) VALUES (?, ?, 'monthly', 1, 5, ?, ?)",
           [p.name, p.amount, p.description, p.seats]
         );
         planIds[p.name] = ins.insertId;
