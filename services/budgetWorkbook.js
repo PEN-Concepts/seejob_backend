@@ -192,10 +192,14 @@ async function fetchBudgetExportData(connection, { jobId, ownerType, requestedBy
     if (p == null || isNaN(n) || n <= 0) return 0;
     return base * (n / 100);
   };
-  const contingency = pctOf(buildingCost, contingencyPercent);
   const overhead = pctOf(buildingCost, overheadPercent);
   const profit = pctOf(buildingCost, profitPercent);
-  const glInsurance = pctOf(totalClientBudget, glPercent);
+  // GROSS = building cost + profit (Poul's confirmed base — interpretation A).
+  // GL insurance and builder's contingency are % of gross (not building cost /
+  // client budget). Non-circular: gross depends only on buildingCost + profit.
+  const gross = buildingCost + profit;
+  const contingency = pctOf(gross, contingencyPercent);
+  const glInsurance = pctOf(gross, glPercent);
   const projectTotal = buildingCost + constructionServices + contingency + overhead + profit + glInsurance;
 
   // paid_amount is a stored column; the payments table is the detail behind it.
@@ -213,7 +217,7 @@ async function fetchBudgetExportData(connection, { jobId, ownerType, requestedBy
     percents: { contingencyPercent, overheadPercent, profitPercent, glPercent },
     totals: {
       totalClientBudget, totalYourCost, totalPaidToDate, totalRemaining,
-      buildingCost, constructionServices, contingency, overhead, profit,
+      buildingCost, constructionServices, gross, contingency, overhead, profit,
       glInsurance, projectTotal,
       paidFromPayments,
       paidColumnMatchesPayments: Math.abs(paidFromPayments - totalPaidToDate) < 0.005,
@@ -311,9 +315,12 @@ function buildBudgetSheet(wb, data) {
 
   // ── the four totals, boxed across the width ──────────────────────────────
   const t = data.totals;
+  // CLIENT BUDGET tile = full Project Total; YOUR COST tile = raw sub cost + GL
+  // insurance + builder's contingency (NO profit) — Poul's confirmed tile rules,
+  // matching the on-screen Budget summary.
   const boxes = [
-    ['CLIENT BUDGET', t.totalClientBudget, INK],
-    ['YOUR COST', t.totalYourCost, RED],
+    ['CLIENT BUDGET', t.projectTotal, INK],
+    ['YOUR COST', t.totalYourCost + t.glInsurance + t.contingency, RED],
     ['PAID TO DATE', t.totalPaidToDate, GREEN],
     ['REMAINING', t.totalRemaining, INK],
   ];

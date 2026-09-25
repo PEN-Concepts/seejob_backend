@@ -262,8 +262,9 @@ const money = (n) => '$' + Number(n).toFixed(2);
     const expServices = sum((r) => r.amount, (r) => r.div === 17);
     const expOverhead = expBuilding * P.overhead / 100;
     const expProfit = expBuilding * P.profit / 100;
-    const expContingency = expBuilding * P.contingency / 100;
-    const expGl = expClient * P.gl / 100;      // GL is off CLIENT budget, not building cost
+    const expGross = expBuilding + expProfit;   // Poul's confirmed base for GL & contingency
+    const expContingency = expGross * P.contingency / 100;
+    const expGl = expGross * P.gl / 100;        // GL is % of GROSS = building cost + profit
     const expProjectTotal = expBuilding + expServices + expContingency + expOverhead + expProfit + expGl;
 
     const summaryVal = (label) => {
@@ -299,7 +300,8 @@ const money = (n) => '$' + Number(n).toFixed(2);
     })();
     const boxes = boxRow ? [1, 2, 3, 4].map((c) => Number(budget.getRow(boxRow).getCell(c).value)) : [];
     const boxDiffs = [];
-    [['client', boxes[0], expClient], ['your cost', boxes[1], expCost],
+    // CLIENT BUDGET tile = Project Total; YOUR COST tile = raw sub cost + GL + contingency.
+    [['client', boxes[0], expProjectTotal], ['your cost', boxes[1], expCost + expGl + expContingency],
      ['paid', boxes[2], expPaid], ['remaining', boxes[3], expRemaining]]
       .forEach(([l, g, w]) => { if (!(g != null && Math.abs(g - w) < 0.005)) boxDiffs.push(`${l}: ${g} vs ${w}`); });
     ok(boxDiffs.length === 0, 'the four boxed totals equal the independently computed figures', boxDiffs.join(' | '));
