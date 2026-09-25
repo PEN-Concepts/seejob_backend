@@ -928,6 +928,14 @@ const DEFAULT_FEATURE_KEYS = [
 ];
 async function seedNewPlanModel(connection) {
   if (planModelSeeded) return;
+  // SAFETY GATE. This swaps the live plan catalog, so it stays INERT until the
+  // account count has been verified (DB + Authorize.Net) and someone explicitly
+  // opts in with ENABLE_NEW_PLAN_MODEL=true. Merging/deploying this code alone does
+  // NOTHING to plans; flip the env var only after confirming zero real paying
+  // customers (the owner's own Gold is owner-exempt and unaffected either way).
+  if (String(process.env.ENABLE_NEW_PLAN_MODEL || '').trim().toLowerCase() !== 'true') {
+    return; // guard NOT latched — re-checks the flag on the next call
+  }
   // Only run where the plans table exists (it predates the migrations).
   const [t] = await connection.query("SHOW TABLES LIKE 'plans'");
   if (!t.length) { planModelSeeded = true; return; }
