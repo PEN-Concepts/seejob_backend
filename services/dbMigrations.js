@@ -880,6 +880,8 @@ async function seedStandardNewHomeBuild(connection) {
 // gets NO level (stays NULL) and never grants tier-gated access on its own.
 let planLevelEnsured = false;
 let planModelSeeded = false;
+let lastPlanSeedError = null;
+function getLastPlanSeedError() { return lastPlanSeedError; }
 async function ensurePlanLevelColumn(connection) {
   if (planLevelEnsured) return;
   const [cols] = await connection.query("SHOW COLUMNS FROM plans LIKE 'level'");
@@ -1002,9 +1004,20 @@ async function seedNewPlanModel(connection) {
     await connection.commit();
   } catch (e) {
     try { await connection.rollback(); } catch (_) {}
-    throw e; // caller logs; the old plans remain active (rolled back), never an empty catalog
+    // Record the exact failure for the temporary /payments/plans/_diag endpoint.
+    lastPlanSeedError = (e && e.message) || String(e);
+    // SAFETY FALLBACK — never a blank catalog. Rollback undoes only THIS transaction's
+    // deactivation; a PRIOR non-atomic run may have already committed the old plans to
+    // is_active=0, which rollback can't restore. So re-activate every existing plan
+    // (the old catalog) after any failure, so GET /plans is never empty while we fix
+    // the schema mismatch. Runs outside the rolled-back tx (autocommit).
+    try { await connection.query("UPDATE plans SET is_active = 1"); } catch (_) {}
+    // Do NOT re-throw: let the rest of the startup migrations run, and keep the page
+    // working on the old plans. The error is surfaced via _diag instead.
+    return;
   }
 
+  lastPlanSeedError = null;
   planModelSeeded = true;
 }
 
@@ -1893,6 +1906,7 @@ module.exports = {
   ensureScheduleTemplateTables,
   ensurePlanLevelColumn,
   seedNewPlanModel,
+  getLastPlanSeedError,
   ensureUserTimezoneColumn,
   ensureSubscriptionReverifyColumn,
   ensureReverifyEmailLogTable,
