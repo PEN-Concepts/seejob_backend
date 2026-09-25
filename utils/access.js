@@ -619,6 +619,35 @@ function denyExpiredFreeWrites(req, res, next) {
 }
 
 /**
+ * Express middleware: allow only PAID or IN-TRIAL accounts (block expired_free).
+ * The "available to all paid tiers + 60-day trial" gate for features that used to be
+ * plan-locked (e.g. the Schedule, formerly Platinum-only). Reads + writes both pass
+ * for paid/trial and 403 for a dead trial. Apply AFTER auth.authenticateToken.
+ * Fails OPEN on a lookup error, matching denyExpiredFreeWrites.
+ */
+function requireActiveAccess(req, res, next) {
+  const userId = req.user && req.user.id ? req.user.id : (res.locals && res.locals.id);
+  if (!userId) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
+  getAccessMode(userId)
+    .then((mode) => {
+      if (mode === "expired_free") {
+        return res.status(403).json({
+          success: false,
+          code: "TRIAL_EXPIRED",
+          message: "Your free trial has ended. Your data is saved — upgrade to use this again.",
+        });
+      }
+      return next();
+    })
+    .catch((err) => {
+      logger.error("requireActiveAccess error: " + err.message);
+      return next(); // fail open
+    });
+}
+
+/**
  * Express middleware: block WITHIN-JOB data that a Subcontractor (category 2) or
  * Client (category 3) must never see, on ANY job — Documents, Pictures, Contracts,
  * Budget, Billing, Stages, the full Task list, and the Gantt Scheduler. This is a
@@ -696,6 +725,7 @@ module.exports = {
   blockExpiredOwnJob,
   blockExpiredOwnRecord,
   denyExpiredFreeWrites,
+  requireActiveAccess,
   denyRestrictedJobData,
   PLAN_LEVELS,
   getActivePlanLevel,

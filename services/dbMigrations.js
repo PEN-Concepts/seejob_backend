@@ -720,6 +720,10 @@ async function ensureScheduleTemplateTables(connection) {
   // Distinct from "has no dependencies" — an untouched item is blank, not a start.
   // Drives the dependency-derived row order (the start item leads at position 1).
   await ensureScheduleColumn(connection, 'job_schedule_items', 'is_start', 'TINYINT NOT NULL DEFAULT 0');
+  // client_visible: per-row "show this on the Client View" flag. Default 1 (new rows
+  // start visible). The Client View PAGE is a later CCP — this only stores the flag
+  // so it is ready. Idempotent; existing rows backfill to visible.
+  await ensureScheduleColumn(connection, 'job_schedule_items', 'client_visible', 'TINYINT NOT NULL DEFAULT 1');
 
   await seedStandardNewHomeBuild(connection);
   await markSeedInspections(connection);
