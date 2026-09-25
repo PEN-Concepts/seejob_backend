@@ -620,15 +620,24 @@ router.post('/sync-invites', auth.authenticateToken, async (req, res) => {
 });
 
 router.get('/accepted-contacts', auth.authenticateToken, async (req, res) => {
-  // Account-wide: contacts belong to the company. Resolve the account owner
-  // (working_id) and include every contact added by anyone on the account
-  // (owner + employees), so the whole team sees the same contact list.
-  const ownerId = res.locals.working_id || req.user.id;
   let connection;
 
   try {
     connection = await pool.getConnection();
     await ensureCslbColumns(connection);
+
+    // Contact VISIBILITY scope — the "view all company contacts" authority.
+    //   • the account OWNER, and Employees granted can_view_all_contacts=1, resolve
+    //     to the account owner → they see the WHOLE company contact book.
+    //   • everyone else (and trial-expired accounts) resolve to themselves.
+    // Before: this read res.locals.working_id, which authenticateToken NEVER sets,
+    // so it always fell back to req.user.id. A can-view-all Employee was therefore
+    // still pinned to their own contacts — they saw only a partial book (e.g. 22 of
+    // 37 subs, no GC, no leads) even with the authority on. getContactScope consults
+    // the flag (and trial-expired state) exactly the way the Assign-To picker
+    // (get-task-users) already does, and stays inside the account boundary.
+    const { scope_id } = await getContactScope(connection, req);
+    const ownerId = scope_id;
 
     // The displayed person is the party that is NOT an account member.
     const ACCOUNT = '(SELECT id FROM `user` WHERE id = ? OR created_by = ?)';
