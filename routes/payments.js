@@ -11,7 +11,7 @@ const { grantNotepadCreate } = require("../services/permissionLevels");
 const { sendEmail, isRealEmail } = require("../services/notify");
 const { defaultReplyTo } = require("../services/mailReplyTo");
 const { previewAccountDeletion, cascadeDeleteAccount } = require("../services/accountDelete");
-const { ensureWebhookEventsTable, ensurePaymentReceiptsTable, getLastPlanSeedError } = require("../services/dbMigrations");
+const { ensureWebhookEventsTable, ensurePaymentReceiptsTable } = require("../services/dbMigrations");
 
 // Authorize.Net SDK
 const { APIControllers, APIContracts } = require("authorizenet");
@@ -747,42 +747,6 @@ router.get("/plans", authenticateToken, async (req, res) => {
   } catch (err) {
     logger.error("/payments/plans error: " + err.message);
     return res.status(500).json({ success: false, message: "Unable to load plans." });
-  } finally {
-    if (connection) connection.release();
-  }
-});
-
-// ⚠️ TEMPORARY DIAGNOSTIC — REMOVE AFTER USE. Returns the live `plans` table schema
-// (column name, nullable, default, type) + current plan rows + the last plan-seed error,
-// so the new-plan INSERT can be matched to the real prod columns (schema drift). Left
-// UNAUTHENTICATED on purpose so it opens directly in a browser; it exposes only column
-// metadata, plan names/prices (public marketing info), and an error string — no user data.
-router.get("/plans/_diag", async (req, res) => {
-  let connection;
-  try {
-    connection = await pool.getConnection();
-    const [columns] = await connection.query(
-      `SELECT COLUMN_NAME, IS_NULLABLE, COLUMN_DEFAULT, DATA_TYPE, COLUMN_TYPE, EXTRA
-         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'plans'
-        ORDER BY ORDINAL_POSITION`
-    );
-    const [[counts]] = await connection.query(
-      "SELECT COUNT(*) AS total, SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active FROM plans"
-    );
-    const [plans] = await connection.query(
-      "SELECT id, name, amount, is_active, level FROM plans ORDER BY id"
-    );
-    return res.json({
-      note: "TEMPORARY diagnostic — remove after use",
-      table: "plans",
-      counts,
-      lastSeedError: typeof getLastPlanSeedError === "function" ? getLastPlanSeedError() : null,
-      columns,
-      plans,
-    });
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
   } finally {
     if (connection) connection.release();
   }
